@@ -1,0 +1,19 @@
+{% if patient_first_name -%}
+Hi {{ patient_first_name }},
+{% else -%}
+Hello,
+{% endif %}
+quick reminder for the appointment "{{ event_title }}" scheduled at {{ event_when_local }}{% if event_where %} at {{ event_where }}{% endif %}.
+
+{% if event_meeting_url -%}
+Join link: {{ event_meeting_url }}
+
+{% endif -%}
+{% if app_url -%}
+Open the record: {{ app_url }}
+
+{% endif -%}
+If you no longer want to receive these reminders, unsubscribe here:
+{{ opt_out_url }}
+
+— bitvision phoenix

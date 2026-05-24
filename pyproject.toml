@@ -1,0 +1,75 @@
+# Root workspace for all Python services in the monorepo.
+# Creates a single .venv at the repo root with all four services installed
+# editable. Activate once, work across all services.
+#
+#   uv sync --all-packages       # install everything
+#   uv run --package bvphoenix pytest   # run tests for one service
+#   uv run ruff check .          # lint everything
+
+[project]
+name = "bitvision-phoenix"
+version = "0.0.0"
+description = "bitvision phoenix — monorepo workspace"
+readme = "README.md"
+requires-python = ">=3.12"
+license = { text = "AGPL-3.0-or-later" }
+# No runtime dependencies at the workspace root — each member declares its own.
+dependencies = []
+
+[tool.uv]
+# This workspace itself is not built or published.
+package = false
+
+[tool.uv.workspace]
+members = ["backend", "workers", "crawler", "mcp"]
+
+[tool.uv.sources]
+bvphoenix = { workspace = true }
+bvworkers = { workspace = true }
+bvcrawler = { workspace = true }
+bvmcp = { workspace = true }
+# Pull torch/torchvision from the PyTorch CPU index. The reference
+# production cluster is ARM64 with no NVIDIA GPU, but the default PyPI
+# torch wheels declare the (aarch64-published) nvidia-cu13 CUDA stack
+# as hard deps — several GB of cuDNN / NCCL / cuBLAS / ... that are
+# never loaded on a CPU box. The CPU index ships the same torch
+# without those deps, cutting the backend/workers images by multiple
+# GB (faster pulls, lower DiskPressure risk on the Kapsule nodes).
+torch = [{ index = "pytorch-cpu" }]
+torchvision = [{ index = "pytorch-cpu" }]
+
+[[tool.uv.index]]
+name = "pytorch-cpu"
+url = "https://download.pytorch.org/whl/cpu"
+explicit = true
+
+[dependency-groups]
+# Shared dev tooling for the whole workspace.
+dev = [
+    "ruff>=0.8.0",
+    "mypy>=1.13.0",
+    "pytest>=8.3.0",
+    "pytest-asyncio>=0.24.0",
+    "httpx>=0.28.0",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+extend-exclude = [".venv", "node_modules", ".next", "dist", "build"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "N", "UP", "B", "C4", "SIM", "RUF"]
+ignore = ["E501"]
+
+[tool.ruff.format]
+quote-style = "double"
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["backend/tests", "workers/tests", "crawler/tests", "mcp/tests"]
+
+[tool.mypy]
+python_version = "3.12"
+strict = true
+exclude = ["\\.venv", "node_modules"]

@@ -1,0 +1,19 @@
+[project]
+name = "bvp-fascicolo-consultation-example"
+version = "0.0.1"
+description = "End-to-end multimodal fascicolo consultation agent for bitvision phoenix"
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "AGPL-3.0-or-later" }
+authors = [{ name = "bitvision phoenix contributors" }]
+dependencies = [
+    "httpx>=0.28.0",
+    "anthropic>=0.40.0",
+]
+
+[tool.uv]
+package = false
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"

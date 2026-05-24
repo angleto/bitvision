@@ -1,0 +1,45 @@
+name: OpenAPI snapshot drift
+
+# Runs on dev-branch pushes and PRs that touch the backend or the
+# snapshot tooling, so the OpenAPI-drift badge reflects ``v3.10`` health.
+on:
+  push:
+    branches: [v3.10]
+    paths:
+      - "backend/**"
+      - "scripts/dump_openapi.py"
+      - "scripts/check_openapi_diff.py"
+      - ".github/workflows/openapi-check.yml"
+  pull_request:
+    branches: [v3.10]
+    paths:
+      - "backend/**"
+      - "scripts/dump_openapi.py"
+      - "scripts/check_openapi_diff.py"
+      - ".github/workflows/openapi-check.yml"
+
+concurrency:
+  group: openapi-check-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  openapi-snapshot:
+    name: openapi.json drift check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+      - working-directory: backend
+        env:
+          # The check imports ``bvphoenix.main``, which fails fast in
+          # production env without a JWT_SECRET. Use development env
+          # so the import side effects (PHI redaction, startup checks)
+          # don't trip CI.
+          BVP_ENV: development
+          BVP_JWT_SECRET: dev-jwt-secret-change-me
+        run: |
+          uv sync --extra dev
+          uv run python ../scripts/check_openapi_diff.py

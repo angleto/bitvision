@@ -1,0 +1,94 @@
+[project]
+name = "bvworkers"
+version = "0.0.1"
+description = "bitvision phoenix — async workers (DICOM ingestion, embeddings, LLM jobs)"
+readme = "README.md"
+requires-python = ">=3.12"
+license = { text = "AGPL-3.0-or-later" }
+authors = [{ name = "bitvision phoenix contributors" }]
+dependencies = [
+    # Workers task modules (export_patient_zip, embed_series,
+    # ingest_bulk_files, …) all import from ``bvphoenix.*`` for the
+    # DB models, the S3 storage wrapper and shared services. Without
+    # this path-dep on the sibling backend package every task fails
+    # at import time with ``ModuleNotFoundError: No module named
+    # 'bvphoenix'`` — confirmed in production 2026-04-30.
+    "bvphoenix",
+    "arq>=0.26.0",
+    "pydantic>=2.9.0",
+    "pydantic-settings>=2.6.0",
+    "sqlalchemy[asyncio]>=2.0.36",
+    "asyncpg>=0.30.0",
+    "boto3>=1.35.0",
+    "pydicom>=3.0.0",
+    "highdicom>=0.24.0",
+    "SimpleITK>=2.4.0",
+    "nibabel>=5.3.0",
+    "numpy>=2.1.0",
+    "structlog>=24.4.0",
+    "httpx>=0.28.0",
+]
+
+[tool.uv.sources]
+# Workers + backend share the same monorepo via the top-level uv
+# workspace; mark bvphoenix as a workspace member so workers can
+# call shared services without duplicating code. The Dockerfile
+# stages the backend tree alongside workers/ so the path resolves.
+bvphoenix = { workspace = true }
+
+[project.optional-dependencies]
+# Heavy AI deps kept optional so the worker can run lean when only
+# doing ingestion. Enable with `uv sync --extra ai`.
+ai = [
+    "torch>=2.5.0",
+    "torchvision>=0.20.0",
+    "monai>=1.4.0",
+    "torchio>=0.20.0",
+    "open-clip-torch>=2.28.0",
+    "sentence-transformers>=2.7.0",
+]
+# Auto segmentation engine. ``totalsegmentator`` ships its own pinned
+# ``torch``, so we don't co-pin it with the ``ai`` extra (versions can
+# drift). Enable with ``uv sync --extra seg`` on the worker host.
+#
+# Interactive segmentation (MedSAM / SAM-2) is deliberately NOT
+# included here: there's no stable PyPI release under a single name
+# (different forks publish as ``sam2``, ``segment-anything-2``,
+# ``medsam``, ...). Install the one you actually want manually:
+#
+#   uv pip install --no-deps git+https://github.com/facebookresearch/sam2.git
+#   # or, when MedSAM-2 is published on PyPI:
+#   uv pip install medsam
+#
+# The interactive worker task imports ``sam2`` lazily and surfaces a
+# clear "not installed" error when missing, so the rest of the
+# platform keeps working without it.
+seg = [
+    "totalsegmentator>=2.4.0",
+]
+dev = [
+    "pytest>=8.3.0",
+    "pytest-asyncio>=0.24.0",
+    "ruff>=0.8.0",
+    "mypy>=1.13.0",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/bvworkers"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "N", "UP", "B", "C4", "SIM", "RUF"]
+ignore = ["E501"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]

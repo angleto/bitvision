@@ -1,0 +1,137 @@
+# Development infrastructure for bitvision phoenix.
+# Brings up Postgres (with pgvector), Redis, MinIO, plus the
+# application services (backend, workers) and a one-shot migrator.
+# Frontend, crawler and MCP run on the host in dev for faster
+# iteration; see the Makefile.
+
+name: bvphoenix
+
+x-backend-env: &backend-env
+  BVP_ENV: "docker"
+  BVP_DATABASE_URL: "postgresql+asyncpg://bvphoenix:bvphoenix@postgres:5432/bvphoenix"
+  BVP_DATABASE_URL_SYNC: "postgresql+psycopg://bvphoenix:bvphoenix@postgres:5432/bvphoenix"
+  BVP_REDIS_URL: "redis://redis:6379/0"
+  BVP_S3_ENDPOINT_URL: "http://minio:9000"
+  BVP_S3_PUBLIC_ENDPOINT_URL: "http://localhost:9000"
+  BVP_S3_ACCESS_KEY: "bvphoenix"
+  BVP_S3_SECRET_KEY: "bvphoenix-dev-secret"
+  BVP_S3_BUCKET_RAW: "bvphoenix-raw"
+  BVP_S3_BUCKET_DERIVATIVES: "bvphoenix-derivatives"
+  BVP_CORS_ORIGINS: "http://localhost:3000"
+
+services:
+  postgres:
+    image: pgvector/pgvector:pg16
+    environment:
+      POSTGRES_USER: bvphoenix
+      POSTGRES_PASSWORD: bvphoenix
+      POSTGRES_DB: bvphoenix
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./postgres/01-init.sql:/docker-entrypoint-initdb.d/01-init.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U bvphoenix"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  minio:
+    image: minio/minio:latest
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: bvphoenix
+      MINIO_ROOT_PASSWORD: bvphoenix-dev-secret
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    volumes:
+      - minio_data:/data
+    healthcheck:
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  minio-init:
+    # One-shot bucket provisioning on MinIO startup.
+    image: minio/mc:latest
+    depends_on:
+      minio:
+        condition: service_healthy
+    entrypoint: >
+      /bin/sh -c "
+      mc alias set local http://minio:9000 bvphoenix bvphoenix-dev-secret;
+      mc mb -p local/bvphoenix-raw || true;
+      mc mb -p local/bvphoenix-derivatives || true;
+      mc anonymous set download local/bvphoenix-derivatives || true;
+      echo 'MinIO buckets ready';
+      "
+
+  # ---------- application services ----------
+
+  migrate:
+    # Run Alembic once against a healthy Postgres, then exit. Both the
+    # backend and the workers wait for this to finish successfully before
+    # starting, so downstream services never see an outdated schema.
+    build:
+      context: ..
+      dockerfile: infra/dockerfiles/backend.Dockerfile
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment: *backend-env
+    command: ["alembic", "upgrade", "head"]
+    restart: "no"
+
+  backend:
+    build:
+      context: ..
+      dockerfile: infra/dockerfiles/backend.Dockerfile
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      redis:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+    environment: *backend-env
+    ports:
+      - "8000:8000"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:8000/health').status == 200 else 1)"]
+      interval: 10s
+      timeout: 3s
+      retries: 6
+      start_period: 15s
+
+  workers:
+    build:
+      context: ..
+      dockerfile: infra/dockerfiles/workers.Dockerfile
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      redis:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+    environment: *backend-env
+
+volumes:
+  postgres_data:
+  redis_data:
+  minio_data:

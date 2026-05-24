@@ -1,0 +1,5 @@
+make up.infra
+uv run uvicorn bvphoenix.main:app --reload
+pnpm dev --port 3000
+
+make down
