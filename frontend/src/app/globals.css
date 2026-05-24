@@ -1,0 +1,1537 @@
+/* =====================================================================
+   bitvision phoenix — global styles
+   =====================================================================
+   Token-driven design system. The viewer keeps its own dark-first
+   palette (radiology ergonomics); chrome uses CSS custom properties so
+   light / dark themes share component code.
+   --------------------------------------------------------------------- */
+
+* {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+}
+
+/* ---------- design tokens ---------- */
+
+:root {
+  /* surface */
+  --bv-bg: #f6f7f9;
+  --bv-bg-elevated: #ffffff;
+  --bv-fg: #0f172a;
+  --bv-fg-soft: #334155;
+  --bv-muted: #64748b;
+  --bv-card-bg: #ffffff;
+  --bv-card-border: #e4e7ec;
+  --bv-divider: #eef0f3;
+
+  /* form */
+  --bv-input-bg: #ffffff;
+  --bv-input-border: #cbd5e1;
+  --bv-input-border-focus: #e96b1f;
+
+  /* accent + semantic */
+  --bv-accent: #e96b1f;
+  --bv-accent-hover: #d15d14;
+  --bv-accent-soft: #fff3e8;
+  --bv-info: #1e40af;
+  --bv-info-soft: #eef4ff;
+  --bv-success: #047857;
+  --bv-success-soft: #ecfdf5;
+  --bv-danger: #b91c1c;
+  --bv-danger-soft: #fef2f2;
+  --bv-warning: #b45309;
+  --bv-warning-soft: #fef3c7;
+
+  /* header */
+  --bv-header-bg: #ffffff;
+  --bv-header-border: #e4e7ec;
+
+  /* spacing scale (4 / 8 / 12 / 16 / 24 / 32 / 48) */
+  --bv-s-1: 0.25rem;
+  --bv-s-2: 0.5rem;
+  --bv-s-3: 0.75rem;
+  --bv-s-4: 1rem;
+  --bv-s-6: 1.5rem;
+  --bv-s-8: 2rem;
+  --bv-s-12: 3rem;
+
+  /* radius */
+  --bv-r-sm: 6px;
+  --bv-r-md: 10px;
+  --bv-r-lg: 14px;
+  --bv-r-pill: 999px;
+
+  /* shadow */
+  --bv-shadow-1: 0 1px 2px rgba(15, 23, 42, 0.04), 0 1px 3px rgba(15, 23, 42, 0.06);
+  --bv-shadow-2: 0 4px 12px rgba(15, 23, 42, 0.08), 0 2px 4px rgba(15, 23, 42, 0.04);
+  --bv-shadow-3: 0 12px 28px rgba(15, 23, 42, 0.12);
+
+  /* layout */
+  --bv-page-max: 1280px;
+  --bv-form-max: 460px;
+  --header-h: 56px;
+}
+
+html.dark {
+  --bv-bg: #0a0d14;
+  --bv-bg-elevated: #11151e;
+  --bv-fg: #e6ecf3;
+  --bv-fg-soft: #c5cdd9;
+  --bv-muted: #8a96a8;
+  --bv-card-bg: #161a23;
+  --bv-card-border: #262c39;
+  --bv-divider: #1d2230;
+  --bv-input-bg: #11151e;
+  --bv-input-border: #2a3142;
+  --bv-input-border-focus: #e96b1f;
+  --bv-info-soft: #1c2742;
+  --bv-success-soft: #102921;
+  --bv-danger-soft: #2d1414;
+  --bv-warning-soft: #2c2010;
+  --bv-header-bg: #11151e;
+  --bv-header-border: #1c2230;
+  --bv-shadow-1: 0 1px 2px rgba(0, 0, 0, 0.5);
+  --bv-shadow-2: 0 4px 12px rgba(0, 0, 0, 0.45);
+  --bv-shadow-3: 0 12px 28px rgba(0, 0, 0, 0.6);
+}
+
+/* ---------- base typography + body ---------- */
+
+html,
+body {
+  font-family: "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue",
+    Arial, sans-serif;
+  font-feature-settings: "cv11", "ss01", "ss03";
+  font-size: 15px;
+  line-height: 1.55;
+  color: var(--bv-fg);
+  background: var(--bv-bg);
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+}
+
+h1,
+h2,
+h3,
+h4 {
+  color: var(--bv-fg);
+  font-weight: 600;
+  letter-spacing: -0.01em;
+  line-height: 1.25;
+}
+
+h1 {
+  font-size: 1.7rem;
+  margin-bottom: var(--bv-s-4);
+}
+h2 {
+  font-size: 1.2rem;
+  margin: var(--bv-s-6) 0 var(--bv-s-3);
+}
+h3 {
+  font-size: 1.02rem;
+  margin: var(--bv-s-4) 0 var(--bv-s-2);
+}
+
+p {
+  margin-bottom: var(--bv-s-4);
+}
+
+main {
+  max-width: var(--bv-page-max);
+  margin: var(--bv-s-8) auto;
+  padding: 0 var(--bv-s-6);
+}
+
+main > h1 + p.meta,
+main > p.meta:first-child {
+  margin-bottom: var(--bv-s-4);
+}
+
+a {
+  color: var(--bv-accent);
+  text-decoration: none;
+  transition: color 0.12s ease;
+}
+a:hover {
+  text-decoration: underline;
+  color: var(--bv-accent-hover);
+}
+
+/* ---------- buttons ---------- */
+
+button {
+  font: inherit;
+  cursor: pointer;
+  background: var(--bv-accent);
+  color: #ffffff;
+  border: 1px solid var(--bv-accent);
+  padding: 0.5rem 0.95rem;
+  border-radius: var(--bv-r-sm);
+  font-weight: 500;
+  letter-spacing: 0.01em;
+  transition: background 0.12s ease, box-shadow 0.12s ease, transform 0.05s ease, border-color 0.12s
+    ease;
+}
+button:hover {
+  background: var(--bv-accent-hover);
+  border-color: var(--bv-accent-hover);
+}
+button:active {
+  transform: translateY(0.5px);
+}
+button:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+  transform: none;
+}
+
+button.ghost {
+  background: transparent;
+  color: var(--bv-fg);
+  border: 1px solid var(--bv-card-border);
+}
+button.ghost:hover {
+  background: var(--bv-divider);
+  border-color: var(--bv-input-border);
+}
+button.ghost:active {
+  transform: translateY(0.5px);
+}
+
+/* ---------- inputs ---------- */
+
+input[type="email"],
+input[type="password"],
+input[type="text"],
+input[type="search"],
+input[type="tel"],
+input[type="date"],
+input[type="number"],
+input[type="url"],
+select,
+textarea {
+  font: inherit;
+  padding: 0.5rem 0.7rem;
+  border: 1px solid var(--bv-input-border);
+  border-radius: var(--bv-r-sm);
+  background: var(--bv-input-bg);
+  color: var(--bv-fg);
+  transition: border-color 0.12s ease, box-shadow 0.12s ease;
+}
+input:focus,
+textarea:focus,
+select:focus {
+  outline: none;
+  border-color: var(--bv-input-border-focus);
+  box-shadow: 0 0 0 3px var(--bv-accent-soft);
+}
+
+textarea {
+  resize: vertical;
+  min-height: 4rem;
+}
+
+/* ---------- site header ---------- */
+
+.site-header {
+  background: var(--bv-header-bg);
+  border-bottom: 1px solid var(--bv-header-border);
+  position: sticky;
+  top: 0;
+  /* Must sit above ClinicalNotesSticky (z-index 100) and the folder grid
+     (FolderGlimpse promotes inner glyphs to z-index 99). The header
+     creates its own stacking context, so its descendants — including
+     ActiveJobsPanel's popover at z-index 1100 — win locally only if the
+     header itself wins at the root level. Modal overlays at z-index 1000
+     still cover the header when open. */
+  z-index: 200;
+  height: var(--header-h);
+  backdrop-filter: saturate(140%) blur(8px);
+}
+.site-header__row {
+  max-width: var(--bv-page-max);
+  margin: 0 auto;
+  padding: 0 var(--bv-s-6);
+  height: 100%;
+  display: flex;
+  gap: var(--bv-s-4);
+  align-items: center;
+}
+.site-header__logo {
+  display: inline-flex;
+  align-items: center;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+  color: var(--bv-fg);
+}
+.site-header__search {
+  flex: 1;
+}
+.site-header__search input {
+  width: 100%;
+}
+.site-header__nav {
+  display: flex;
+  align-items: center;
+  gap: 0.7rem;
+  color: var(--bv-fg-soft);
+}
+.site-header__nav a {
+  color: var(--bv-fg-soft);
+  font-size: 0.92rem;
+}
+.site-header__nav a:hover {
+  color: var(--bv-fg);
+}
+.site-header__nav button {
+  background: transparent;
+  color: var(--bv-fg-soft);
+  border: 1px solid var(--bv-card-border);
+  padding: 0.32rem 0.75rem;
+  font-size: 0.92rem;
+}
+.site-header__nav button:hover {
+  background: var(--bv-divider);
+  color: var(--bv-fg);
+}
+
+/* ---------- forms ---------- */
+
+.form {
+  max-width: var(--bv-form-max);
+  margin: var(--bv-s-12) auto;
+  background: var(--bv-card-bg);
+  padding: var(--bv-s-8);
+  border-radius: var(--bv-r-lg);
+  border: 1px solid var(--bv-card-border);
+  box-shadow: var(--bv-shadow-1);
+}
+.form h1 {
+  margin-bottom: var(--bv-s-6);
+}
+.form label {
+  display: block;
+  margin-bottom: var(--bv-s-3);
+  font-size: 0.92rem;
+  font-weight: 500;
+  color: var(--bv-fg-soft);
+}
+.form label input,
+.form label select,
+.form label textarea {
+  display: block;
+  width: 100%;
+  margin-top: 0.25rem;
+  font-weight: 400;
+  color: var(--bv-fg);
+}
+.form label .meta {
+  font-weight: 400;
+}
+.form .error {
+  color: var(--bv-danger);
+  background: var(--bv-danger-soft);
+  border: 1px solid var(--bv-danger);
+  border-radius: var(--bv-r-sm);
+  padding: 0.55rem 0.75rem;
+  margin-bottom: var(--bv-s-4);
+  font-size: 0.92rem;
+}
+.form .actions {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--bv-s-3);
+  margin-top: var(--bv-s-6);
+}
+
+/* ---------- cards ---------- */
+
+.card {
+  background: var(--bv-card-bg);
+  border: 1px solid var(--bv-card-border);
+  border-radius: var(--bv-r-md);
+  padding: var(--bv-s-4) var(--bv-s-6);
+  margin-bottom: var(--bv-s-4);
+  box-shadow: var(--bv-shadow-1);
+  transition: border-color 0.12s ease, box-shadow 0.15s ease;
+}
+.card h3 {
+  font-size: 1.02rem;
+  margin: 0 0 var(--bv-s-2);
+}
+
+.series-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+  gap: var(--bv-s-4);
+}
+.series-card {
+  transition: box-shadow 0.18s ease, transform 0.12s ease, border-color 0.12s ease;
+}
+.series-card:hover {
+  box-shadow: var(--bv-shadow-2);
+  border-color: var(--bv-input-border);
+  text-decoration: none !important;
+  transform: translateY(-1px);
+}
+
+/* ---------- folder grid hover preview ---------- */
+
+.folder-grid-card {
+  transition: transform 0.15s ease, box-shadow 0.2s ease;
+}
+.folder-grid-card:hover {
+  transform: scale(1.04);
+  box-shadow: var(--bv-shadow-2);
+  z-index: 10;
+}
+.folder-hover-details {
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: 100%;
+  margin-top: 4px;
+  background: var(--bv-card-bg);
+  border: 1px solid var(--bv-card-border);
+  border-radius: var(--bv-r-md);
+  padding: 8px 10px;
+  box-shadow: var(--bv-shadow-2);
+  z-index: 11;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.12s ease;
+  font-size: 0.78rem;
+  text-align: left;
+  white-space: normal;
+  min-width: 200px;
+}
+.folder-grid-card:hover .folder-hover-details {
+  opacity: 1;
+}
+/* Peek-tile stack — at rest the tiles are stacked behind the folder
+   like a deck of cards (fanned slightly so the user can tell they are
+   distinct). On hover each tile flies out into its own slot so the
+   user can read the contents without entering the folder. The fan
+   stays close to the folder (no big upward jump) and the slots are
+   far enough apart to never overlap, no matter the modality. */
+.folder-glimpse-stack {
+  /* The wrapper itself does NOT scale — the per-tile rules below
+     handle the fan-out, otherwise we'd get scale-of-scale and the
+     tiles would smash into each other. */
+  will-change: transform;
+}
+.folder-grid-card:hover {
+  z-index: 30;
+}
+.folder-peek-tile {
+  /* Rest position: a tight stack centred behind the folder glyph.
+     ``--peek-i`` is the tile ordinal (0, 1, 2…) and ``--peek-mid``
+     is ``(count - 1) / 2`` so the rule centres the stack regardless
+     of how many tiles are present. */
+  transform: translate(
+      calc((var(--peek-i) - var(--peek-mid)) * 12px),
+      calc(-8px - var(--peek-i) * 5px)
+    )
+    rotate(calc((var(--peek-i) - var(--peek-mid)) * 4deg));
+  transition: transform 0.28s cubic-bezier(0.2, 0.7, 0.2, 1), box-shadow 0.2s ease, opacity 0.2s
+    ease;
+}
+.folder-grid-card:hover .folder-peek-tile {
+  /* Spread position: a wide horizontal fan, slight upward lift so
+     the bottom of each tile clears the folder glyph. The 116px X
+     spread + 16deg max rotation give 3 tiles enough air to be
+     individually scannable; with 1 or 2 tiles the same numbers
+     still read as a clean fan. */
+  transform: translate(
+      calc((var(--peek-i) - var(--peek-mid)) * 116px),
+      calc(-26px - var(--peek-i) * 2px)
+    )
+    rotate(calc((var(--peek-i) - var(--peek-mid)) * 8deg)) scale(1.55);
+  opacity: 1;
+  box-shadow: 0 10px 22px rgba(0, 0, 0, 0.32);
+}
+.folder-hover-details ul {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 8px;
+}
+.folder-hover-details li {
+  color: var(--bv-muted);
+}
+.folder-hover-details .folder-hover-description {
+  margin: 0 0 6px;
+  color: var(--bv-fg, inherit);
+  display: -webkit-box;
+  -webkit-line-clamp: 4;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
+/* Touch devices: no scale, no hover overlay (would never close).
+   The same content is reachable via the edit-metadata dialog. */
+@media (hover: none) {
+  .folder-grid-card:hover {
+    transform: none;
+    box-shadow: var(--bv-shadow-1);
+    z-index: auto;
+  }
+  .folder-grid-card:hover .folder-hover-details {
+    opacity: 0;
+  }
+  .folder-grid-card:hover .folder-peek-tile {
+    /* Don't fan on touch — the user can't move away to dismiss. */
+    transform: translate(
+        calc((var(--peek-i) - var(--peek-mid)) * 12px),
+        calc(-8px - var(--peek-i) * 5px)
+      )
+      rotate(calc((var(--peek-i) - var(--peek-mid)) * 4deg));
+    box-shadow: 0 2px 5px rgba(0, 0, 0, 0.18);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .folder-grid-card:hover {
+    transform: none;
+  }
+  .folder-peek-tile {
+    transition: none;
+  }
+  .folder-grid-card:hover .folder-glimpse-stack {
+    transform: none;
+  }
+}
+
+/* ---------- generic helpers ---------- */
+
+.meta {
+  color: var(--bv-muted);
+  font-size: 0.88rem;
+}
+
+.error {
+  color: var(--bv-danger);
+}
+
+.badges {
+  display: inline-flex;
+  flex-wrap: wrap;
+  gap: var(--bv-s-2);
+  margin-left: var(--bv-s-2);
+  max-width: 100%;
+}
+
+.badge {
+  display: inline-block;
+  font-size: 0.72rem;
+  font-weight: 500;
+  letter-spacing: 0.02em;
+  padding: 0.18rem 0.55rem;
+  border-radius: var(--bv-r-pill);
+  background: var(--bv-info-soft);
+  color: var(--bv-info);
+  border: 1px solid color-mix(in srgb, var(--bv-info) 22%, transparent);
+  white-space: nowrap;
+}
+.badge--public {
+  background: var(--bv-success-soft);
+  color: var(--bv-success);
+  border-color: color-mix(in srgb, var(--bv-success) 22%, transparent);
+}
+.badge--llm {
+  background: var(--bv-warning-soft);
+  color: var(--bv-warning);
+  border-color: color-mix(in srgb, var(--bv-warning) 22%, transparent);
+}
+.badge--human {
+  background: #e0e7ff;
+  color: #3730a3;
+  border-color: #c7d2fe;
+}
+html.dark .badge--human {
+  background: #1c2447;
+  color: #c7d2fe;
+  border-color: #2a3978;
+}
+/* ``.badge--license`` is the clickable Public-Dataset / CC-BY chip
+   rendered by <LicenseBadge>. It renders as a <button>, so we reset
+   the native button chrome and pick a distinct hue (indigo) so users
+   instantly read "this study is from an external curated archive"
+   without confusing it with the green "public" or warning "llm"
+   badges. Hover/focus get a subtle ring to signal it's interactive. */
+.badge--license {
+  background: var(--bv-info-soft, #eef2ff);
+  color: var(--bv-info, #4338ca);
+  border-color: color-mix(in srgb, var(--bv-info, #6366f1) 25%, transparent);
+  cursor: pointer;
+  font-family: inherit;
+  line-height: inherit;
+}
+.badge--license:hover,
+.badge--license:focus-visible {
+  filter: brightness(0.97);
+  outline: 2px solid color-mix(in srgb, var(--bv-info, #6366f1) 35%, transparent);
+  outline-offset: 1px;
+}
+html.dark .badge--license {
+  background: #1e2148;
+  color: #c7d2fe;
+  border-color: #3730a3;
+}
+
+/* ---------- tables ---------- */
+
+table.bv-table,
+.bv-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.9rem;
+}
+.bv-table thead tr {
+  background: var(--bv-divider);
+}
+.bv-table th,
+.bv-table td {
+  padding: 0.55rem 0.75rem;
+  text-align: left;
+  border-bottom: 1px solid var(--bv-divider);
+}
+.bv-table tbody tr:hover {
+  background: var(--bv-divider);
+}
+
+/* ---------- viewer layout (specialised — kept dark-first) ---------- */
+
+.viewer-layout {
+  display: grid;
+  grid-template-columns: 1fr 340px;
+  gap: 0;
+  position: fixed;
+  top: var(--header-h);
+  left: 0;
+  right: 0;
+  bottom: 0;
+  z-index: 10;
+  background: #0a0d14;
+  color: #e6ecf3;
+  overflow: hidden;
+}
+.viewer-layout--no-sidebar {
+  grid-template-columns: 1fr;
+}
+.viewer-layout__canvas {
+  position: relative;
+  overflow: hidden;
+}
+.viewer-layout__sidebar {
+  background: #12141a;
+  border-left: 1px solid #1c2230;
+  /* Sidebar is a flex column: the chip-nav header is fixed at the
+     top, the rest of the content scrolls in its own area below. The
+     chip-nav therefore never overlaps any section heading or content
+     (which the previous ``position: sticky`` approach did). */
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  padding: 0;
+}
+.viewer-layout__sidebar > nav[aria-label="sidebar sections"] {
+  flex: 0 0 auto;
+  border-bottom: 1px solid #1c2230;
+}
+.viewer-layout__sidebar-scroll {
+  flex: 1 1 auto;
+  overflow-y: auto;
+  padding: var(--bv-s-4);
+}
+.viewer-layout__sidebar h2 {
+  color: #fff;
+  font-size: 0.9rem;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  margin-top: var(--bv-s-4);
+}
+
+/* SidebarSection (collapsible `<details>` block). One per panel
+   group on the rail; clicking the summary opens/closes. Default-closed
+   sections show only their title until the user opts in (progressive
+   disclosure, replaces the 21-block flat stack). */
+.viewer-rail-section {
+  margin: var(--bv-s-2) 0;
+  border: 1px solid #1c2230;
+  border-radius: 6px;
+  background: #15181f;
+}
+.viewer-rail-section[open] {
+  background: #181c25;
+}
+.viewer-rail-section__summary {
+  list-style: none;
+  cursor: pointer;
+  padding: 0.45rem 0.6rem 0.45rem 1.4rem;
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  user-select: none;
+}
+.viewer-rail-section__summary::-webkit-details-marker {
+  display: none;
+}
+/* Custom rotating chevron, lighter than the native marker and themed
+   to match the rest of the rail. */
+.viewer-rail-section__summary::before {
+  content: "";
+  position: absolute;
+  left: 0.5rem;
+  top: 50%;
+  width: 0;
+  height: 0;
+  border-left: 5px solid #c0c8d8;
+  border-top: 4px solid transparent;
+  border-bottom: 4px solid transparent;
+  transform: translateY(-50%) rotate(0deg);
+  transition: transform 0.12s ease-out;
+}
+.viewer-rail-section[open] > .viewer-rail-section__summary::before {
+  transform: translateY(-50%) rotate(90deg);
+}
+.viewer-rail-section__title {
+  color: #e6ecf3;
+  font-size: 0.78rem;
+  font-weight: 600;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  flex: 1 1 auto;
+}
+.viewer-rail-section__badge {
+  color: #94a3b8;
+  font-size: 0.7rem;
+  background: #1a1d25;
+  border: 1px solid #2a2f3b;
+  padding: 0.05rem 0.4rem;
+  border-radius: 999px;
+  letter-spacing: 0.02em;
+}
+.viewer-rail-section__hint {
+  color: #94a3b8;
+  font-size: 0.7rem;
+  padding: 0 0.6rem 0.45rem 1.4rem;
+}
+.viewer-rail-section[open] > .viewer-rail-section__hint {
+  display: none;
+}
+.viewer-rail-section__body {
+  padding: 0.2rem 0.6rem 0.6rem;
+  border-top: 1px solid #1c2230;
+}
+.viewer-rail-section__body > h2:first-child {
+  margin-top: 0.3rem;
+}
+/* Sub-heading inside a section body (sub-block within a single
+   collapsible group, e.g. "W/L presets · primary" inside the
+   Window/Level section). Lower visual weight than h2. */
+.viewer-rail-section__sub {
+  color: #c0c8d8;
+  font-size: 0.72rem;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  margin: 0.4rem 0 0.25rem;
+  font-weight: 600;
+}
+.viewer-layout__sidebar .card {
+  background: #1a1d25;
+  border-color: #2a2f3b;
+  color: #d1d5db;
+  box-shadow: none;
+}
+.viewer-layout__sidebar .meta {
+  color: #94a3b8;
+}
+
+/* The viewer sidebar is always-dark independent of the document theme,
+   so the global ``button.ghost`` (which reads ``--bv-fg``) renders
+   nearly invisible (dark text on dark bg) when the document theme is
+   light. Scope an override that pins ghost-style buttons inside the
+   sidebar to a high-contrast palette regardless of the global theme.
+   The hover / active styles match ``.viewer-btn`` so the look is
+   coherent with the rest of the sidebar tooling. */
+.viewer-layout__sidebar button.ghost {
+  background: transparent;
+  color: #d6deeb;
+  border-color: #3a4050;
+}
+.viewer-layout__sidebar button.ghost:hover {
+  background: #2a3040;
+  border-color: #4a5060;
+  color: #fff;
+}
+.viewer-layout__sidebar button.ghost:disabled {
+  color: #6b7280;
+}
+
+/* Inputs / textareas in the sidebar (used by NotesPanel, ReportComposer
+   inline edit, MarkerListPanel) need the same dark-theme override; the
+   default ``input`` rules are tuned for the light document theme. */
+.viewer-layout__sidebar textarea,
+.viewer-layout__sidebar input[type="text"],
+.viewer-layout__sidebar input[type="search"],
+.viewer-layout__sidebar input[type="email"],
+.viewer-layout__sidebar input[type="tel"],
+.viewer-layout__sidebar input[type="number"] {
+  background: #0a0d14;
+  color: #e6ecf3;
+  border-color: #2a2f3b;
+}
+.viewer-layout__sidebar textarea:focus,
+.viewer-layout__sidebar input[type="text"]:focus,
+.viewer-layout__sidebar input[type="search"]:focus,
+.viewer-layout__sidebar input[type="email"]:focus,
+.viewer-layout__sidebar input[type="tel"]:focus,
+.viewer-layout__sidebar input[type="number"]:focus {
+  border-color: var(--bv-accent);
+}
+
+.viewer-btn {
+  font: inherit;
+  font-size: 0.8rem;
+  padding: 0.32rem 0.7rem;
+  border-radius: 5px;
+  border: 1px solid #3a4050;
+  background: #1e2230;
+  color: #c0c8d8;
+  cursor: pointer;
+  transition: background 0.12s ease;
+}
+.viewer-btn:hover {
+  background: #2a3040;
+}
+.viewer-btn--active {
+  background: var(--bv-accent);
+  color: #fff;
+  border-color: var(--bv-accent);
+}
+.viewer-btn--active:hover {
+  background: var(--bv-accent-hover);
+}
+
+.slice-hud {
+  position: absolute;
+  bottom: 0;
+  left: 0;
+  right: 0;
+  padding: 5px 10px;
+  background: rgba(0, 0, 0, 0.7);
+  display: flex;
+  gap: 1.5rem;
+  font: 12px / 1 monospace;
+  color: #ccc;
+  pointer-events: none;
+}
+
+.viewer-layout__sidebar input[type="range"] {
+  width: 100%;
+  accent-color: var(--bv-accent);
+  margin: 0.25rem 0 0.5rem;
+}
+
+/* ---------- generic native <dialog> defaults ----------
+   The browser positions native dialogs at the center of the viewport
+   automatically when ``showModal()`` is called; we just want the
+   default backdrop tint to match the previous hand-rolled overlays. */
+dialog.bv-dialog::backdrop {
+  background: rgba(0, 0, 0, 0.5);
+  backdrop-filter: blur(2px);
+}
+/* The <dialog> itself is the click-to-dismiss surface. We override
+   the default user-agent ``display: block`` to flex-center the
+   single content card the caller renders inside. ``inset: 0`` +
+   ``margin: auto`` keeps the dialog at its natural size while
+   stretching the click-target area to the full viewport. */
+dialog.bv-dialog {
+  width: 100vw;
+  max-width: 100vw;
+  height: 100vh;
+  max-height: 100vh;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+/* ---------- care-phase editor dialog ----------
+   Native <dialog> + showModal() puts the element in the browser
+   top-layer (above sticky site-header without z-index gymnastics).
+   Style the ::backdrop pseudo so the dim matches the previous
+   div-based editor (rgba(0,0,0,0.35)). The dialog itself is full-
+   viewport; its inner header / grid handle their own padding. */
+dialog.care-phase-editor::backdrop {
+  background: rgba(0, 0, 0, 0.35);
+}
+/* The inner per-phase editor stacks above the outer one (browsers
+   render LIFO show-modal calls in the top-layer); a darker backdrop
+   makes the layering legible — the user sees one dimming on top of
+   the previous, not a single uniform mask. */
+dialog.care-phase-inner-editor {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 100vw;
+  max-width: 100vw;
+  height: 100vh;
+  max-height: 100vh;
+}
+dialog.care-phase-inner-editor::backdrop {
+  background: rgba(0, 0, 0, 0.45);
+}
+
+/* ---------- documents / fascicolo mobile (≤ 768px) ----------
+   The Drive-style layout has a 220px folder tree + a content pane.
+   On phones we hide the tree (the user can still descend by clicking
+   folder rows in the content pane and ascend via breadcrumbs) so the
+   content pane gets the full viewport width. */
+@media (max-width: 768px) {
+  .bv-folder-tree {
+    display: none !important;
+  }
+}
+
+/* ---------- viewer mobile (≤ 768px) ----------
+   On phones the sidebar can't sit alongside the canvas (340px sidebar
+   eats two-thirds of the screen), and the canvas is restricted to a
+   single axial pane (see useIsMobile gating in page.tsx). The mobile
+   variant turns the sidebar into a slide-over drawer anchored to the
+   right edge so the canvas always has the full width.
+
+   The desktop selector (``.viewer-layout``) is left intact; this block
+   only kicks in when both the breakpoint media query *and* the
+   ``--mobile`` modifier class are set, so SSR (which renders without
+   the mobile class) still gets the desktop layout for hydration. */
+@media (max-width: 768px) {
+  .viewer-layout--mobile {
+    grid-template-columns: 1fr !important;
+  }
+  .viewer-layout--mobile .viewer-layout__sidebar {
+    position: fixed;
+    top: var(--header-h);
+    right: 0;
+    bottom: 0;
+    width: min(86vw, 360px);
+    z-index: 30;
+    transform: translateX(100%);
+    transition: transform 0.18s ease;
+    box-shadow: -4px 0 20px rgba(0, 0, 0, 0.5);
+  }
+  .viewer-layout--mobile:not(.viewer-layout--no-sidebar) .viewer-layout__sidebar {
+    transform: translateX(0);
+  }
+  .viewer-layout--mobile .viewer-layout__canvas {
+    width: 100%;
+  }
+  /* Header chips wrap on phones — without this they overflow horizontally
+     and force a sideways scroll the user can't reach. */
+  .viewer-layout--mobile [aria-label="sidebar sections"] {
+    flex-wrap: wrap;
+  }
+}
+
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+@keyframes pulse-bar {
+  0%,
+  100% {
+    transform: translateX(-100%);
+  }
+  50% {
+    transform: translateX(100%);
+  }
+}
+
+/* Highlight pulse applied to a fascicolo card when the user returns to
+ * the folder via a back-link that carries ``#item-<uuid>``. The
+ * accent-coloured outline grows then fades over ~1.5s so the eye can
+ * latch onto the row that was just open without making the page
+ * "blink" aggressively. ``prefers-reduced-motion`` short-circuits the
+ * transform-heavy keyframes (handled by the media block below). */
+@keyframes bv-highlight-flash {
+  0% {
+    box-shadow: 0 0 0 0 transparent;
+    background-color: var(--bv-accent-soft, #fff3e8);
+  }
+  20% {
+    box-shadow: 0 0 0 4px var(--bv-accent, #e96b1f);
+    background-color: var(--bv-accent-soft, #fff3e8);
+  }
+  100% {
+    box-shadow: 0 0 0 0 transparent;
+    background-color: transparent;
+  }
+}
+.bv-highlight-flash {
+  animation: bv-highlight-flash 1.5s ease-out;
+  /* Avoids the outlined card disappearing behind sticky / sibling
+   * elements during the scroll-into-view that triggers the flash. */
+  position: relative;
+  z-index: 1;
+}
+@media (prefers-reduced-motion: reduce) {
+  .bv-highlight-flash {
+    animation: none;
+    box-shadow: 0 0 0 2px var(--bv-accent, #e96b1f);
+  }
+}
+
+/* ---------- DICOM uploader (specialised) ---------- */
+
+.dicom-uploader {
+  margin-top: var(--bv-s-4);
+}
+.dicom-uploader__drop {
+  border: 2px dashed var(--bv-input-border);
+  border-radius: var(--bv-r-md);
+  padding: 2.5rem 1.5rem;
+  text-align: center;
+  background: var(--bv-card-bg);
+  cursor: pointer;
+  transition: border-color 0.15s, background 0.15s;
+}
+.dicom-uploader__drop:hover,
+.dicom-uploader__drop--active {
+  border-color: var(--bv-accent);
+  background: var(--bv-accent-soft);
+}
+.dicom-uploader__title {
+  font-size: 1.1rem;
+  margin-bottom: 0.4rem;
+}
+.dicom-uploader__list {
+  margin-top: 1.2rem;
+  background: var(--bv-card-bg);
+  border: 1px solid var(--bv-card-border);
+  border-radius: var(--bv-r-md);
+  padding: 1rem 1.2rem;
+}
+.dicom-uploader__list-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 0.5rem;
+}
+.dicom-uploader__list ul {
+  list-style: none;
+  padding: 0;
+  max-height: 240px;
+  overflow-y: auto;
+  margin-bottom: 1rem;
+  border-top: 1px solid var(--bv-divider);
+}
+.dicom-uploader__list li {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  padding: 0.35rem 0;
+  border-bottom: 1px solid var(--bv-divider);
+  font-size: 0.9rem;
+}
+.dicom-uploader__name {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.dicom-uploader__remove {
+  padding: 0.1rem 0.5rem;
+  font-size: 1rem;
+  line-height: 1;
+}
+.dicom-uploader__controls {
+  display: flex;
+  gap: 1rem;
+  align-items: center;
+  flex-wrap: wrap;
+}
+.dicom-uploader__controls label {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  font-size: 0.9rem;
+  color: var(--bv-fg-soft);
+}
+.dicom-uploader__controls select {
+  font: inherit;
+  padding: 0.35rem 0.5rem;
+  border: 1px solid var(--bv-input-border);
+  border-radius: var(--bv-r-sm);
+}
+.dicom-uploader__controls button {
+  margin-left: auto;
+}
+.dicom-uploader__progress {
+  margin-top: 0.8rem;
+  background: var(--bv-divider);
+  border-radius: var(--bv-r-sm);
+  overflow: hidden;
+  height: 8px;
+}
+.dicom-uploader__progress-bar {
+  height: 100%;
+  background: var(--bv-accent);
+  transition: width 0.15s;
+}
+.dicom-uploader__summary {
+  margin-top: 1.2rem;
+}
+.dicom-uploader__summary ul {
+  list-style: none;
+  padding: 0;
+}
+.dicom-uploader__summary > ul > li {
+  margin-bottom: 0.35rem;
+}
+.dicom-uploader__summary ul ul {
+  margin-top: 0.4rem;
+  margin-left: 1rem;
+  font-size: 0.85rem;
+}
+.dicom-uploader__summary-actions {
+  display: flex;
+  gap: 0.7rem;
+  margin-top: 1rem;
+}
+.dicom-uploader__summary-actions .button-like {
+  display: inline-block;
+  padding: 0.45rem 0.9rem;
+  border-radius: var(--bv-r-sm);
+  background: var(--bv-accent);
+  color: #fff;
+  font-weight: 500;
+}
+.dicom-uploader__summary-actions .button-like:hover {
+  background: var(--bv-accent-hover);
+  text-decoration: none;
+}
+
+.dicom-uploader__pickers {
+  display: flex;
+  gap: 0.6rem;
+  justify-content: center;
+  margin-top: 1rem;
+}
+.universal-uploader__table-wrap {
+  max-height: 360px;
+  overflow: auto;
+  border: 1px solid var(--bv-divider);
+  border-radius: var(--bv-r-sm);
+  margin-bottom: 1rem;
+}
+.universal-uploader__table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.88rem;
+}
+.universal-uploader__table th,
+.universal-uploader__table td {
+  padding: 0.4rem 0.6rem;
+  text-align: left;
+  border-bottom: 1px solid var(--bv-divider);
+  vertical-align: middle;
+}
+.universal-uploader__table th {
+  background: var(--bv-bg);
+  font-weight: 600;
+  position: sticky;
+  top: 0;
+  z-index: 1;
+}
+.universal-uploader__fname {
+  font-family: var(--font-mono, ui-monospace, Menlo, monospace);
+  font-size: 0.85rem;
+}
+.universal-uploader__kind {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem;
+  white-space: nowrap;
+}
+.universal-uploader__kind-icon {
+  font-family: var(--font-mono, ui-monospace, Menlo, monospace);
+  font-size: 0.75rem;
+  padding: 0.05rem 0.35rem;
+  background: var(--bv-divider);
+  border-radius: 4px;
+  color: var(--bv-fg-soft);
+}
+.universal-uploader__table select {
+  font: inherit;
+  padding: 0.25rem 0.4rem;
+  border: 1px solid var(--bv-input-border);
+  border-radius: 4px;
+  max-width: 220px;
+}
+
+/* ---------- accessibility ---------- */
+
+:focus-visible {
+  outline: 2px solid var(--bv-accent);
+  outline-offset: 2px;
+  border-radius: 4px;
+}
+
+/* TipTap mounts a ``<div contenteditable>`` (with class ``tiptap``)
+   inside our EvidenceEditor wrapper. The wrapper already shows
+   focus-state via its own border, so the global a11y outline above
+   would render as a redundant orange box around the typing area. */
+[contenteditable]:focus,
+[contenteditable]:focus-visible,
+.tiptap:focus,
+.tiptap:focus-visible,
+.ProseMirror:focus,
+.ProseMirror:focus-visible {
+  outline: none !important;
+  border-radius: 0;
+}
+
+/* ---------- TipTap content typography ---------- */
+
+.tiptap {
+  color: var(--bv-fg);
+  line-height: 1.55;
+}
+.tiptap p {
+  margin: 0 0 0.5rem;
+}
+.tiptap p:last-child {
+  margin-bottom: 0;
+}
+.tiptap h1,
+.tiptap h2,
+.tiptap h3,
+.tiptap h4 {
+  margin: 0.6rem 0 0.3rem;
+  font-weight: 600;
+  letter-spacing: -0.005em;
+}
+.tiptap h1 {
+  font-size: 1.4em;
+}
+.tiptap h2 {
+  font-size: 1.2em;
+}
+.tiptap h3 {
+  font-size: 1.05em;
+}
+.tiptap ul,
+.tiptap ol {
+  padding-left: 1.5em;
+  margin: 0.3rem 0 0.5rem;
+}
+.tiptap blockquote {
+  border-left: 3px solid var(--bv-divider);
+  padding-left: 0.9rem;
+  color: var(--bv-fg-soft);
+  margin: 0.4rem 0;
+}
+.tiptap code {
+  background: var(--bv-divider);
+  color: var(--bv-fg);
+  padding: 0.1em 0.35em;
+  border-radius: 3px;
+  font-size: 0.9em;
+}
+.tiptap pre {
+  background: var(--bv-divider);
+  color: var(--bv-fg);
+  padding: 0.6em 0.85em;
+  border-radius: 6px;
+  overflow-x: auto;
+  margin: 0.4rem 0;
+}
+.tiptap pre code {
+  background: transparent;
+  padding: 0;
+}
+.tiptap a {
+  color: var(--bv-accent);
+}
+/* Mentions inserted by the @-autocomplete render as Link marks with
+   our DSL href. Style them as pills inside the editor so the writer
+   sees the same shape they get on the read side. */
+.tiptap a[href^="@"] {
+  background: var(--bv-info-soft);
+  color: var(--bv-info);
+  padding: 1px 8px;
+  border-radius: 999px;
+  text-decoration: none;
+  font-size: 0.95em;
+}
+.tiptap a[href^="@tag:"] {
+  background: var(--bv-warning-soft);
+  color: var(--bv-warning);
+}
+.tiptap p.is-editor-empty:first-child::before {
+  content: attr(data-placeholder);
+  color: var(--bv-muted);
+  pointer-events: none;
+  float: left;
+  height: 0;
+}
+
+/* ---------- viewer overlay buttons ---------- */
+
+.viewer-chip-btn {
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  font-size: 0.95rem;
+  line-height: 1;
+  background: rgba(0, 0, 0, 0.7);
+  color: #ccc;
+  border: 1px solid #444;
+  border-radius: 4px;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+.viewer-chip-btn:hover {
+  color: #fff;
+}
+
+/* ---------- responsive (mobile + narrow tablet) ---------- */
+
+@media (max-width: 800px) {
+  main {
+    padding: 0 var(--bv-s-4);
+    margin: var(--bv-s-6) auto;
+  }
+  .site-header__row {
+    padding: 0 var(--bv-s-4);
+    gap: var(--bv-s-3);
+  }
+  .form {
+    margin: var(--bv-s-6) auto;
+    padding: var(--bv-s-6);
+  }
+  h1 {
+    font-size: 1.45rem;
+  }
+  h2 {
+    font-size: 1.08rem;
+  }
+}
+
+@media (max-width: 520px) {
+  html,
+  body {
+    font-size: 14.5px;
+  }
+  .site-header__nav {
+    gap: var(--bv-s-3);
+  }
+  .site-header__nav a,
+  .site-header__nav button {
+    font-size: 0.86rem;
+  }
+  .form {
+    padding: var(--bv-s-4);
+  }
+}
+
+/* ---------- reduced motion ---------- */
+
+@media (prefers-reduced-motion: reduce) {
+  * {
+    animation-duration: 0.001ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.001ms !important;
+  }
+}
+
+/* ---------- timeline rail (shared by CareTimeline / TaskTimeline / Merged) ----------
+ *
+ * Layout primitive used by every timeline-style view. Above 640px each
+ * swimlane is a horizontal row (date label on the left, dots wrapping
+ * to the right). Below 640px the swimlane stacks (date on its own line,
+ * dots in a column below) so a 360px viewport doesn't force a
+ * horizontal scroll. Hover-only viewports (touch) get a slightly larger
+ * tap target on the dots.
+ */
+.timeline-rail {
+  width: 100%;
+}
+.timeline-day-swimlane {
+  display: grid;
+  grid-template-columns: minmax(140px, 180px) 1fr;
+  gap: 0.6rem 0.75rem;
+  align-items: start;
+  padding: 0.25rem 0;
+  border-top: 1px dashed var(--bv-card-border, #d0d5dd);
+}
+.timeline-day-swimlane:first-child {
+  border-top: none;
+}
+.timeline-day-swimlane__header {
+  display: flex;
+  align-items: baseline;
+  gap: 0.35rem;
+  font-size: 0.78rem;
+  color: var(--bv-fg-soft);
+  padding-top: 0.3rem;
+}
+.timeline-day-swimlane__date {
+  font-weight: 600;
+  color: var(--bv-fg);
+  white-space: nowrap;
+  text-transform: capitalize;
+}
+.timeline-day-swimlane__count {
+  font-size: 0.7rem;
+  color: var(--bv-fg-muted, #888);
+}
+/* Undated bucket: dim the header so the eye registers it as
+ * out-of-order without clutter. */
+.timeline-day-swimlane[data-undated="true"] .timeline-day-swimlane__date {
+  font-style: italic;
+  color: var(--bv-fg-muted, #888);
+}
+.timeline-day-swimlane__items {
+  min-width: 0;
+}
+.timeline-day-swimlane__items > li {
+  /* Allow each item to shrink rather than overflow the row. */
+  flex: 0 1 auto;
+}
+
+@media (max-width: 640px) {
+  .timeline-day-swimlane {
+    grid-template-columns: 1fr;
+    gap: 0.25rem;
+  }
+  .timeline-day-swimlane__header {
+    padding-top: 0;
+  }
+  .timeline-day-swimlane__items {
+    /* Stack dots vertically on mobile — the horizontal row would
+     * either truncate or force a scroll. */
+    flex-direction: column;
+    align-items: stretch;
+  }
+}
+
+/* Horizontal-variant dot: compact pill suitable for the same-date
+ * row layout. Inline styles in TimelineEventDot/TimelineTaskDot manage
+ * colour and status; these classes only constrain the layout. */
+.timeline-event-dot[data-variant="horizontal"],
+.timeline-task-dot[data-variant="horizontal"] {
+  grid-template-columns: 10px auto !important;
+  align-items: center !important;
+  padding: 0.2rem 0.55rem !important;
+  border-radius: 999px !important;
+}
+.timeline-event-dot[data-variant="horizontal"] .timeline-event-dot__title,
+.timeline-task-dot[data-variant="horizontal"] .timeline-task-dot__title {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 18ch;
+}
+
+/* ---------- print: care timeline ----------
+ *
+ * The interactive React timeline is hidden in print and a server-rendered
+ * SVG (fetched via GET /api/patients/{id}/care-timeline?format=svg) is
+ * shown in its place. The component opts in by carrying
+ * ``data-care-timeline`` on its root and embedding the SVG inside an
+ * element with ``data-care-timeline-print``. This avoids dragging a
+ * print-only mode into the React component itself; every other page
+ * keeps its existing print appearance.
+ */
+
+/* Sticky compact preview of patient.notes (see ClinicalNotesSticky).
+ * Responsive height caps + print-mode reset live here so the JSX stays
+ * lean and so the rules are visible alongside the rest of the print
+ * overrides below. */
+@media (max-width: 600px) {
+  [data-clinical-notes-sticky-body] {
+    max-height: 96px !important;
+  }
+}
+@media (max-height: 600px) {
+  [data-clinical-notes-sticky] {
+    position: static !important;
+  }
+}
+
+@media print {
+  [data-clinical-notes-sticky] {
+    position: static !important;
+    box-shadow: none !important;
+  }
+  [data-clinical-notes-sticky-body] {
+    max-height: none !important;
+    overflow: visible !important;
+    -webkit-mask-image: none !important;
+    mask-image: none !important;
+  }
+  [data-care-timeline] > :not([data-care-timeline-print]) {
+    display: none !important;
+  }
+  [data-care-timeline-print] {
+    display: block !important;
+  }
+  /* Headers and unrelated chrome do not belong on a printed care
+   * timeline. The Health Record header keeps its own print rules; we
+   * only suppress widgets inside the timeline's own container. */
+  [data-care-timeline-print] svg {
+    width: 100% !important;
+    max-width: 720px;
+    height: auto !important;
+    page-break-inside: avoid;
+  }
+  /* Hide nav, header, footer when explicitly printing the timeline
+   * page (`/patients/{id}/care-phases/{slug}` or `?view=events&print=1`). */
+  body[data-print-mode="care-timeline"] header,
+  body[data-print-mode="care-timeline"] nav,
+  body[data-print-mode="care-timeline"] footer {
+    display: none !important;
+  }
+}
+
+/* MarkerOverlay focused-marker pulse. When the operator clicks an AI
+ * annotation in the marker list panel, the page flips a
+ * ``focusedMarkerId`` state for ~6 s; the overlay applies the
+ * ``bv-marker-focused`` class to the matching <g> and the keyframes
+ * below pulse the outline so the user can spot it on a busy slice.
+ * The animation runs ``ease-in-out`` infinite, but the class is
+ * removed by the page timer so it eventually stops on its own. */
+@keyframes bv-marker-pulse {
+  0% {
+    filter: drop-shadow(0 0 0 rgba(251, 146, 60, 0));
+    opacity: 1;
+  }
+  50% {
+    filter: drop-shadow(0 0 8px rgba(251, 146, 60, 0.9));
+    opacity: 0.65;
+  }
+  100% {
+    filter: drop-shadow(0 0 0 rgba(251, 146, 60, 0));
+    opacity: 1;
+  }
+}
+
+.bv-marker-focused {
+  animation: bv-marker-pulse 1.6s ease-in-out infinite;
+}
+@media (prefers-reduced-motion: reduce) {
+  .bv-marker-focused {
+    animation: none;
+    filter: drop-shadow(0 0 4px rgba(251, 146, 60, 0.85));
+  }
+}

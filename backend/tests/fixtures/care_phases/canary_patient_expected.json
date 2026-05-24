@@ -1,0 +1,88 @@
+{
+  "_comment": [
+    "Hand-curated ground truth for the care-phase classifier on patient",
+    "Patient X (canary). Mirrors the manually-drawn timeline in",
+    "local reference SVG (not committed). The classifier output is",
+    "compared against this fixture verbatim: the test fails on any",
+    "divergence in slug or in event-to-phase assignment. Acceptance bar",
+    "is 100% (7/7 phases, every event in the right phase). See",
+    "docs/care-timeline-phases.md section 5.2 for the escalation strategy",
+    "if a single LLM stage cannot reach 100%."
+  ],
+  "phases": [
+    {
+      "slug": "imaging-pre-op",
+      "name_i18n": {"it": "Imaging pre-op", "en": "Pre-op imaging"},
+      "kind": "imaging",
+      "ordinal": 0,
+      "events": [
+        {"date": "2022-05-09", "title_pattern": "RM addome superiore"}
+      ]
+    },
+    {
+      "slug": "intervento-chirurgico",
+      "name_i18n": {"it": "Intervento chirurgico + degenza", "en": "Surgery + inpatient stay"},
+      "kind": "surgery",
+      "ordinal": 1,
+      "events": [
+        {"date": "2022-07-18", "title_pattern": "Fine procedura chirurgica"},
+        {"date": "2022-07-26", "title_pattern": "Relazione di dimissione"},
+        {"date": "2022-08-02", "title_pattern": "Biopsia post-operatoria"}
+      ]
+    },
+    {
+      "slug": "followup-post-op",
+      "name_i18n": {"it": "Follow-up post-op + stadiazione", "en": "Post-op follow-up + staging"},
+      "kind": "followup",
+      "ordinal": 2,
+      "events": [
+        {"date": "2022-09-05", "title_pattern": "TC addome completo"},
+        {"date": "2022-09-19", "title_pattern": "RM addome superiore"},
+        {"date": "2022-10-14", "title_pattern": "PET total body"}
+      ]
+    },
+    {
+      "slug": "inizio-followup-oncologico",
+      "name_i18n": {"it": "Inizio follow-up oncologico", "en": "Oncology follow-up start"},
+      "kind": "followup",
+      "ordinal": 3,
+      "events": [
+        {"date": "2022-10-18", "title_pattern": "Visita oncologica"},
+        {"date": "2022-11-04", "title_pattern": "Ecografia"},
+        {"date": "2022-11-08", "title_pattern": "Visita oncologica"}
+      ]
+    },
+    {
+      "slug": "sorveglianza-imaging-2023",
+      "name_i18n": {"it": "Sorveglianza imaging 2023", "en": "2023 imaging surveillance"},
+      "kind": "surveillance",
+      "ordinal": 4,
+      "events": [
+        {"date": "2023-01-23", "title_pattern": "TC addome superiore"},
+        {"date": "2023-05-10", "title_pattern": "TC addome completo"}
+      ]
+    },
+    {
+      "slug": "visita-2023",
+      "name_i18n": {"it": "Visita oncologica 2023", "en": "2023 oncology visit"},
+      "kind": "visit",
+      "ordinal": 5,
+      "events": [
+        {"date": "2023-11-03", "title_pattern": "Visita oncologica"}
+      ]
+    },
+    {
+      "slug": "rivalutazione-primavera-2024",
+      "name_i18n": {"it": "Rivalutazione primavera 2024", "en": "Spring 2024 reassessment"},
+      "kind": "reassessment",
+      "ordinal": 6,
+      "events": [
+        {"date": "2024-02-26", "title_pattern": "TC addome completo"},
+        {"date": "2024-03-06", "title_pattern": "Visita oncologica"},
+        {"date": "2024-03-13", "title_pattern": "Esami ematologici"},
+        {"date": "2024-03-22", "title_pattern": "PET FDG total body"},
+        {"date": "2024-03-26", "title_pattern": "Ecoendoscopia"}
+      ]
+    }
+  ]
+}

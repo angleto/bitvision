@@ -1,0 +1,86 @@
+# macOS
+.DS_Store
+
+# Editors
+*.swp
+*.swo
+*~
+.idea/
+.vscode/
+*.code-workspace
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+venv/
+env/
+.Python
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Node
+node_modules/
+.next/
+.nuxt/
+dist/
+build/
+.turbo/
+.parcel-cache/
+*.tsbuildinfo
+
+# Playwright
+frontend/test-results/
+frontend/playwright-report/
+frontend/blob-report/
+frontend/playwright/.cache/
+
+# Env / secrets
+.env
+.env.local
+.env.*.local
+!.env.example
+
+# Logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+# Dev mailer (services/email.py in dev mode appends to logs/dev_emails.eml).
+# Never track these: they accumulate verification tokens and pollute diffs
+# on every dev run.
+backend/logs/
+*.eml
+
+# Local data
+data/
+tmp/
+*.dcm
+*.nii
+*.nii.gz
+
+# Production deploy artefacts live in their own git repo at deploy/.git.
+# See deploy/README.md; this repo intentionally does not track them
+# (same pattern as starchat/deploy/).
+deploy/
+timeline_fascicolo_*.svg
+
+# Private docs: strategy / monetization / governance / foundation /
+# launch-plan / CLA rationale. Kept locally for the maintainer but
+# never published to the OSS repo (moved out of the public docs set
+# on 2026-05-22). The signable ICLA + dual-licensing rationale also
+# live here while the contribution flow stays DCO-only in public.
+docs/private/
+
+# Claude Code per-session runtime state (scheduled-task locks). Pure
+# tooling artefact: regenerated on each session, never reviewed,
+# accidentally committed once (d670f0d) and immediately got dirty
+# diffs on every workspace open.
+.claude/scheduled_tasks.lock
+.claude/*.lock

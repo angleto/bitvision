@@ -1,0 +1,14 @@
+{% if patient_first_name -%}
+Hi {{ patient_first_name }},
+{% else -%}
+Hello,
+{% endif %}
+reminder for the operational task "{{ event_title }}"{% if event_when_local %} to complete by {{ event_when_local }}{% endif %}.
+
+{% if app_url -%}
+Open the task: {{ app_url }}
+
+{% endif -%}
+Unsubscribe: {{ opt_out_url }}
+
+— bitvision phoenix

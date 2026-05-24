@@ -1,0 +1,19 @@
+{% if patient_first_name -%}
+Ciao {{ patient_first_name }},
+{% else -%}
+Salve,
+{% endif %}
+ti ricordiamo l'appuntamento «{{ event_title }}» previsto per {{ event_when_local }}{% if event_where %} presso {{ event_where }}{% endif %}.
+
+{% if event_meeting_url -%}
+Link per partecipare: {{ event_meeting_url }}
+
+{% endif -%}
+{% if app_url -%}
+Apri il dettaglio sul fascicolo: {{ app_url }}
+
+{% endif -%}
+Se non sei più la persona giusta a cui inviare questi promemoria, puoi annullare la sottoscrizione qui:
+{{ opt_out_url }}
+
+— bitvision phoenix

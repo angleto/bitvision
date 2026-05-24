@@ -1,0 +1,30 @@
+{
+  "venvPath": ".",
+  "venv": ".venv",
+  "pythonVersion": "3.12",
+  "pythonPlatform": "Darwin",
+  "include": [
+    "backend/src",
+    "backend/tests",
+    "workers/src",
+    "workers/tests",
+    "crawler/src",
+    "crawler/tests",
+    "mcp/src",
+    "mcp/tests"
+  ],
+  "exclude": [
+    "**/__pycache__",
+    "**/.venv",
+    "**/node_modules",
+    "frontend"
+  ],
+  "extraPaths": [
+    "backend/src",
+    "workers/src",
+    "crawler/src",
+    "mcp/src"
+  ],
+  "useLibraryCodeForTypes": true,
+  "reportMissingImports": "error"
+}

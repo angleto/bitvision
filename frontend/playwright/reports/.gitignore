@@ -1,0 +1,4 @@
+# Generated audit / HTML reports — checked-in dir, ignored contents.
+html/
+*.md
+!.gitignore

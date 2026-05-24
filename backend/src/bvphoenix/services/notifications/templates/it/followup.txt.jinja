@@ -1,0 +1,14 @@
+{% if patient_first_name -%}
+Ciao {{ patient_first_name }},
+{% else -%}
+Salve,
+{% endif %}
+breve follow-up sull'appuntamento «{{ event_title }}»{% if event_when_local %} del {{ event_when_local }}{% endif %}: ricordati di registrare l'esito sul fascicolo.
+
+{% if app_url -%}
+Apri il fascicolo: {{ app_url }}
+
+{% endif -%}
+Annulla la sottoscrizione: {{ opt_out_url }}
+
+— bitvision phoenix

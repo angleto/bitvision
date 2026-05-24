@@ -1,0 +1,69 @@
+# OpenData public dataset manifest — see ./README.md for schema.
+#
+# Curated 2026-05-20. CC-BY / TCIA-PD only. Restricted-Use collections
+# excluded by policy. Subject IDs listed here are STARTER entries used
+# for the pilot; the bulk list is appended after the pilot validates
+# end-to-end (see roadmap task #9 "Bulk run").
+#
+# To verify an upstream subject exists before adding it here:
+#   curl 'https://services.cancerimagingarchive.net/services/v4/TCIA/query/getSeries?Collection=LIDC-IDRI&PatientID=LIDC-IDRI-0001&format=json'
+
+sources:
+  # ---- Lung CT (LIDC-IDRI) ---------------------------------------
+  # 1018 thoracic CT scans with annotated lung nodules. Largest
+  # publicly available reference set in this space. CC-BY 3.0.
+  - collection: TCIA/LIDC-IDRI
+    adapter: tcia
+    license_spdx: CC-BY-3.0
+    license_url: https://creativecommons.org/licenses/by/3.0/
+    citation_required: true
+    citation_text: >-
+      Armato SG 3rd, McLennan G, et al. The Lung Image Database
+      Consortium (LIDC) and Image Database Resource Initiative
+      (IDRI): a completed reference database of lung nodules on CT
+      scans. Med Phys. 2011 Feb;38(2):915-31.
+      doi:10.1118/1.3528204
+    subjects:
+      - LIDC-IDRI-0001
+      - LIDC-IDRI-0002
+      - LIDC-IDRI-0003
+
+  # ---- Breast DCE-MRI (QIN-BREAST) -------------------------------
+  # Dynamic Contrast-Enhanced breast MRI. Replaces QIN-HEADNECK in
+  # the original plan: the latter does not exist as a NBIA collection
+  # under that name (verified 2026-05-20). CC-BY 3.0.
+  - collection: TCIA/QIN-BREAST
+    adapter: tcia
+    license_spdx: CC-BY-3.0
+    license_url: https://creativecommons.org/licenses/by/3.0/
+    citation_required: true
+    citation_text: >-
+      Huang W, et al. Data from QIN-Breast. The Cancer Imaging
+      Archive. doi:10.7937/K9/TCIA.2014.A2N1IXOX
+    subjects:
+      - QIN-BREAST-01-0002
+      - QIN-BREAST-01-0003
+
+  # ---- COVID chest CR/CT (MIDRC-RICORD-1C) -----------------------
+  # COVID-positive chest. CC-BY 4.0. Hosted on TCIA infrastructure.
+  # Collection name is case-sensitive in NBIA — '1C' uppercase, the
+  # earlier '1c' silently returned empty subject lists.
+  - collection: TCIA/MIDRC-RICORD-1C
+    adapter: tcia
+    license_spdx: CC-BY-4.0
+    license_url: https://creativecommons.org/licenses/by/4.0/
+    citation_required: true
+    citation_text: >-
+      Tsai EB, Simpson S, Lungren MP, et al. The RSNA International
+      COVID-19 Open Radiology Database (RICORD). Radiology. 2021
+      Apr;299(1):E204-E213. doi:10.1148/radiol.2021203957
+    subjects:
+      - MIDRC-RICORD-1C-419639-000025
+      - MIDRC-RICORD-1C-419639-001863
+
+  # ---- OsiriX educational samples (DROPPED 2026-05-20) -----------
+  # Pixmeo migrated the BRAINIX/MANIX/PHENIX/MAGIX downloads behind
+  # a Zendesk SSO ("download-premium.php") gate; the direct ZIP URLs
+  # return 404 and the redirect target requires a Pixmeo account.
+  # Re-enable only after the Pilot picks a different educational
+  # source (e.g. Visible Human, or TCIA-hosted demo collections).

@@ -1,0 +1,281 @@
+"""Generate a BiomedCLIP embedding for a DICOM series.
+
+Runs as an arq background job. Downloads the middle slice of the series,
+decodes pixel data, converts to a PIL Image, runs BiomedCLIP inference,
+and stores the resulting 512-dim vector in the ``embeddings`` table.
+
+BiomedCLIP (microsoft/BiomedCLIP-PubMedBERT_256-vit_base_patch16_224) is
+a contrastive vision-language model trained on PubMed image-text pairs.
+The visual encoder produces 512-dim embeddings ideal for medical image
+similarity search.
+
+Requires the ``ai`` extra: ``uv sync --extra ai``
+"""
+
+from __future__ import annotations
+
+import io
+import uuid
+
+import numpy as np
+import pydicom
+from botocore.client import Config
+from sqlalchemy import text
+from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
+
+from bvworkers.config import get_settings
+
+MODEL_ID = "biomedclip-v1"
+EMBEDDING_DIM = 512
+MODEL_HUB_ID = "hf-hub:microsoft/BiomedCLIP-PubMedBERT_256-vit_base_patch16_224"
+
+# Lazy-loaded globals — set on first call so the model loads once per worker.
+_model = None
+_preprocess = None
+_tokenizer = None
+
+
+def _ensure_model():
+    """Load BiomedCLIP model on first use. Expects torch + open_clip.
+
+    BiomedCLIP is a single dual-encoder model: the same ``_model`` exposes
+    both ``encode_image`` (visual tower) and ``encode_text`` (text tower).
+    Loading it once here is enough for both the series/image path and the
+    cross-modal text path used by ``embed_text``.
+    """
+    global _model, _preprocess, _tokenizer
+    if _model is not None:
+        return
+
+    import open_clip
+
+    model, preprocess_train, preprocess_val = open_clip.create_model_and_transforms(
+        MODEL_HUB_ID
+    )
+    _tokenizer = open_clip.get_tokenizer(MODEL_HUB_ID)
+    model.eval()
+    _model = model
+    _preprocess = preprocess_val
+
+
+def _text_encoder():
+    """Return the loaded BiomedCLIP model + text tokenizer.
+
+    Shared helper for cross-modal workers (see ``embed_text``) so the 512-d
+    text vectors live in the exact same space as the image vectors produced
+    by ``_compute_embedding``. Triggers lazy model load on first call.
+    """
+    _ensure_model()
+    return _model, _tokenizer
+
+
+def _dicom_to_pil(dcm_bytes: bytes):
+    """Convert DICOM bytes to a PIL RGB Image suitable for BiomedCLIP."""
+    from PIL import Image
+
+    ds = pydicom.dcmread(io.BytesIO(dcm_bytes))
+    if "PixelData" not in ds:
+        raise ValueError("no pixel data")
+
+    arr = ds.pixel_array.astype(np.float32)
+    slope = float(getattr(ds, "RescaleSlope", 1.0) or 1.0)
+    intercept = float(getattr(ds, "RescaleIntercept", 0.0) or 0.0)
+    if slope != 1.0 or intercept != 0.0:
+        arr = arr * slope + intercept
+
+    # Normalize to 0-255 for PIL
+    vmin, vmax = arr.min(), arr.max()
+    if vmax > vmin:
+        arr = (arr - vmin) / (vmax - vmin) * 255.0
+    else:
+        arr = np.zeros_like(arr)
+    arr = arr.astype(np.uint8)
+
+    img = Image.fromarray(arr)
+    if img.mode != "RGB":
+        img = img.convert("RGB")
+    return img
+
+
+def _compute_embedding(pil_image) -> list[float]:
+    """Run BiomedCLIP visual encoder on a PIL Image, return 512-dim vector."""
+    import torch
+
+    _ensure_model()
+    image_tensor = _preprocess(pil_image).unsqueeze(0)
+    with torch.no_grad():
+        image_features = _model.encode_image(image_tensor)
+        # L2-normalize for cosine similarity
+        image_features = image_features / image_features.norm(dim=-1, keepdim=True)
+    return image_features.squeeze(0).tolist()
+
+
+def _classify_error(exc: BaseException) -> str:
+    """Best-effort short tag for the dashboard "why did this fail" column.
+
+    The tag is free-form; we look for known substrings so the UI can
+    bucket failures without the admin having to read every message.
+    Keep the vocabulary small — when in doubt fall back to the concrete
+    exception class name.
+    """
+    name = type(exc).__name__
+    msg = str(exc).lower()
+    if "no pixel data" in msg or name == "NoPixelDataError":
+        return "NoPixelDataError"
+    if "cuda" in msg and ("out of memory" in msg or "oom" in msg):
+        return "CudaOOM"
+    if "out of memory" in msg:
+        return "OutOfMemory"
+    if any(s in msg for s in ("timeout", "timed out")):
+        return "TimeoutError"
+    if any(s in msg for s in ("connection", "dns", "resolve", "unreachable", "ssl")):
+        return "NetworkError"
+    if "s3" in msg or "nosuchkey" in msg or "bucket" in msg:
+        return "S3Error"
+    return name
+
+
+async def _record_embedding_error(
+    engine, *, target_kind: str, target_id: uuid.UUID, model_id: str, exc: BaseException
+) -> None:
+    """Persist a row in ``embedding_errors`` + bump retry_count.
+
+    Uses a separate short-lived session so the original task's session
+    (which may already be in a failed-transaction state) does not get in
+    the way. Silently swallows its own DB errors — if we can't write the
+    error row we still want the original exception to propagate to arq.
+    """
+    try:
+        async with AsyncSession(engine) as err_db:
+            existing = await err_db.execute(
+                text(
+                    "SELECT retry_count FROM embedding_errors "
+                    "WHERE target_kind = :kind AND target_id = :tid AND model_id = :model "
+                    "ORDER BY failed_at DESC LIMIT 1"
+                ),
+                {"kind": target_kind, "tid": target_id, "model": model_id},
+            )
+            row = existing.first()
+            next_retry = (int(row[0]) + 1) if row else 0
+            await err_db.execute(
+                text(
+                    "INSERT INTO embedding_errors "
+                    "(target_kind, target_id, model_id, error_message, error_class, retry_count) "
+                    "VALUES (:kind, :tid, :model, :msg, :cls, :rc)"
+                ),
+                {
+                    "kind": target_kind,
+                    "tid": target_id,
+                    "model": model_id,
+                    # Truncate to keep pathological tracebacks from
+                    # bloating the table; the full traceback still
+                    # shows up in worker stdout.
+                    "msg": str(exc)[:4000] or type(exc).__name__,
+                    "cls": _classify_error(exc),
+                    "rc": next_retry,
+                },
+            )
+            await err_db.commit()
+    except Exception:
+        # Deliberately swallowed — see docstring.
+        pass
+
+
+async def embed_series(ctx: dict, series_id: str) -> dict:  # type: ignore[type-arg]
+    """Arq task: generate BiomedCLIP embedding for a series.
+
+    Takes the middle slice, runs visual encoder, stores in embeddings table.
+
+    On any exception we log a row to ``embedding_errors`` (so the admin
+    dashboard can report it) and re-raise so arq applies its normal
+    retry / failure accounting.
+    """
+    import asyncio
+
+    import boto3
+
+    settings = get_settings()
+    engine = create_async_engine(settings.database_url, pool_pre_ping=True)
+
+    s3 = boto3.client(
+        "s3",
+        endpoint_url=settings.s3_endpoint_url,
+        region_name=settings.s3_region,
+        aws_access_key_id=settings.s3_access_key,
+        aws_secret_access_key=settings.s3_secret_key,
+        config=Config(signature_version="s3v4", s3={"addressing_style": "path"}),
+    )
+
+    sid = uuid.UUID(series_id)
+
+    try:
+        async with AsyncSession(engine) as db:
+            # Check if embedding already exists
+            existing = await db.execute(
+                text(
+                    "SELECT id FROM embeddings "
+                    "WHERE target_kind = 'series' AND target_id = :sid AND model_id = :model"
+                ),
+                {"sid": sid, "model": MODEL_ID},
+            )
+            if existing.first():
+                return {"status": "already_embedded", "series_id": series_id}
+
+            # Get instances ordered by instance number
+            result = await db.execute(
+                text(
+                    "SELECT s3_bucket, s3_key FROM instances WHERE series_id = :sid "
+                    "ORDER BY instance_number ASC NULLS LAST"
+                ),
+                {"sid": sid},
+            )
+            instances = result.all()
+            if not instances:
+                return {"status": "no_instances", "series_id": series_id}
+
+            # Pick middle slice
+            mid_idx = len(instances) // 2
+            bucket, key = instances[mid_idx]
+
+            # Download DICOM, decode, compute embedding (CPU-bound)
+            def _do_embed():
+                resp = s3.get_object(Bucket=bucket, Key=key)
+                dcm_bytes = resp["Body"].read()
+                pil_img = _dicom_to_pil(dcm_bytes)
+                return _compute_embedding(pil_img)
+
+            vector = await asyncio.to_thread(_do_embed)
+
+            # Store embedding
+            # pgvector expects array literal format
+            vec_str = "[" + ",".join(str(v) for v in vector) + "]"
+            await db.execute(
+                text(
+                    "INSERT INTO embeddings (target_kind, target_id, model_id, vector) "
+                    "VALUES ('series', :sid, :model, :vec) "
+                    "ON CONFLICT (target_kind, target_id, model_id) DO UPDATE SET "
+                    "vector = EXCLUDED.vector, created_at = NOW()"
+                ),
+                {"sid": sid, "model": MODEL_ID, "vec": vec_str},
+            )
+            await db.commit()
+
+        return {
+            "status": "embedded",
+            "series_id": series_id,
+            "model_id": MODEL_ID,
+            "dim": len(vector),
+        }
+    except Exception as exc:
+        # Log for the dashboard, then re-raise so arq sees the failure
+        # and applies its retry policy.
+        await _record_embedding_error(
+            engine,
+            target_kind="series",
+            target_id=sid,
+            model_id=MODEL_ID,
+            exc=exc,
+        )
+        raise
+    finally:
+        await engine.dispose()

@@ -1,0 +1,105 @@
+bitvision phoenix
+Copyright (c) 2024-2026 Angelo Leto and the bitvision phoenix contributors
+
+This product is licensed under the GNU Affero General Public License,
+version 3 or later (AGPL-3.0-or-later). The full license text is in the
+LICENSE file at the root of this repository.
+
+Copyright in the project is held by Angelo Leto and the bitvision
+phoenix contributors. Contributions are accepted under
+AGPL-3.0-or-later with a Developer Certificate of Origin sign-off
+(see CONTRIBUTING.md).
+
+================================================================
+Trademarks
+================================================================
+
+"bitvision", "bitvision phoenix", and the bitvision phoenix logo
+(when published) are unregistered trademarks of the project, asserted
+under common-law rights pending registration with the EUIPO and the
+USPTO.
+
+The AGPL-3.0 license grants broad rights over the source code. It
+does NOT grant any right to use the bitvision project names or logos.
+
+You MAY NOT:
+
+  - use "bitvision", "bitvision phoenix", or any name confusingly
+    similar, to identify a fork, a derivative work, or a hosted
+    service offered to third parties;
+  - use the bitvision phoenix logo on a forked or derivative service,
+    or on materials promoting one, without prior written permission;
+  - state or imply endorsement, affiliation, certification, or
+    common origin between a derivative product and the bitvision
+    phoenix project.
+
+You MAY:
+
+  - refer to the project by its name in factual, descriptive
+    statements (e.g. "based on bitvision phoenix", "compatible with
+    bitvision phoenix");
+  - distribute unmodified source code of the project under the
+    project name as permitted by AGPL-3.0;
+  - cite the project in academic publications, documentation, and
+    technical talks that reference the upstream project.
+
+If you fork the codebase and run a public service or distribute a
+modified work, you must rebrand. A formal trademark policy will be
+published when the marks are registered; until then, the rules above
+govern use.
+
+================================================================
+Disclaimer of warranty and intended use
+================================================================
+
+bitvision phoenix is provided "AS IS", WITHOUT WARRANTY OF ANY KIND,
+express or implied, as stated in sections 15 and 16 of the AGPL-3.0.
+
+bitvision phoenix is NOT a medical device. It has not been evaluated
+or certified under EU Regulation 2017/745 (MDR), Regulation (EU)
+2017/746 (IVDR), 21 CFR (US FDA), or any other medical-device or
+in-vitro-diagnostic regulation. It MUST NOT be used as the basis
+for primary diagnosis, treatment decisions, screening programs, or
+any other clinical use for which a certified medical device is
+required by applicable law.
+
+Operators (any party deploying or hosting an instance of bitvision
+phoenix for end users) are solely responsible for:
+
+  - determining the regulatory classification of their deployment
+    in their jurisdiction;
+  - obtaining any certifications, authorizations, or notifications
+    required for the intended use of their deployment;
+  - compliance with applicable data-protection law, including the
+    GDPR (Regulation (EU) 2016/679) and any national health-data
+    legislation;
+  - establishing a lawful basis and managing consent for any
+    personal data, and in particular special-category health data
+    (Art. 9 GDPR), processed by the deployment;
+  - security, retention, breach-notification, and subject-rights
+    obligations applicable to that deployment.
+
+Contributions under the AGPL are provided "AS IS" by the
+contributor. Nothing in this NOTICE creates obligations of support,
+indemnification, or fitness for any particular use beyond what the
+applicable licenses expressly state.
+
+================================================================
+Third-party components
+================================================================
+
+bitvision phoenix incorporates and depends on third-party open-
+source components. Their licenses and required notices are listed
+in the manifests of each package (pyproject.toml for backend,
+workers, crawler, mcp; package.json for frontend) and are reproduced
+in any licenses bundle distributed with binary or container builds.
+
+================================================================
+Contact
+================================================================
+
+Project lead:
+  Angelo Leto <angelo@leto.blue>
+
+For trademark, licensing, security-disclosure, or regulatory
+inquiries, write to the project lead at the address above.

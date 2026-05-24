@@ -1,0 +1,469 @@
+"""MCP scope catalog — single source of truth for granular permissions.
+
+Each MCP tool declares one scope. The HTTP transport refuses the call
+when the principal's bearer scope set does not contain it. Scopes are
+issued per-assistant in phoenix's *Settings → AI assistants* page; an
+operator can grant a narrow read-only assistant just the ``*:read``
+family while a full clinical writer-assistant carries the broader
+write set.
+
+Naming convention: ``<resource>:<verb>`` where verb is one of
+``read`` / ``write`` / a domain-specific action (``download``,
+``endorse``, ``sign``, ``identify``). The catalog is intentionally
+flat — no scope hierarchy, no implicit inclusion (``*:write`` does
+NOT imply ``*:read``).
+
+Sensitivity flags surface in the UI to warn operators when granting
+a scope that exfiltrates PHI or crosses patient boundaries.
+
+Hard gates: ``synthesis:sign`` is structurally HUMAN-ONLY at the
+backend layer (the ``/sign`` endpoint refuses any request carrying
+``request.state.agent_token_id``). The scope exists in the catalog
+for completeness — granting it to an assistant has no effect because
+the backend rejects the agent's request anyway. The UI should mark
+the scope as ungrantable.
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+
+
+@dataclass(frozen=True, slots=True)
+class ScopeDef:
+    id: str
+    description: str
+    sensitive: bool = False
+    human_only: bool = False
+
+
+SCOPE_CATALOG: tuple[ScopeDef, ...] = (
+    # --- Patient identity + demographics --------------------------------------
+    ScopeDef("patients:read", "Read patient demographics, contacts, identifiers"),
+    ScopeDef("patients:write", "Create / update patient demographics + contacts"),
+    ScopeDef(
+        "patients:identify",
+        "Add / remove external_identifiers entries",
+        sensitive=True,
+    ),
+    # --- Clinical events ------------------------------------------------------
+    ScopeDef("events:read", "Read clinical_events, list per patient"),
+    ScopeDef(
+        "events:write",
+        "Create non-imaging clinical events (visit, procedure, admission, "
+        "lab batch). Also covers status transitions (confirm/reschedule/"
+        "complete/cancel/mark-missed) since each transition is an audit "
+        "anchor on the event row itself.",
+    ),
+    # --- Calendar (planning + ICS subscription) -------------------------------
+    ScopeDef(
+        "calendar:read",
+        "Read the patient calendar feed (planned + completed events) and "
+        "export ICS for personal calendar subscription",
+    ),
+    ScopeDef(
+        "calendar:write",
+        "Import ICS files into a patient calendar (dry-run + commit)",
+    ),
+    ScopeDef(
+        "calendar:sync",
+        "Bind external calendar providers (Google, Apple, CalDAV) to a "
+        "patient or user and run bidirectional sync. Reserved for step 4 "
+        "of the calendar roadmap.",
+        sensitive=True,
+    ),
+    ScopeDef(
+        "calendar:subscribe",
+        "Mint or revoke a PUBLIC, revocable iCal subscription URL for a "
+        "patient (an HMAC-signed feed an external calendar app can poll "
+        "with no login). Sensitive: the URL exposes the patient calendar "
+        "to anyone who holds it, exactly like a share-link.",
+        sensitive=True,
+    ),
+    # --- Documents (Manifestation) --------------------------------------------
+    ScopeDef("documents:read", "List + read document metadata + OCR text"),
+    ScopeDef("documents:write", "Update document metadata + content"),
+    ScopeDef("documents:ingest", "Upload new documents into a patient fascicolo"),
+    ScopeDef(
+        "documents:download",
+        "Proxy-download the original blob (PDF, DICOM ISO, scan, photo)",
+        sensitive=True,
+    ),
+    ScopeDef("documents:delete", "Soft-delete + restore documents"),
+    ScopeDef("documents:merge", "Merge / split document aliases"),
+    # --- Report contents (Expression) -----------------------------------------
+    ScopeDef("reports:read", "Read report_contents, list per event, citations"),
+    ScopeDef(
+        "reports:write",
+        "Extract a report_content from a document, update content + structured fields",
+    ),
+    ScopeDef(
+        "reports:endorse",
+        "Mark an extracted_auto report_content as endorsed (clinician validation)",
+        sensitive=True,
+    ),
+    # --- Canonical synthesis ("Referto BitVision") ----------------------------
+    ScopeDef(
+        "synthesis:write",
+        "Draft / final / reject / supersede a canonical_synthesis report_content",
+    ),
+    ScopeDef(
+        "synthesis:sign",
+        "Apply the legally-binding signature to a canonical_synthesis. "
+        "STRUCTURALLY HUMAN-ONLY: the backend refuses agent tokens regardless "
+        "of scope grant.",
+        sensitive=True,
+        human_only=True,
+    ),
+    # --- Provenance lineage ---------------------------------------------------
+    ScopeDef(
+        "provenance:read",
+        "Read append-only lineage of an artefact (audit / explanation)",
+    ),
+    # --- Cross-patient lookup -------------------------------------------------
+    ScopeDef(
+        "lookup:external",
+        "Lookup patients carrying a given external_identifier (cross-patient, "
+        "non-deterministic, returns 0..N candidates).",
+        sensitive=True,
+    ),
+    # --- Sharing -------------------------------------------------------------
+    # Mintaging a share-link delegates clinical access to the outside (email,
+    # public token, optional autogen password). The backend already gates the
+    # mint with enforce_agent_patient_scope + the owner check, but the blast
+    # radius of a leaked agent token holding sharing:write is high enough to
+    # warrant ``sensitive=True``: the operator must opt in explicitly when
+    # consenting the assistant, same posture as ``qna:ask`` and
+    # ``lookup:external``.
+    ScopeDef(
+        "sharing:write",
+        "Create / list / update / revoke share-links on studies and folders. "
+        "Mintaging a share exposes patient data to the outside.",
+        sensitive=True,
+    ),
+    # --- Annotations + markers ------------------------------------------------
+    ScopeDef("annotations:read", "Read in-viewer markers / annotations"),
+    ScopeDef("annotations:write", "Create / update / delete in-viewer markers + annotations"),
+    # --- Imaging --------------------------------------------------------------
+    ScopeDef("imaging:read", "Read DICOM series metadata, slices, thumbnails"),
+    ScopeDef(
+        "imaging:compute",
+        "Trigger expensive imaging compute (segmentations, registrations, "
+        "embeddings, descriptive analyses)",
+    ),
+    # --- Tags + metadata ------------------------------------------------------
+    ScopeDef("tags:read", "Read tags + tag aliases"),
+    ScopeDef("tags:write", "Add / replace / remove tags on study / series / patient"),
+    # --- Folders (Google Drive-style hierarchical grouping) -------------------
+    # Folders hold heterogeneous items (study / series / report / annotation /
+    # document / consultation / sub-folder). They are the primary navigation
+    # surface inside a fascicolo and the agent must be able to read + reshape
+    # the tree to reorganise the patient's records. Folder *sharing* (which
+    # mints cross-patient grants) stays human-only and lives off the
+    # ``synthesis:sign``-style ``request.state.is_agent`` refusal at the
+    # backend share endpoint.
+    ScopeDef("folders:read", "List folders + read folder contents (items, subfolders)"),
+    ScopeDef(
+        "folders:write",
+        "Create / rename / move / delete folders, add / remove items (reshape the fascicolo tree)",
+    ),
+    # --- Search ---------------------------------------------------------------
+    ScopeDef("search:read", "Full-text + semantic search across visible patients"),
+    # --- Q&A orchestrator -----------------------------------------------------
+    # ``qna:ask`` is opt-in even when the assistant already holds
+    # documents:read + patients:read because invoking the orchestrator
+    # spends platform-paid LLM tokens. The operator should grant it
+    # explicitly so a leaked agent token cannot drain the wallet.
+    ScopeDef(
+        "qna:ask",
+        "Run the Q&A orchestrator (server-side LLM tool-use loop) for a patient. "
+        "Spends platform-paid tokens billed against the user wallet.",
+        sensitive=True,
+    ),
+    # --- Care phases (semantic timeline groupings) ----------------------------
+    # Phases are persisted, patient-scoped semantic episodes (diagnosis,
+    # surgery, follow-up, surveillance, ...). Read covers timeline /
+    # phase / material / revisions; ``propose`` is dry-run-only LLM
+    # classification (no DB write); ``write`` covers everything that
+    # mutates the persisted phase set or its event assignments.
+    ScopeDef("phases:read", "Read care timeline + phases + material + revisions"),
+    ScopeDef(
+        "phases:propose",
+        "Run the LLM classifier to propose a phase partition (dry-run; no DB writes)",
+    ),
+    ScopeDef(
+        "phases:write",
+        "Apply / create / update / assign / unassign / reorder / restore care phases",
+    ),
+    # --- Notifications (outbound reminders, v3.5) ----------------------------
+    ScopeDef(
+        "notifications:read",
+        "Read outbound notification dispatches: scheduled / sent / cancelled / failed.",
+    ),
+    ScopeDef(
+        "notifications:write",
+        "Configure per-contact channels + consent, cancel queued dispatches, "
+        "send test notifications. Outbound side-effects: emails / webhooks "
+        "to third parties; treat as sensitive even though we only target "
+        "patient_contacts the operator already owns.",
+        sensitive=True,
+    ),
+    # --- Patient tasks (operational checklist, v3.4) -------------------------
+    # Tasks are private operational to-dos attached to a fascicolo
+    # (impegnativa, pharmacy run, transport). Distinct from
+    # clinical_events because they don't land in the clinical record /
+    # FSE export. Two flat scopes mirroring the events:* pattern; no
+    # narrower ``tasks:complete`` (the system has no scope hierarchy
+    # and a "just spunta done" agent gets ``tasks:write`` whose blast
+    # radius is bounded to operational state, not to clinical content).
+    ScopeDef("tasks:read", "Read patient tasks (operational checklist) + transitions audit"),
+    ScopeDef(
+        "tasks:write",
+        "Create / update / delete patient tasks + all FSM transitions "
+        "(start / snooze / wake / complete / drop / reopen)",
+    ),
+)
+
+
+SCOPE_BY_ID: dict[str, ScopeDef] = {s.id: s for s in SCOPE_CATALOG}
+
+
+# Single-source mapping tool_name → scope_id. Each new MCP tool MUST
+# register here; the dispatcher refuses to invoke a tool that has no
+# entry (fail-closed).
+TOOL_SCOPE: dict[str, str] = {
+    # --- discovery / read ---
+    "search_patients": "patients:read",
+    "search_studies": "imaging:read",
+    "search_hybrid": "search:read",
+    "semantic_search": "search:read",
+    "search_by_tags": "tags:read",
+    "list_tags": "tags:read",
+    # --- navigation / read ---
+    "get_patient": "patients:read",
+    "get_fascicolo_index": "patients:read",
+    "get_patient_timeline": "patients:read",
+    "list_patient_documents": "documents:read",
+    "get_study": "imaging:read",
+    "get_series": "imaging:read",
+    "get_series_dicom_meta": "imaging:read",
+    "get_series_thumbnail": "imaging:read",
+    "get_series_slice": "imaging:read",
+    "get_study_thumbnails": "imaging:read",
+    "describe_series": "imaging:read",
+    "list_reports": "reports:read",
+    "get_document_text": "documents:read",
+    "get_document_references": "documents:read",
+    "download_document_binary": "documents:download",
+    "get_fascicolo_bundle": "patients:read",
+    "get_lab_timeseries": "patients:read",
+    "get_annotations": "annotations:read",
+    "get_segmentations": "imaging:read",
+    "get_registration": "imaging:read",
+    "get_suv": "imaging:read",
+    "crop_series_roi": "imaging:read",
+    # --- writes ---
+    "update_patient": "patients:write",
+    "add_patient_contact": "patients:write",
+    "remove_patient_contact": "patients:write",
+    "decode_codice_fiscale": "patients:read",  # parser, no DB write
+    "update_document": "documents:write",
+    "bulk_update_documents": "documents:write",
+    "delete_document": "documents:delete",
+    "restore_document": "documents:delete",
+    "merge_documents": "documents:merge",
+    "link_document_to_study": "documents:write",  # legacy; v3 successor TBD
+    "unlink_document_from_study": "documents:write",
+    "write_annotation": "annotations:write",
+    "update_annotation": "annotations:write",
+    "delete_annotation": "annotations:write",
+    "write_clinical_note": "annotations:write",
+    "update_clinical_note": "annotations:write",
+    "delete_clinical_note": "annotations:write",
+    "embed_series": "imaging:compute",
+    "register_series": "imaging:compute",
+    # Segmentation writes — model-driven mask production. Auto + interactive
+    # land under ``imaging:compute`` (they trigger expensive worker passes
+    # and the platform pays the inference cost). External mask upload is
+    # data-only and rides ``annotations:write`` to match the backend
+    # ``WRITE_ANNOTATIONS`` permission used by the upload endpoint.
+    "auto_segment_series": "imaging:compute",
+    "predict_segmentation_interactive": "imaging:compute",
+    "upload_segmentation": "annotations:write",
+    "delete_segmentation": "annotations:write",
+    "measure_distance": "imaging:read",
+    "measure_volume": "imaging:read",
+    "find_hot_spots": "imaging:read",
+    "compute_roi_stats": "imaging:read",
+    "add_tag_to_study": "tags:write",
+    "remove_tag_from_study": "tags:write",
+    "replace_study_tags": "tags:write",
+    "update_series_metadata": "imaging:compute",
+    "update_study_metadata": "tags:write",
+    "summarize": "search:read",
+    "extract_document_entities": "reports:write",
+    "similar_to": "search:read",
+    # --- v3 tool surface (phase 3d) ----------------------------------
+    # Discovery + Navigation:
+    "find_clinical_events": "events:read",
+    "get_event": "events:read",
+    "create_clinical_event": "events:write",
+    "update_clinical_event": "events:write",
+    "delete_clinical_event": "events:write",
+    # ClinicalEvent binary attachments — sub-resource of the event, so
+    # writes ride ``events:write`` (the agent gets the whole event
+    # lifecycle under one scope). Reads ride ``events:read`` and the
+    # binary download path is auth-checked + bucket-isolated so the
+    # storage_key never leaks to the caller.
+    "upload_clinical_event_attachment": "events:write",
+    "list_clinical_event_attachments": "events:read",
+    "download_clinical_event_attachment": "events:read",
+    "delete_clinical_event_attachment": "events:write",
+    "promote_clinical_event_attachment": "events:write",
+    # --- Sharing (sensitive scope; see SCOPE_CATALOG sharing:write) ----
+    "create_study_share_link": "sharing:write",
+    "create_folder_share_link": "sharing:write",
+    "list_share_links": "sharing:write",
+    "update_share_link": "sharing:write",
+    "revoke_share_link": "sharing:write",
+    # --- Calendar transitions (FSM-checked sub-resources) ----------------
+    "confirm_event": "events:write",
+    "reschedule_event": "events:write",
+    "complete_event": "events:write",
+    "cancel_event": "events:write",
+    "mark_event_missed": "events:write",
+    # --- Calendar discovery + feed ---------------------------------------
+    "find_upcoming_events": "events:read",
+    "find_overdue_events": "events:read",
+    "find_events_by_date_range": "events:read",
+    "export_calendar_ics": "calendar:read",
+    "export_event_ics": "calendar:read",
+    "list_calendar_subscriptions": "calendar:read",
+    "create_calendar_subscription": "calendar:subscribe",
+    "revoke_calendar_subscription": "calendar:subscribe",
+    "propose_event_link": "documents:read",
+    "confirm_event_link": "reports:write",
+    "find_reports": "reports:read",
+    "get_report_content": "reports:read",
+    "get_provenance_chain": "provenance:read",
+    "lookup_external_identifier": "lookup:external",
+    # Ingestion:
+    "extract_report_content": "reports:write",
+    "link_external_identifier": "patients:identify",
+    # Synthesis:
+    "create_canonical_referto": "synthesis:write",
+    "cite_source": "reports:write",
+    "endorse_report_content": "reports:endorse",
+    "reject_report_content": "synthesis:write",
+    "supersede_report_content": "synthesis:write",
+    "update_report_content": "reports:write",
+    # Document operations:
+    "ingest_document": "documents:ingest",
+    "merge_aliases": "documents:merge",
+    "split_alias": "documents:merge",
+    "download_source_document": "documents:download",
+    # Folders (Google Drive-style hierarchical grouping):
+    "list_folders": "folders:read",
+    "get_folder": "folders:read",
+    "create_folder": "folders:write",
+    "update_folder": "folders:write",
+    "delete_folder": "folders:write",
+    "add_item_to_folder": "folders:write",
+    "remove_item_from_folder": "folders:write",
+    # Care phases (semantic timeline groupings):
+    "get_care_timeline": "phases:read",
+    "render_care_timeline_svg": "phases:read",
+    "get_care_phase": "phases:read",
+    "list_care_phase_material": "phases:read",
+    "list_care_phase_revisions": "phases:read",
+    "propose_care_phases": "phases:propose",
+    "apply_phase_proposal": "phases:write",
+    "create_care_phase": "phases:write",
+    "update_care_phase": "phases:write",
+    "assign_event_to_phase": "phases:write",
+    "unassign_event_from_phase": "phases:write",
+    "reorder_care_phases": "phases:write",
+    "restore_care_phase_revision": "phases:write",
+    "list_care_phases": "phases:read",
+    "get_care_timeline_health": "phases:read",
+    "delete_care_phase": "phases:write",
+    "export_care_timeline_ics": "phases:read",
+    "export_care_timeline_pdf": "phases:read",
+    # Caller introspection: scope-free (any authenticated session can
+    # ask "what scopes do I hold?"). Mapped to ``patients:read`` as
+    # the lowest-privilege scope we already require for any session.
+    "get_my_scopes": "patients:read",
+    # Inline documentation: returns purely static Markdown guides
+    # (mention DSL, agent-writes contract, scopes overview). No PHI,
+    # no runtime state. Mapped to ``patients:read`` for the same
+    # reason as ``get_my_scopes``: every authenticated session holds
+    # it, and the tool must be discoverable / invokable regardless
+    # of which write scopes the assistant carries.
+    "help": "patients:read",
+    # --- Q&A orchestrator (M6 of the patient Q&A plan) -------------
+    # The high-level tool runs the server-side agent loop and is
+    # billed against the user wallet; the read-only chunk search is
+    # mapped to documents:read since it returns excerpts of patient
+    # content the assistant already holds the right to read.
+    "ask_about_patient": "qna:ask",
+    "search_text_chunks": "documents:read",
+    # Notifications (v3.5)
+    "list_notification_dispatches": "notifications:read",
+    "cancel_pending_dispatch": "notifications:write",
+    "configure_contact_channel": "notifications:write",
+    "revoke_consent": "notifications:write",
+    "send_test_notification": "notifications:write",
+    "start_telegram_link": "notifications:write",
+    "check_telegram_link": "notifications:read",
+    "unlink_telegram": "notifications:write",
+    # Patient tasks (v3.4 — operational checklist alongside clinical events):
+    "list_patient_tasks": "tasks:read",
+    "get_patient_task": "tasks:read",
+    "find_overdue_tasks": "tasks:read",
+    "find_tasks_due_today": "tasks:read",
+    "create_patient_task": "tasks:write",
+    "update_patient_task": "tasks:write",
+    "delete_patient_task": "tasks:write",
+    "restore_patient_task": "tasks:write",
+    "start_task": "tasks:write",
+    "snooze_task": "tasks:write",
+    "wake_task": "tasks:write",
+    "complete_task": "tasks:write",
+    "drop_task": "tasks:write",
+    "reopen_task": "tasks:write",
+    "assign_task_to_contact": "tasks:write",
+    # Calendar export per single task — read-only, so the more lenient
+    # tasks:read scope (NOT calendar:read) so an assistant with only
+    # the task-checklist scope can still hand the user a downloadable
+    # invite. Mirrors export_event_ics but rides ``tasks:read`` rather
+    # than ``calendar:read`` because tasks are not on the calendar feed.
+    "export_task_ics": "tasks:read",
+}
+
+
+def scope_for_tool(tool_name: str) -> str | None:
+    """Return the scope id required to invoke the tool, or None if the
+    tool is not in the catalog (which the dispatcher treats as a
+    fail-closed condition: unknown tool = unauthorised)."""
+    return TOOL_SCOPE.get(tool_name)
+
+
+def scope_is_sensitive(scope_id: str) -> bool:
+    s = SCOPE_BY_ID.get(scope_id)
+    return bool(s and s.sensitive)
+
+
+def scope_is_human_only(scope_id: str) -> bool:
+    s = SCOPE_BY_ID.get(scope_id)
+    return bool(s and s.human_only)
+
+
+__all__ = [
+    "SCOPE_BY_ID",
+    "SCOPE_CATALOG",
+    "TOOL_SCOPE",
+    "ScopeDef",
+    "scope_for_tool",
+    "scope_is_human_only",
+    "scope_is_sensitive",
+]

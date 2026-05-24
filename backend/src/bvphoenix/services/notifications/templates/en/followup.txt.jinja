@@ -1,0 +1,14 @@
+{% if patient_first_name -%}
+Hi {{ patient_first_name }},
+{% else -%}
+Hello,
+{% endif %}
+quick follow-up on the appointment "{{ event_title }}"{% if event_when_local %} on {{ event_when_local }}{% endif %}: remember to record the outcome on the record.
+
+{% if app_url -%}
+Open the record: {{ app_url }}
+
+{% endif -%}
+Unsubscribe: {{ opt_out_url }}
+
+— bitvision phoenix

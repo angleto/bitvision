@@ -1,0 +1,15 @@
+{% if patient_first_name -%}
+Ciao {{ patient_first_name }},
+{% else -%}
+Salve,
+{% endif %}
+ti ricordiamo l'attività operativa «{{ event_title }}»{% if event_when_local %} da completare entro {{ event_when_local }}{% endif %}.
+
+{% if app_url -%}
+Apri l'attività sul fascicolo: {{ app_url }}
+
+{% endif -%}
+Se non vuoi più ricevere questi promemoria, annulla la sottoscrizione qui:
+{{ opt_out_url }}
+
+— bitvision phoenix
