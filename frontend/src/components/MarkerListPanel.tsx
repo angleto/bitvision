@@ -280,9 +280,17 @@ export default function MarkerListPanel({
   // newly-created notes. Subsequent entries are overlays (e.g. the
   // PET fusion series of a PET-CT view) so that markers anchored to
   // any visible series surface in the list.
+  // Stabilise on the CONTENT of ``seriesIds``, not its array identity.
+  // Callers routinely pass a fresh ``[primary, overlay].filter(...)``
+  // literal on every render (e.g. the PET-CT fusion viewer). Keying the
+  // memo on the array reference would recompute ``activeSeriesIds`` — and
+  // ``refresh`` below — on every parent render, refiring the fetch effect
+  // on every animation frame and storming /markers + /notes (6 calls per
+  // frame -> ERR_INSUFFICIENT_RESOURCES, starving the actual image load).
+  const seriesIdsKey = (seriesIds ?? []).filter((s): s is string => !!s).join(" ");
   const activeSeriesIds = useMemo(
-    () => Array.from(new Set((seriesIds ?? []).filter((s): s is string => !!s))),
-    [seriesIds],
+    () => (seriesIdsKey ? Array.from(new Set(seriesIdsKey.split(" "))) : []),
+    [seriesIdsKey],
   );
   const primarySeriesId = activeSeriesIds[0] ?? null;
   const t = useTranslations("markerList");
@@ -301,6 +309,12 @@ export default function MarkerListPanel({
   const [editingNoteId, setEditingNoteId] = useState<string | null>(null);
   const [editDraft, setEditDraft] = useState("");
   const fileInputRef = useRef<HTMLInputElement>(null);
+  // Hold the latest ``onMarkersLoaded`` in a ref so ``refresh`` never
+  // depends on its identity. Callers pass an inline closure that is a new
+  // function every render; including it in ``refresh``'s deps would make
+  // the fetch effect refire on every parent render (the storm above).
+  const onMarkersLoadedRef = useRef(onMarkersLoaded);
+  onMarkersLoadedRef.current = onMarkersLoaded;
 
   const refresh = useCallback(async () => {
     setErr(null);
@@ -381,11 +395,11 @@ export default function MarkerListPanel({
       // Lift the persisted markers up to the parent so the SVG
       // overlay on the viewport can render the ones Cornerstone does
       // not draw itself (bbox.lesion / fiducial / text-overlay).
-      onMarkersLoaded?.(mergedMarkers);
+      onMarkersLoadedRef.current?.(mergedMarkers);
     } catch (e) {
       setErr(e instanceof ApiError ? e.message : t("loadFailed"));
     }
-  }, [patientId, studyId, activeSeriesIds, t, tKind, onMarkersLoaded]);
+  }, [patientId, studyId, activeSeriesIds, t, tKind]);
 
   // biome-ignore lint/correctness/useExhaustiveDependencies: ``refreshKey`` is the explicit refetch trigger bumped after annotation mutations.
   useEffect(() => {
