@@ -9,7 +9,7 @@ from sqlalchemy.engine import Connection
 from sqlalchemy.ext.asyncio import async_engine_from_config
 
 from bvphoenix.config import get_settings
-from bvphoenix.db import models  # noqa: F401  — populates Base.metadata
+from bvphoenix.db import models
 from bvphoenix.db.base import Base
 
 config = context.config
@@ -36,17 +36,22 @@ def run_migrations_offline() -> None:
 
 
 def do_run_migrations(connection: Connection) -> None:
-    # The ``alembic_version`` table was created with VARCHAR(32) on
-    # the very first deploy (alembic's pre-1.x default). Recent
-    # revision IDs like ``0058_patient_documents_soft_delete`` (34
-    # chars) blow the limit and the upgrade aborts mid-way. Widen
-    # the column on every run so existing deploys self-heal without
-    # an out-of-band ALTER. ``IF EXISTS`` makes this a no-op for a
-    # fresh database where the table doesn't yet exist.
+    # The ``alembic_version`` table is VARCHAR(32) by alembic's default,
+    # but revision IDs like ``0007_opendata_pathology_constraints`` (35
+    # chars) blow the limit and the upgrade aborts mid-way. We handle
+    # both shapes of database:
+    #
+    # * Existing deploy: the table is there but narrow — ``ALTER`` widens
+    #   it so it self-heals without an out-of-band migration.
+    # * Fresh database (CI gate, new deploy): ``schema.sql`` does NOT
+    #   define ``alembic_version`` (pg_dump excludes it), so alembic would
+    #   create it at VARCHAR(32) on first use — too late for the ALTER's
+    #   ``IF EXISTS`` to help. Pre-create it WIDE here so alembic adopts
+    #   the existing wide table instead of making a narrow one.
     #
     # The explicit ``commit()`` is critical: SQLAlchemy 2.0's
     # ``engine.connect()`` returns a connection in "future" mode that
-    # does NOT autocommit. Without this commit the ALTER lives in an
+    # does NOT autocommit. Without this commit the DDL lives in an
     # outer transaction that gets implicitly rolled back when the
     # async wrapper closes the connection — alembic's own
     # ``begin_transaction`` opens a savepoint inside that outer
@@ -55,8 +60,12 @@ def do_run_migrations(connection: Connection) -> None:
     # TABLE issued by the migrations all vanish. Same fix below
     # after ``run_migrations`` covers that whole block too.
     connection.exec_driver_sql(
-        "ALTER TABLE IF EXISTS alembic_version "
-        "ALTER COLUMN version_num TYPE VARCHAR(255)"
+        "CREATE TABLE IF NOT EXISTS alembic_version ("
+        "version_num VARCHAR(255) NOT NULL, "
+        "CONSTRAINT alembic_version_pkc PRIMARY KEY (version_num))"
+    )
+    connection.exec_driver_sql(
+        "ALTER TABLE IF EXISTS alembic_version ALTER COLUMN version_num TYPE VARCHAR(255)"
     )
     connection.commit()
     context.configure(connection=connection, target_metadata=target_metadata)
