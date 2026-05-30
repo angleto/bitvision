@@ -92,6 +92,11 @@ export interface VolumeViewerHandle {
   setFusionVolume: (fusion: FusionVolume | null) => void;
   setFusionOpacity: (v: number) => void;
   setFusionColormap: (c: FusionColormap) => void;
+  /** Uptake-isolation threshold for the fusion overlay, in [0, 0.95]
+   *  as a fraction of the displayed SUV/percentile range: alpha=0
+   *  below it. Higher = only the hottest focal lesions; lower = more
+   *  diffuse uptake. 0.65 = previous fixed default. */
+  setFusionThreshold: (v: number) => void;
   resetCamera: () => void;
   colorPreset: ColorPreset;
   blendMode: BlendMode;
@@ -711,6 +716,7 @@ const VolumeViewer = forwardRef<VolumeViewerHandle, Props>(function VolumeViewer
     fusionRange: [number, number] | null;
     fusionColormap: FusionColormap;
     fusionOpacity: number;
+    fusionThreshold: number;
   } | null>(null);
 
   // Default the preset to a modality-appropriate one when modality is
@@ -901,6 +907,7 @@ const VolumeViewer = forwardRef<VolumeViewerHandle, Props>(function VolumeViewer
           fusion.colormap,
           robustFusionRange,
           fusion.opacity,
+          v.fusionThreshold,
         );
       }
 
@@ -910,14 +917,42 @@ const VolumeViewer = forwardRef<VolumeViewerHandle, Props>(function VolumeViewer
       const v = vtkRefs.current;
       if (!v || !v.fusionCtf || !v.fusionOtf || !v.fusionRange) return;
       v.fusionOpacity = value;
-      applyFusionTransfer(v.fusionCtf, v.fusionOtf, v.fusionColormap, v.fusionRange, value);
+      applyFusionTransfer(
+        v.fusionCtf,
+        v.fusionOtf,
+        v.fusionColormap,
+        v.fusionRange,
+        value,
+        v.fusionThreshold,
+      );
       v.grw.getRenderWindow().render();
     },
     setFusionColormap: (colormap: FusionColormap) => {
       const v = vtkRefs.current;
       if (!v || !v.fusionCtf || !v.fusionOtf || !v.fusionRange) return;
       v.fusionColormap = colormap;
-      applyFusionTransfer(v.fusionCtf, v.fusionOtf, colormap, v.fusionRange, v.fusionOpacity);
+      applyFusionTransfer(
+        v.fusionCtf,
+        v.fusionOtf,
+        colormap,
+        v.fusionRange,
+        v.fusionOpacity,
+        v.fusionThreshold,
+      );
+      v.grw.getRenderWindow().render();
+    },
+    setFusionThreshold: (value: number) => {
+      const v = vtkRefs.current;
+      if (!v || !v.fusionCtf || !v.fusionOtf || !v.fusionRange) return;
+      v.fusionThreshold = value;
+      applyFusionTransfer(
+        v.fusionCtf,
+        v.fusionOtf,
+        v.fusionColormap,
+        v.fusionRange,
+        v.fusionOpacity,
+        value,
+      );
       v.grw.getRenderWindow().render();
     },
     setSegmentationMask: (mask: SegMask | null) => {
@@ -1114,6 +1149,7 @@ const VolumeViewer = forwardRef<VolumeViewerHandle, Props>(function VolumeViewer
       fusionRange: null,
       fusionColormap: "hot",
       fusionOpacity: 0.6,
+      fusionThreshold: 0.65,
     };
 
     applyShadeParams(prop, shade, cinematic);
@@ -1332,6 +1368,7 @@ function applyFusionTransfer(
   colormap: FusionColormap,
   range: [number, number],
   opacity: number,
+  threshold = 0.65,
 ) {
   const [lo, hi] = range;
   const span = hi - lo || 1;
@@ -1345,16 +1382,20 @@ function applyFusionTransfer(
   // composite pass, so any lingering low-alpha contribution
   // accumulates along the ray and re-introduces the "patient
   // silhouette cylinder" the primary OTF goes to great lengths to
-  // avoid. We mirror the primary preset strategy: hard step at
-  // t=0.65 (alpha = 0 → ``opacity``), nothing visible below.
-  // Combined with the percentile-based range the caller now passes,
-  // only the upper percentile of the fusion histogram (lesions for
-  // PT, contrast pool for CT angio) renders.
+  // avoid. We mirror the primary preset strategy: a hard alpha=0 step
+  // up to ``threshold`` (a fraction of the displayed SUV/percentile
+  // range), then a short ramp to the blend ``opacity``. ``threshold``
+  // is the user's uptake-isolation knob: raising it suppresses the
+  // physiologic background (liver, blood pool, bladder) so only the
+  // hottest focal lesions remain; lowering it reveals more diffuse
+  // uptake. Default 0.65 reproduces the previous fixed behaviour.
+  const thr = Math.max(0, Math.min(0.95, threshold));
+  const mid = thr + (1 - thr) * 0.6;
   otf.removeAllPoints();
   otf.addPoint(lo, 0);
-  otf.addPoint(lo + 0.65 * span, 0);
-  otf.addPoint(lo + 0.66 * span, 0.4 * opacity);
-  otf.addPoint(lo + 0.85 * span, 0.85 * opacity);
+  otf.addPoint(lo + thr * span, 0);
+  otf.addPoint(lo + Math.min(thr + 0.01, 0.999) * span, 0.4 * opacity);
+  otf.addPoint(lo + mid * span, 0.85 * opacity);
   otf.addPoint(hi, opacity);
 }
 
