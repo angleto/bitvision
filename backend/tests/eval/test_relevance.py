@@ -64,6 +64,11 @@ async def seeded_corpus(db_session, make_user, make_study):
             description=spec.description,
             modality=spec.modality,
             body_part=spec.body_part,
+            # Neutral series text: make_study otherwise defaults series
+            # description to "<modality> <body_part>" (e.g. "CT CHEST"),
+            # which would let a thesaurus expansion like torace->chest
+            # match on the body part and muddy the exact-set assertions.
+            series_description="serie",
         )
         marker_to_id[spec.marker] = str(study.id)
     # Warm the thesaurus cache so synonym-expansion golden queries fire
