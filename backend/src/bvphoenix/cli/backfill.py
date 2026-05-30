@@ -236,5 +236,126 @@ def chunks(
     click.echo("Run an Arq worker with the `ai` extra to process the queue.")
 
 
+# Image-embedding backfill ----------------------------------------------
+# ``bvphoenix-import`` only enqueues ``pack_volume`` for imported series,
+# never ``embed_series`` — so bulk-imported studies have no BiomedCLIP
+# image vector and similarity search (``/api/similar-to``) finds nothing.
+# This command backfills those vectors. ``embed_series`` is idempotent.
+_IMAGE_MODEL_ID = "biomedclip-v1"  # what workers/embed_series.py MODEL_ID writes
+
+
+def _series_candidate_ids(
+    session: Session,
+    *,
+    patient_id: uuid.UUID | None,
+    only_missing: bool,
+) -> list[uuid.UUID]:
+    where: list[str] = []
+    params: dict[str, object] = {}
+    if patient_id is not None:
+        where.append("st.patient_id = :pid")
+        params["pid"] = patient_id
+    if only_missing:
+        where.append(
+            "NOT EXISTS (SELECT 1 FROM embeddings e "
+            "WHERE e.target_kind = 'series' AND e.target_id = s.id "
+            "AND e.model_id = :model)"
+        )
+        params["model"] = _IMAGE_MODEL_ID
+    clause = (" WHERE " + " AND ".join(where)) if where else ""
+    sql = (
+        "SELECT s.id FROM series s "
+        "JOIN imaging_studies st ON st.id = s.study_id"
+        f"{clause} ORDER BY s.id"
+    )
+    rows = session.execute(text(sql), params).all()
+    return [uuid.UUID(str(r[0])) for r in rows]
+
+
+async def _enqueue_embed(ids: list[uuid.UUID]) -> int:
+    settings = get_settings()
+    redis = await create_pool(redis_settings(settings.redis_url))
+    try:
+        count = 0
+        for sid in ids:
+            await redis.enqueue_job("embed_series", str(sid))
+            count += 1
+        return count
+    finally:
+        await redis.close()
+
+
+@main.command("embed")
+@click.option(
+    "--patient",
+    "patient",
+    default=None,
+    help="Patient UUID. Mutually exclusive with --all.",
+)
+@click.option(
+    "--all",
+    "all_patients",
+    is_flag=True,
+    default=False,
+    help="Backfill image embeddings for every patient. Use with care on large datasets.",
+)
+@click.option(
+    "--only-missing/--all-series",
+    "only_missing",
+    default=True,
+    show_default=True,
+    help="Only series lacking a biomedclip-v1 vector (default), or re-embed every series.",
+)
+@click.option(
+    "--dry-run",
+    is_flag=True,
+    help="Count candidate series and print the plan without enqueueing.",
+)
+def embed(
+    patient: str | None,
+    all_patients: bool,
+    only_missing: bool,
+    dry_run: bool,
+) -> None:
+    """Enqueue BiomedCLIP image-embedding jobs so similarity search works.
+
+    ``bvphoenix-import`` only enqueues volume packing, so imported series
+    have no image vector. This enqueues ``embed_series`` for each
+    candidate series (idempotent). Requires an Arq worker with the ``ai``
+    extra running to process the queue.
+    """
+    if (patient is None) == (not all_patients):
+        click.echo("specify exactly one of --patient <id> or --all", err=True)
+        sys.exit(2)
+
+    patient_uuid: uuid.UUID | None = None
+    if patient is not None:
+        try:
+            patient_uuid = uuid.UUID(patient)
+        except ValueError:
+            click.echo(f"--patient must be a UUID, got {patient!r}", err=True)
+            sys.exit(2)
+
+    engine = _engine()
+    with Session(engine) as session:
+        ids = _series_candidate_ids(session, patient_id=patient_uuid, only_missing=only_missing)
+
+    scope = f"patient {patient_uuid}" if patient_uuid else "ALL patients"
+    click.echo(f"scope            : {scope}")
+    click.echo(f"only-missing     : {only_missing}")
+    click.echo(f"series candidates: {len(ids)}")
+
+    if dry_run:
+        click.echo("DRY RUN — no jobs enqueued.")
+        return
+    if not ids:
+        click.echo("nothing to do")
+        return
+
+    n = asyncio.run(_enqueue_embed(ids))
+    click.echo(f"enqueued embed_series: {n} jobs")
+    click.echo("Run an Arq worker with the `ai` extra to process the queue.")
+
+
 if __name__ == "__main__":
     main()
