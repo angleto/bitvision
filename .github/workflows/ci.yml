@@ -1,18 +1,18 @@
 name: CI
 
-# Triggers: a push to the dev branch (``v3.10``) runs the lint + test +
-# frontend-build gates so the CI badge reflects dev-branch health;
-# annotated tags (``v3.x.y``) additionally run the ``docker-images``
-# job to build + push the release images; pull requests get the
-# lint + test gate before merge. Image builds stay tag-only via the
-# ``if:`` guard on ``docker-images`` so WIP branch pushes don't burn
-# ARM runner minutes building images.
+# Triggers: a push to the dev branch (``v4.0``) or a ``feat/**`` working
+# branch runs the lint + test + frontend-build + search-eval gates so the
+# CI badge reflects branch health; annotated tags (``v*``) additionally
+# run the ``docker-images`` job to build + push the release images;
+# pull requests to ``v4.0`` get the gate before merge. Image builds stay
+# tag-only via the ``if:`` guard on ``docker-images`` so WIP branch pushes
+# don't burn ARM runner minutes building images.
 on:
   push:
-    branches: [v3.10]
+    branches: [v4.0, "feat/**"]
     tags: ["v*"]
   pull_request:
-    branches: [v3.10]
+    branches: [v4.0]
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
