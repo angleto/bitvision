@@ -41,6 +41,41 @@ jobs:
           uv run python ../scripts/lint_phi_safe.py
           uv run pytest
 
+  search-eval:
+    name: Search relevance gate
+    runs-on: ubuntu-latest
+    # Seeds the golden corpus into a real pgvector DB and asserts
+    # recall/nDCG/MRR + cross-patient isolation through the live
+    # endpoints. FTS-only: no ``ai`` extra, so no BiomedCLIP download —
+    # the lexical-relevance + security invariants are gated cheaply.
+    services:
+      postgres:
+        image: pgvector/pgvector:pg16
+        env:
+          POSTGRES_USER: bvphoenix
+          POSTGRES_PASSWORD: bvphoenix
+          POSTGRES_DB: bvphoenix
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U bvphoenix"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+    env:
+      BVP_DATABASE_URL: postgresql+asyncpg://bvphoenix:bvphoenix@localhost:5432/bvphoenix
+      BVP_DATABASE_URL_SYNC: postgresql+psycopg://bvphoenix:bvphoenix@localhost:5432/bvphoenix
+      BVP_RUN_SEARCH_INTEGRATION: "1"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+      - name: Migrate + run relevance gate
+        working-directory: backend
+        run: |
+          uv sync --extra dev
+          uv run alembic upgrade head
+          uv run pytest tests/eval tests/test_search.py -q
+
   frontend-build:
     name: Frontend build
     runs-on: ubuntu-latest
@@ -68,7 +103,7 @@ jobs:
     # multi-arch fan-out is ever needed — would have to re-add
     # ``docker/setup-qemu-action`` in that case.
     runs-on: ubuntu-24.04-arm
-    needs: [backend-test, frontend-build]
+    needs: [backend-test, search-eval, frontend-build]
     if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
     strategy:
       # Don't cancel sibling builds on first failure: the four images

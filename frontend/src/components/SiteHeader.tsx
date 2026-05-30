@@ -72,6 +72,7 @@ export default function SiteHeader() {
               <Link href="/patients">{t("patients")}</Link>
               <Link href="/tags">{t("tags")}</Link>
               <Link href="/search">{t("search")}</Link>
+              <Link href="/search/visual">{t("visualSearch")}</Link>
               <Link href="/upload">{t("upload")}</Link>
               {user.is_admin && <AdminMenu />}
               <ActiveJobsPanel />

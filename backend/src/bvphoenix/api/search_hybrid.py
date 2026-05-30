@@ -9,12 +9,12 @@ same working set of studies the caller is allowed to see:
    (case-insensitive LIKE on ``namespace:value``), count how many
    distinct matching tags each study has, return top 50 ordered by
    that count descending.
-2. **text** — Postgres ``ts_rank_cd`` of ``plainto_tsquery(q)`` over
-   the existing GIN index on study + series descriptions. Top 50.
+2. **text** — Postgres ``ts_rank_cd`` of the dual-config
+   (italian || simple) query over the generated tsvector columns on
+   study + series descriptions (their GIN indexes, migration 0010). Top 50.
 3. **image** — BiomedCLIP text encoder on ``q`` → pgvector cosine
    similarity against series-level image embeddings
-   (``model_id='biomedclip-image-v1'``, falling back to the
-   ``biomedclip-v1`` worker default if no text-variant row exists).
+   (``model_id='biomedclip-v1'``, as written by the embed_series worker).
 
 Each list is fed into Reciprocal Rank Fusion
 (``services.rrf.rrf_fuse``) with the caller-supplied weights. The
@@ -46,6 +46,8 @@ from bvphoenix.db.session import get_db
 from bvphoenix.services.permissions import apply_scope_filter, visible_studies_filter
 from bvphoenix.services.rate_limit import SEARCH_LIMIT, limiter
 from bvphoenix.services.rrf import rrf_fuse, rrf_signal_contribution
+from bvphoenix.services.thesaurus import expand_tsquery
+from bvphoenix.services.vector_search import tune_vector_query
 
 logger = logging.getLogger(__name__)
 
@@ -58,11 +60,13 @@ RRF_K = 60
 # has enough overlap between lists to find meaningful intersections.
 PER_SIGNAL_LIMIT = 50
 
-# Model id used when querying the embeddings table. The worker currently
-# writes ``biomedclip-v1`` (image encoder); a future text/image-joint
-# pipeline may populate ``biomedclip-image-v1`` separately. We try the
-# explicit text-bound id first then fall back.
-EMBED_MODEL_IDS = ("biomedclip-image-v1", "biomedclip-v1")
+# model_id under which the series image embeddings are stored. The
+# indexer (workers/embed_series.py) writes ``biomedclip-v1``; the
+# registry *names* the same model ``biomedclip-image-v1`` but that name
+# is not what lands in ``embeddings.model_id``. Querying a single id
+# (rather than an ``IN`` over several) avoids ever fusing two distinct
+# embedding spaces into one cosine ranking.
+SERIES_EMBED_MODEL_ID = "biomedclip-v1"
 
 
 # ---- Response shape --------------------------------------------------------
@@ -187,9 +191,10 @@ async def _text_signal(
     Mirrors the tsvector expressions used by the existing ``/search``
     endpoint so we hit the same GIN indexes.
     """
-    ts_query = func.plainto_tsquery("simple", q)
-    study_vec = func.to_tsvector("simple", func.coalesce(ImagingStudy.study_description, ""))
-    series_vec = func.to_tsvector("simple", func.coalesce(Series.series_description, ""))
+    ts_query = expand_tsquery(q)
+    # Dual-config (italian || simple) generated columns; see services/fts.py.
+    study_vec = ImagingStudy.study_description_tsv
+    series_vec = Series.series_description_tsv
     # Combine the two tsvectors so a single ts_rank reflects both.
     # ``||`` concatenates tsvectors (with position preserved).
     combined_vec = study_vec.op("||")(series_vec)
@@ -270,9 +275,14 @@ async def semantic_search_series(
     query against series embeddings, dedupes to studies preserving
     rank. Returns at most ``k`` study ids.
     """
-    # BiomedCLIP is CPU-bound and blocking (~100ms inference, ~1.5s cold
-    # load). Offload so we don't stall the event loop.
-    vector = await asyncio.to_thread(_embed_text_query, q)
+    # Prefer the out-of-process inference service (BVP_INFERENCE_SVC_URL);
+    # else BiomedCLIP runs in-process, CPU-bound and blocking (~100ms
+    # inference, ~1.5s cold load), offloaded so we don't stall the loop.
+    from bvphoenix.services.inference_client import encode_text
+
+    vector = await encode_text(q)
+    if vector is None:
+        vector = await asyncio.to_thread(_embed_text_query, q)
     if vector is None:
         return []
 
@@ -284,7 +294,7 @@ async def semantic_search_series(
         .select_from(Embedding.__table__.join(Series, Series.id == Embedding.target_id))
         .where(
             Embedding.target_kind == "series",
-            Embedding.model_id.in_(EMBED_MODEL_IDS),
+            Embedding.model_id == SERIES_EMBED_MODEL_ID,
         )
         .order_by("distance")
         # Pull a wider slab so we can dedupe to study without losing depth.
@@ -293,6 +303,7 @@ async def semantic_search_series(
     if visible_ids_sq is not None:
         stmt = stmt.where(Series.study_id.in_(visible_ids_sq))
 
+    await tune_vector_query(db, k=k * 3, filtered=visible_ids_sq is not None)
     rows = (await db.execute(stmt)).all()
     seen: set[uuid.UUID] = set()
     ordered: list[uuid.UUID] = []

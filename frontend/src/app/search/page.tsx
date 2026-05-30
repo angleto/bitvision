@@ -37,8 +37,17 @@ import { ApiError, type HybridSearchOut, type Paginated, type Study, searchApi }
 
 type Mode = "studies" | "metadata";
 
+// Page size for the metadata path. The hybrid path is not paginated
+// (the backend honours ``k`` only, not limit/offset), so it stays at a
+// single fixed window — see ``runSearch``.
+const META_LIMIT = 50;
+
 interface UnifiedResults {
   hybrid?: HybridSearchOut;
+  // For the metadata path we keep the running accumulator of items
+  // (appended across "Load more" clicks) alongside the last page's
+  // ``total`` / ``offset`` / ``facets`` so the sidebar and the
+  // "Showing X of Y" counter stay correct.
   meta?: Paginated<Study>;
 }
 
@@ -50,6 +59,10 @@ export default function UnifiedSearchPage() {
   const [filters, setFilters] = useState<SearchFilters>(EMPTY_FILTERS);
   const [results, setResults] = useState<UnifiedResults | null>(null);
   const [busy, setBusy] = useState(false);
+  // Distinct from ``busy`` so the results list stays visible (and the
+  // "Load more" button shows its own pending label) while the next
+  // page streams in, instead of being blanked by the full-page status.
+  const [loadingMore, setLoadingMore] = useState(false);
   const [err, setErr] = useState<string | null>(null);
 
   const hasActiveFilter = useCallback((f: SearchFilters): boolean => {
@@ -63,7 +76,11 @@ export default function UnifiedSearchPage() {
   }, []);
 
   const runSearch = useCallback(
-    async (qq: string, m: Mode, f: SearchFilters) => {
+    // ``offset`` + ``append`` drive metadata pagination. offset=0 with
+    // append=false is a fresh search (replaces the list); a positive
+    // offset with append=true is a "Load more" click (appends the next
+    // page to the running accumulator). The hybrid path ignores both.
+    async (qq: string, m: Mode, f: SearchFilters, offset = 0, append = false) => {
       const trimmed = qq.trim();
       // "Browse" semantics: with no query but with at least one filter
       // active (scope=Public is the common case — "show me the OpenData
@@ -77,14 +94,24 @@ export default function UnifiedSearchPage() {
         setResults(null);
         return;
       }
-      setBusy(true);
+      // A "Load more" click keeps the existing list on screen and uses a
+      // separate pending flag; a fresh search blanks via ``busy``.
+      if (append) setLoadingMore(true);
+      else setBusy(true);
       setErr(null);
       try {
-        // Hybrid requires a query (signals rank against ``q``). Drop
-        // to the metadata path whenever the user is browsing by
-        // filter alone, regardless of the mode toggle.
-        const effectiveMode: Mode = m === "studies" && trimmed ? "studies" : "metadata";
+        // Hybrid requires a query (signals rank against ``q``). Drop to
+        // the metadata path whenever the user is browsing by filter
+        // alone, OR when a structured filter (modality / body_part /
+        // year / tag) is active: the /search/hybrid backend only honours
+        // ``q`` + ``scope``, so routing a filtered query through it would
+        // silently ignore the filters. /api/search applies all of them.
+        const structuredFilter =
+          f.modality !== null || f.body_part !== null || f.year !== null || f.tags.length > 0;
+        const effectiveMode: Mode =
+          m === "studies" && trimmed && !structuredFilter ? "studies" : "metadata";
         if (effectiveMode === "studies") {
+          // Hybrid is not paginated (k-only); a single fixed window.
           const out = await searchApi.hybrid({
             q: trimmed,
             k: 30,
@@ -97,23 +124,41 @@ export default function UnifiedSearchPage() {
           // the unfiltered catalogue under the chosen scope.
           const out = await searchApi.run({
             q: trimmed || undefined,
-            limit: 50,
+            limit: META_LIMIT,
+            offset,
             facets: true,
             scope: f.scope === "all" ? undefined : f.scope,
             tag: f.tags.length > 0 ? f.tags : undefined,
             modality: f.modality ?? undefined,
             body_part: f.body_part ?? undefined,
+            // Year facet maps to a full-calendar-year date range; the
+            // backend filters on study_date (falling back to created_at).
+            date_from: f.year ? `${f.year}-01-01` : undefined,
+            date_to: f.year ? `${f.year}-12-31` : undefined,
           });
-          setResults({ meta: out });
+          setResults((prev) => {
+            const prevItems = append ? (prev?.meta?.items ?? []) : [];
+            return { meta: { ...out, items: [...prevItems, ...out.items] } };
+          });
         }
       } catch (e) {
         setErr(e instanceof ApiError ? e.message : "search failed");
       } finally {
-        setBusy(false);
+        if (append) setLoadingMore(false);
+        else setBusy(false);
       }
     },
     [hasActiveFilter],
   );
+
+  // "Load more" handler: fetch the next metadata page and append it.
+  // ``offset`` is the count already shown (the running accumulator
+  // length), so the backend returns the rows immediately after them.
+  const loadMore = useCallback(() => {
+    const meta = results?.meta;
+    if (!meta || loadingMore || busy) return;
+    runSearch(q, mode, filters, meta.items.length, true);
+  }, [results, loadingMore, busy, runSearch, q, mode, filters]);
 
   // Re-run when mode or filters change if EITHER the query is non-
   // empty OR at least one filter is active (browse semantics).
@@ -184,12 +229,34 @@ export default function UnifiedSearchPage() {
           hideMineScope={hideMineScope}
         />
 
-        <div style={{ flex: 1, minWidth: 0 }}>
+        <div
+          style={{ flex: 1, minWidth: 0 }}
+          aria-live="polite"
+          aria-busy={busy || loadingMore}
+          aria-label={t("resultsRegionAria")}
+        >
+          {/* Latency feedback: the enclosing aria-live="polite" region
+              announces this to screen readers (no nested role="status",
+              which would double-announce), and it is visible to sighted
+              users on slow semantic / metadata queries. */}
+          {busy && (
+            <p className="meta" style={{ margin: "0.5rem 0" }}>
+              {t("searching")}
+            </p>
+          )}
           {results === null && !busy && q.trim() === "" && (
             <p className="meta">{t("emptyState")}</p>
           )}
-          {results?.hybrid && <HybridList q={q} out={results.hybrid} t={t} />}
-          {results?.meta && <MetaList q={q} out={results.meta} t={t} />}
+          {!busy && results?.hybrid && <HybridList q={q} out={results.hybrid} t={t} />}
+          {!busy && results?.meta && (
+            <MetaList
+              q={q}
+              out={results.meta}
+              t={t}
+              onLoadMore={loadMore}
+              loadingMore={loadingMore}
+            />
+          )}
         </div>
       </div>
     </main>
@@ -211,7 +278,7 @@ function HybridList({
   return (
     <div>
       <p className="meta" style={{ fontSize: "0.82rem", margin: "0.5rem 0 0.75rem" }}>
-        {out.items.length} studi · pesi:{" "}
+        {t("studiesCount", { n: out.items.length })} · {t("weightsLabel")}{" "}
         {Object.entries(out.weights_used)
           .map(([k, v]) => `${k}=${v}`)
           .join(", ")}
@@ -288,18 +355,29 @@ function MetaList({
   q,
   out,
   t,
+  onLoadMore,
+  loadingMore,
 }: {
   q: string;
   out: Paginated<Study>;
   t: (key: string, vals?: Record<string, string | number | Date>) => string;
+  onLoadMore: () => void;
+  loadingMore: boolean;
 }) {
   if (out.items.length === 0) {
     return <p className="meta">{t("noMetaResults", { q })}</p>;
   }
+  // More rows exist on the server than we have accumulated locally.
+  const hasMore = out.items.length < out.total;
   return (
     <div>
       <p className="meta" style={{ fontSize: "0.82rem", margin: "0.5rem 0 0.75rem" }}>
         {out.total} {t("metaResultsCount")}
+        {hasMore && (
+          <span style={{ marginLeft: "0.5rem", opacity: 0.8 }}>
+            · {t("showingCount", { shown: out.items.length, total: out.total })}
+          </span>
+        )}
       </p>
       <ul style={{ listStyle: "none", margin: 0, padding: 0, display: "grid", gap: "0.4rem" }}>
         {out.items.map((s) => (
@@ -324,6 +402,26 @@ function MetaList({
           </li>
         ))}
       </ul>
+      {hasMore && (
+        <div style={{ marginTop: "0.75rem" }}>
+          <button
+            type="button"
+            onClick={onLoadMore}
+            disabled={loadingMore}
+            style={{
+              padding: "0.4rem 0.9rem",
+              fontSize: "0.82rem",
+              background: "transparent",
+              border: "1px solid var(--bv-card-border)",
+              borderRadius: 4,
+              cursor: loadingMore ? "default" : "pointer",
+              opacity: loadingMore ? 0.6 : 1,
+            }}
+          >
+            {loadingMore ? t("loadingMore") : t("loadMore")}
+          </button>
+        </div>
+      )}
     </div>
   );
 }

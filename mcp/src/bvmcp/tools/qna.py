@@ -141,6 +141,15 @@ TOOLS = [
                     "format": "uuid",
                     "description": "Restrict to a single source row.",
                 },
+                "rerank": {
+                    "type": "boolean",
+                    "default": False,
+                    "description": (
+                        "Cross-encoder re-rank the candidate pool for higher precision "
+                        "(slower; ideal for agent retrieval). No-op if the server lacks "
+                        "the cross-encoder."
+                    ),
+                },
             },
         },
     ),
@@ -192,6 +201,8 @@ async def _search_text_chunks(args: dict[str, Any]) -> str:
             params[key] = args[key]
     if args.get("exclude_ai") is not None:
         params["exclude_ai"] = bool(args["exclude_ai"])
+    if args.get("rerank"):
+        params["rerank"] = True
     for key in ("since", "until", "source_id"):
         if args.get(key):
             params[key] = args[key]

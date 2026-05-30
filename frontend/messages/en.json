@@ -1093,7 +1093,14 @@
     "noHybridResults": "No studies found for «{q}». Try a simpler term or switch to metadata search.",
     "noMetaResults": "No text match for «{q}». Try the studies mode.",
     "metaResultsCount": "metadata results",
-    "openDataBadge": "OpenData"
+    "openDataBadge": "OpenData",
+    "studiesCount": "{n} studies",
+    "weightsLabel": "weights:",
+    "searching": "Searching…",
+    "loadMore": "Load more",
+    "loadingMore": "Loading…",
+    "showingCount": "Showing {shown} of {total}",
+    "resultsRegionAria": "Search results"
   },
   "searchSidebar": {
     "ariaLabel": "Search filters",

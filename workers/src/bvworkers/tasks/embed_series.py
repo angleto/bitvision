@@ -49,9 +49,7 @@ def _ensure_model():
 
     import open_clip
 
-    model, preprocess_train, preprocess_val = open_clip.create_model_and_transforms(
-        MODEL_HUB_ID
-    )
+    model, preprocess_train, preprocess_val = open_clip.create_model_and_transforms(MODEL_HUB_ID)
     _tokenizer = open_clip.get_tokenizer(MODEL_HUB_ID)
     model.eval()
     _model = model
@@ -108,6 +106,49 @@ def _compute_embedding(pil_image) -> list[float]:
         # L2-normalize for cosine similarity
         image_features = image_features / image_features.norm(dim=-1, keepdim=True)
     return image_features.squeeze(0).tolist()
+
+
+def _embed_slice_count() -> int:
+    """How many slices to sample per series (``BVP_EMBED_SLICES``, default 1).
+
+    1 reproduces the original middle-slice behaviour exactly. N>1 samples
+    N evenly-spaced slices and mean-pools them — a finding (a lung nodule,
+    a small lesion) is rarely on the central slice, so a single middle
+    slice systematically under-represents volumetric series.
+    """
+    import os
+
+    try:
+        return max(1, int(os.environ.get("BVP_EMBED_SLICES", "1")))
+    except ValueError:
+        return 1
+
+
+def _select_slice_indices(total: int, n: int) -> list[int]:
+    """Indices of the slices to embed: the middle one for ``n<=1``, else
+    ``n`` evenly-spaced interior slices (deduped, never first/last-biased)."""
+    if total <= 0:
+        return []
+    if n <= 1 or total == 1:
+        return [total // 2]
+    n = min(n, total)
+    step = total / (n + 1)
+    return sorted({min(total - 1, max(0, round(step * (i + 1)))) for i in range(n)})
+
+
+def _mean_pool(vectors: list[list[float]]) -> list[float]:
+    """Mean of L2-normalised slice vectors, renormalised to unit length so
+    the pooled series vector lives in the same cosine space."""
+    if not vectors:
+        raise ValueError("no vectors to pool")
+    if len(vectors) == 1:
+        return vectors[0]
+    arr = np.asarray(vectors, dtype=np.float32)
+    mean = arr.mean(axis=0)
+    norm = float(np.linalg.norm(mean))
+    if norm > 0:
+        mean = mean / norm
+    return mean.tolist()
 
 
 def _classify_error(exc: BaseException) -> str:
@@ -233,16 +274,20 @@ async def embed_series(ctx: dict, series_id: str) -> dict:  # type: ignore[type-
             if not instances:
                 return {"status": "no_instances", "series_id": series_id}
 
-            # Pick middle slice
-            mid_idx = len(instances) // 2
-            bucket, key = instances[mid_idx]
+            # Pick the slice(s) to embed: middle slice by default, or N
+            # evenly-spaced slices mean-pooled when BVP_EMBED_SLICES > 1.
+            picks = [
+                instances[i] for i in _select_slice_indices(len(instances), _embed_slice_count())
+            ]
 
-            # Download DICOM, decode, compute embedding (CPU-bound)
+            # Download DICOM(s), decode, compute + mean-pool embedding (CPU-bound)
             def _do_embed():
-                resp = s3.get_object(Bucket=bucket, Key=key)
-                dcm_bytes = resp["Body"].read()
-                pil_img = _dicom_to_pil(dcm_bytes)
-                return _compute_embedding(pil_img)
+                vecs = []
+                for bucket, key in picks:
+                    resp = s3.get_object(Bucket=bucket, Key=key)
+                    dcm_bytes = resp["Body"].read()
+                    vecs.append(_compute_embedding(_dicom_to_pil(dcm_bytes)))
+                return _mean_pool(vecs)
 
             vector = await asyncio.to_thread(_do_embed)
 

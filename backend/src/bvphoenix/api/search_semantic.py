@@ -2,9 +2,10 @@
 
 ``GET /api/search/semantic`` embeds a natural-language query with either
 BiomedCLIP (the image-and-text model used for radiology similarity) or
-MiniLM (a lightweight general-purpose text encoder), then retrieves the
-nearest ``k`` rows from the matching pgvector table and filters the
-results by the caller's visibility set.
+the multilingual MiniLM-L12 text encoder (``minilm-multi-v1``, the same
+model the indexer and chunk search use), then retrieves the nearest
+``k`` rows from the matching pgvector table and filters the results by
+the caller's visibility set.
 
 Design notes
 ------------
@@ -49,6 +50,10 @@ from bvphoenix.db.models import (
     User,
 )
 from bvphoenix.db.session import get_db
+from bvphoenix.services.chunk_search import (
+    MULTILINGUAL_MODEL_ID,
+    MULTILINGUAL_MODEL_NAME,
+)
 from bvphoenix.services.permissions import (
     visible_patients_filter,
     visible_studies_filter,
@@ -58,12 +63,25 @@ from bvphoenix.services.query_embed_cache import (
     get_cached_query_embedding,
 )
 from bvphoenix.services.rate_limit import SEARCH_SEMANTIC_LIMIT, limiter
+from bvphoenix.services.vector_search import tune_vector_query
 
 router = APIRouter(tags=["search"])
 
-# Model IDs as stored in the embeddings.model_id column.
+# Model IDs as stored in the embeddings.model_id column. BiomedCLIP is
+# one model with two towers writing two ids: the image tower
+# (``embed_series``) writes series vectors under ``biomedclip-v1``; the
+# text tower (``embed_text``) writes text-target vectors under
+# ``biomedclip-text-v1``. Same 512-dim table, so the query must pick the
+# id by target kind.
 _BIOMEDCLIP_MODEL_ID = "biomedclip-v1"
-_MINILM_MODEL_ID = "minilm-l6-v2"
+_BIOMEDCLIP_TEXT_MODEL_ID = "biomedclip-text-v1"
+# The text encoder MUST match what the indexer writes, or the
+# ``WHERE model_id = ...`` predicate matches zero rows AND the query
+# vector lives in a different model's space. The indexer
+# (workers/embed_text_multilingual.py) and chunk search both use the
+# multilingual MiniLM-L12 model under id ``minilm-multi-v1``; reuse the
+# same canonical constants here so the three never drift again.
+_MINILM_MODEL_ID = MULTILINGUAL_MODEL_ID
 
 # Only the MiniLM dimension is needed as a constant — it's what routes
 # queries to the separate 384-dim ``text_embeddings`` table.
@@ -111,7 +129,8 @@ def _ensure_minilm() -> None:
             status_code=503,
             detail="sentence-transformers not installed — install with extras=ai",
         ) from exc
-    _minilm_model = SentenceTransformer("sentence-transformers/all-MiniLM-L6-v2")
+    # Must be the same model the indexer embeds with (see _MINILM_MODEL_ID).
+    _minilm_model = SentenceTransformer(MULTILINGUAL_MODEL_NAME)
 
 
 def _embed_biomedclip_sync(query: str) -> list[float]:
@@ -141,7 +160,17 @@ def _embed_minilm_sync(query: str) -> list[float]:
 
 
 async def embed_query_biomedclip(q: str) -> list[float]:
-    """Produce a 512-dim L2-normalised text embedding for ``q``."""
+    """Produce a 512-dim L2-normalised text embedding for ``q``.
+
+    Prefers the out-of-process inference service when ``BVP_INFERENCE_SVC_URL``
+    is set (so the ~500MB BiomedCLIP need not live in every web worker);
+    transparently falls back to the in-process encoder otherwise.
+    """
+    from bvphoenix.services.inference_client import encode_text
+
+    remote = await encode_text(q)
+    if remote is not None:
+        return remote
     return await asyncio.to_thread(_embed_biomedclip_sync, q)
 
 
@@ -238,17 +267,22 @@ async def _candidates_series(
     k: int,
 ) -> list[SemanticHit]:
     """Series-target hits come straight from the ``embeddings`` table,
-    filtered to studies the caller can see."""
-    # Over-fetch to account for visibility trimming.
+    scoped to studies the caller can see *inside* the ANN query so an
+    invisible series never consumes a candidate slot."""
+    visible_studies = await visible_studies_filter(db, user)
+    visible_study_ids = visible_studies.with_only_columns(ImagingStudy.id).subquery()
+
     rows = (
         await db.execute(
             select(
                 Embedding.target_id,
                 Embedding.vector.cosine_distance(vector).label("distance"),
             )
+            .join(Series, Series.id == Embedding.target_id)
             .where(
                 Embedding.target_kind == "series",
                 Embedding.model_id == model_id,
+                Series.study_id.in_(select(visible_study_ids.c.id)),
             )
             .order_by("distance")
             .limit(k * 4)
@@ -258,16 +292,11 @@ async def _candidates_series(
         return []
     dist_map = {r[0]: float(r[1]) for r in rows}
 
-    visible_studies = await visible_studies_filter(db, user)
-    visible_study_ids = visible_studies.with_only_columns(ImagingStudy.id).subquery()
-
+    # Candidates are already visibility-scoped; just resolve descriptions.
     series_rows = (
         await db.execute(
-            select(Series.id, Series.study_id, Series.series_description)
-            .join(ImagingStudy, ImagingStudy.id == Series.study_id)
-            .where(
-                Series.id.in_(list(dist_map.keys())),
-                ImagingStudy.id.in_(visible_study_ids.select()),
+            select(Series.id, Series.study_id, Series.series_description).where(
+                Series.id.in_(list(dist_map.keys()))
             )
         )
     ).all()
@@ -279,7 +308,7 @@ async def _candidates_series(
             SemanticHit(
                 target_kind="series",
                 target_id=str(series_id),
-                score=round(1.0 - dist, 4),
+                score=round(max(0.0, 1.0 - dist), 4),
                 preview_text=desc,
                 link=f"/api/studies/{study_id}/series/{series_id}",
             )
@@ -362,7 +391,7 @@ async def _candidates_consultation(
             SemanticHit(
                 target_kind="consultation",
                 target_id=str(rc_id),
-                score=round(1.0 - dist, 4),
+                score=round(max(0.0, 1.0 - dist), 4),
                 preview_text=preview,
                 link=f"/api/report-contents/{rc_id}",
             )
@@ -412,7 +441,7 @@ async def _candidates_document(
             SemanticHit(
                 target_kind="document",
                 target_id=str(doc_id),
-                score=round(1.0 - dist, 4),
+                score=round(max(0.0, 1.0 - dist), 4),
                 preview_text=preview,
                 link=f"/api/patients/{patient_id}/documents/{doc_id}",
             )
@@ -461,7 +490,7 @@ async def _candidates_patient(
             SemanticHit(
                 target_kind="patient",
                 target_id=str(pat_id),
-                score=round(1.0 - dist, 4),
+                score=round(max(0.0, 1.0 - dist), 4),
                 preview_text=preview,
                 link=f"/api/patients/{pat_id}",
             )
@@ -499,8 +528,20 @@ async def search_semantic(
     # for the HNSW scan on realistic corpora.
     await db.execute(text("SET LOCAL statement_timeout = '3s'"))
 
+    # Every target kind is visibility-filtered and over-fetches k*4, so
+    # widen ef_search to that slab and (when supported) enable iterative
+    # scan so the filtered top-k is not starved.
+    await tune_vector_query(db, k=k * 4, filtered=True)
+
     if model == "biomedclip":
-        model_id = _BIOMEDCLIP_MODEL_ID
+        # Series → image tower id; every other (text) target → text tower
+        # id. NOTE: the text-tower indexer (embed_text) is not currently
+        # enqueued, and embed_text_ml only runs for ``document_chunk`` —
+        # so coarse text targets (document / patient / report_content /
+        # consultation) have no rows under either model yet and return
+        # empty. Wiring per-target text indexing (or routing these through
+        # chunk search) is tracked in the search-overhaul Phase C.
+        model_id = _BIOMEDCLIP_MODEL_ID if target == "series" else _BIOMEDCLIP_TEXT_MODEL_ID
         dim = len(vector)
     else:
         model_id = _MINILM_MODEL_ID
