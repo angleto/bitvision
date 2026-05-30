@@ -194,6 +194,14 @@ class PackedVolume:
     nz: int
     spacing: tuple[float, float, float]
     value_range: tuple[float, float]
+    # Real DICOM geometry of the packed voxel grid, computed from the
+    # *sorted* datasets so it matches the on-wire scalar order exactly.
+    # ``None`` for legacy series without ImageOrientation/Position tags.
+    # Shape: ``{"origin": [3] | None, "direction": [9] | None,
+    # "frame_of_reference_uid": str | None}``. The viewer feeds this to
+    # Cornerstone's volume so MPR/measurements/orientation markers use
+    # true patient space instead of a fabricated identity frame.
+    geometry: dict | None = None
 
     @property
     def size(self) -> int:
@@ -241,6 +249,98 @@ def _orientations_consistent(datasets: list[pydicom.Dataset]) -> bool:
         if row_dot < 0.99 or col_dot < 0.99:
             return False
     return True
+
+
+def compute_volume_geometry(datasets: list[pydicom.Dataset]) -> dict | None:
+    """Derive the packed volume's patient-space geometry from the
+    *already-sorted* datasets (same order the scalars are written in).
+
+    Returns a dict consumed by the viewer to build a Cornerstone volume
+    in true patient (LPS) space::
+
+        {
+          "origin": [ox, oy, oz],                       # IPP of voxel (0,0,0)
+          "direction": [Rx,Ry,Rz, Cx,Cy,Cz, Sx,Sy,Sz], # row, column, slice cosines
+          "frame_of_reference_uid": "1.2.840..." | None,
+        }
+
+    ``direction`` follows Cornerstone3D's convention (see
+    ``createPositionCallback``): the first triplet is the row cosine
+    (increasing column index), the second the column cosine (increasing
+    row index), the third the slice axis. The slice axis is taken from
+    the actual first→last ImagePositionPatient vector so feet-first /
+    descending acquisitions get the correct sign; it falls back to the
+    right-handed cross product for single-slice volumes.
+
+    Returns ``None`` when the series carries no orientation/position tags
+    (legacy CR/DX); the caller then keeps the identity-frame fallback.
+    A partial dict (``origin``/``direction`` None but FoR set) is
+    returned when only the FrameOfReferenceUID is available, so the
+    fusion FoR-mismatch safety check still has something to compare.
+
+    Note: ``spacing[2]`` (slice thickness) is computed elsewhere from the
+    inter-slice Z delta; for strongly oblique acquisitions that is an
+    approximation, but the direction cosines here are exact, which is
+    what orientation labelling and L/R safety depend on.
+    """
+    if not datasets:
+        return None
+    first = datasets[0]
+    iop = getattr(first, "ImageOrientationPatient", None)
+    ipp0 = getattr(first, "ImagePositionPatient", None)
+    for_uid = getattr(first, "FrameOfReferenceUID", None)
+    for_uid = str(for_uid) if for_uid else None
+
+    if iop is None or ipp0 is None:
+        if for_uid is None:
+            return None
+        return {"origin": None, "direction": None, "frame_of_reference_uid": for_uid}
+
+    try:
+        row = np.array([float(iop[0]), float(iop[1]), float(iop[2])], dtype=np.float64)
+        col = np.array([float(iop[3]), float(iop[4]), float(iop[5])], dtype=np.float64)
+        origin = np.array([float(ipp0[0]), float(ipp0[1]), float(ipp0[2])], dtype=np.float64)
+    except (TypeError, IndexError, ValueError):
+        return {"origin": None, "direction": None, "frame_of_reference_uid": for_uid}
+
+    row_norm = float(np.linalg.norm(row))
+    col_norm = float(np.linalg.norm(col))
+    if row_norm < 1e-9 or col_norm < 1e-9:
+        return {"origin": None, "direction": None, "frame_of_reference_uid": for_uid}
+    row /= row_norm
+    col /= col_norm
+
+    slice_vec = np.cross(row, col)  # right-handed default (single slice)
+    if len(datasets) >= 2:
+        ipp_n = getattr(datasets[-1], "ImagePositionPatient", None)
+        if ipp_n is not None:
+            try:
+                last = np.array(
+                    [float(ipp_n[0]), float(ipp_n[1]), float(ipp_n[2])], dtype=np.float64
+                )
+                diff = last - origin
+                if float(np.linalg.norm(diff)) > 1e-6:
+                    slice_vec = diff
+            except (TypeError, IndexError, ValueError):
+                pass
+    slice_norm = float(np.linalg.norm(slice_vec))
+    slice_cos = slice_vec / slice_norm if slice_norm > 1e-9 else np.cross(row, col)
+
+    return {
+        "origin": [float(origin[0]), float(origin[1]), float(origin[2])],
+        "direction": [
+            float(row[0]),
+            float(row[1]),
+            float(row[2]),
+            float(col[0]),
+            float(col[1]),
+            float(col[2]),
+            float(slice_cos[0]),
+            float(slice_cos[1]),
+            float(slice_cos[2]),
+        ],
+        "frame_of_reference_uid": for_uid,
+    }
 
 
 def _all_non_volumetric(datasets: list[pydicom.Dataset]) -> bool:
@@ -381,6 +481,8 @@ def pack_series(
         nz=nz,
         spacing=(sx, sy, slice_thickness),
         value_range=(vmin, vmax),
+        # Geometry from the same sorted datasets used to build the blob.
+        geometry=compute_volume_geometry(datasets),
     )
 
 

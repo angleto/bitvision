@@ -26,6 +26,7 @@ import * as csTools from "@cornerstonejs/tools";
 import { useCallback, useEffect, useRef, useState } from "react";
 
 import { ensureCornerstoneInit } from "@/lib/cornerstoneSetup";
+import { buildLocalVolume } from "@/lib/cornerstoneVolume";
 import type { VolumeData } from "./VolumeViewer";
 
 interface Props {
@@ -330,34 +331,16 @@ export default function CornerstoneMipViewport({
     // zero on the typical case where the user already has the MPR
     // mounted.
     if (!cs.cache.getVolume(volumeId)) {
-      cs.volumeLoader.createLocalVolume(volumeId, {
-        metadata: {
-          BitsAllocated: 32,
-          BitsStored: 32,
-          SamplesPerPixel: 1,
-          HighBit: 31,
-          PhotometricInterpretation: "MONOCHROME2",
-          PixelRepresentation: 0,
-          Modality: "OT",
-          ImagePositionPatient: [0, 0, 0],
-          ImageOrientationPatient: [1, 0, 0, 0, 1, 0],
-          PixelSpacing: [activeVolume.spacing[0], activeVolume.spacing[1]],
-          Columns: activeVolume.dimensions[0],
-          Rows: activeVolume.dimensions[1],
-          FrameOfReferenceUID: `bvp-for:${activeSeriesId}`,
-          voiLut: [{ windowCenter: 0, windowWidth: 1 }],
-          VOILUTFunction: "LINEAR",
-        } as unknown as cs.Types.Metadata,
-        dimensions: [
-          activeVolume.dimensions[0],
-          activeVolume.dimensions[1],
-          activeVolume.dimensions[2],
-        ],
-        spacing: [activeVolume.spacing[0], activeVolume.spacing[1], activeVolume.spacing[2]],
-        origin: [0, 0, 0],
-        direction: [1, 0, 0, 0, 1, 0, 0, 0, 1],
-        scalarData: activeVolume.scalars,
-      });
+      // Cold-cache fallback (MIP mounted before the MPR layout). Build
+      // through the shared helper so the geometry and FrameOfReference
+      // match exactly what the MPR layout would produce for this same
+      // ``volumeId`` — they share the Cornerstone cache, so a divergent
+      // frame here would desync crosshair-jump and fusion layering.
+      buildLocalVolume(
+        volumeId,
+        activeVolume,
+        activeVolume.frameOfReferenceUid ?? `bvp-for:${activeSeriesId}`,
+      );
     }
 
     // Wait for the MPR layout to register its rendering engine.

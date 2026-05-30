@@ -166,6 +166,7 @@ async def load_pet_volume(
                 s3_key=cache_key,
                 size_bytes=packed.size,
                 generator_version="pack_series-v1",
+                geometry=packed.geometry,
             )
         )
         await db.commit()

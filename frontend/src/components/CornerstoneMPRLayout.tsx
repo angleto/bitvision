@@ -58,11 +58,20 @@ import {
 import { request } from "@/lib/api";
 import { ensureCornerstoneInit } from "@/lib/cornerstoneSetup";
 import { makeSampler, sampleDisk, worldToIjk } from "@/lib/cornerstoneTools/volumeSampling";
+import { buildLocalVolume } from "@/lib/cornerstoneVolume";
 import { resolveFusionOrder } from "@/lib/fusionVolumeOrder";
 import { LAYOUT_DIMS } from "@/lib/hangingProtocols";
+import {
+  type EdgeLetters,
+  type OrientationCamera,
+  type TransformFlags,
+  cameraEdgeLetters,
+  cameraTransformFlags,
+} from "@/lib/orientationMarkers";
 import type { MPRLayoutHandle, MPRLayoutProps } from "./MPRLayoutTypes";
 import MarkerOverlay, { type MarkerOverlayItem } from "./MarkerOverlay";
 import { useModal } from "./ModalHost";
+import OrientationMarkers from "./OrientationMarkers";
 import type { VolumeData, VolumeViewerHandle } from "./VolumeViewer";
 
 const VolumeViewer = dynamic(() => import("./VolumeViewer"), { ssr: false });
@@ -203,45 +212,10 @@ interface ExtendedProps extends MPRLayoutProps {
  *  spec §3.2: hot iron, PET rainbow, inverse grayscale, hot metal. */
 export type PetColormap = "hot-iron" | "rainbow" | "inverse-gray" | "hot-metal";
 
-// Build a Cornerstone ``IImageVolume`` from our backend's packed
-// Float32 volume.raw payload. The optional ``frameOfReferenceUID``
-// lets the caller share a coordinate system across primary +
-// fusion volumes — Cornerstone refuses to layer two volumes on the
-// same viewport unless they advertise the same FoR. Our packed
-// ``volume.raw`` discards the original DICOM FrameOfReferenceUID,
-// so we synthesise one and let the layout force-share it whenever
-// the user explicitly opts into a fusion (PET/CT picker), trusting
-// that the two series came from the same scanner bed.
-function makeLocalVolume(
-  volumeId: string,
-  data: VolumeData,
-  frameOfReferenceUID?: string,
-): cs.Types.IImageVolume {
-  return cs.volumeLoader.createLocalVolume(volumeId, {
-    metadata: {
-      BitsAllocated: 32,
-      BitsStored: 32,
-      SamplesPerPixel: 1,
-      HighBit: 31,
-      PhotometricInterpretation: "MONOCHROME2",
-      PixelRepresentation: 0,
-      Modality: "OT",
-      ImagePositionPatient: [0, 0, 0],
-      ImageOrientationPatient: [1, 0, 0, 0, 1, 0],
-      PixelSpacing: [data.spacing[0], data.spacing[1]],
-      Columns: data.dimensions[0],
-      Rows: data.dimensions[1],
-      FrameOfReferenceUID: frameOfReferenceUID ?? volumeId,
-      voiLut: [{ windowCenter: 0, windowWidth: 1 }],
-      VOILUTFunction: "LINEAR",
-    } as unknown as cs.Types.Metadata,
-    dimensions: [data.dimensions[0], data.dimensions[1], data.dimensions[2]],
-    spacing: [data.spacing[0], data.spacing[1], data.spacing[2]],
-    origin: [0, 0, 0],
-    direction: [1, 0, 0, 0, 1, 0, 0, 0, 1],
-    scalarData: data.scalars,
-  });
-}
+// The Cornerstone volume builder lives in ``@/lib/cornerstoneVolume``
+// (``buildLocalVolume``) so the MPR layout, the MIP/3D viewport and the
+// alternate cornerstone route all produce an identical volume for the
+// same ``volumeId`` (they share the Cornerstone cache).
 
 /** Apply one of the four PET LUTs from spec §3.2 to a vtk colour
  *  transfer function. Inputs `t` are in [0, 1] (the normalised SUV
@@ -590,6 +564,20 @@ const CornerstoneMPRLayout = forwardRef<MPRLayoutHandle, ExtendedProps>(
       coronal: { sliceIndex: 0, sliceTotal: 0, zoomPct: 100 },
     });
 
+    // Per-pane anatomical edge letters + transform flags, recomputed from
+    // each viewport camera on CAMERA_MODIFIED. Only meaningful when the
+    // volume carries real DICOM geometry (``volume.direction``); on a
+    // legacy identity-frame pack we hide the letters rather than show an
+    // assumption (a confident-but-wrong L/R is a wrong-side hazard).
+    const hasRealGeometry = Array.isArray(volume.direction);
+    const [orientationByAxis, setOrientationByAxis] = useState<
+      Record<Axis, { letters: EdgeLetters | null; flags: TransformFlags }>
+    >({
+      axial: { letters: null, flags: { flipped: false, rotated: false } },
+      sagittal: { letters: null, flags: { flipped: false, rotated: false } },
+      coronal: { letters: null, flags: { flipped: false, rotated: false } },
+    });
+
     // Mount: init Cornerstone, register the volume, build viewports
     // for the visible axes, attach tools.
     // biome-ignore lint/correctness/useExhaustiveDependencies: viewer lifecycle effect — re-running on derived deps would tear down GPU resources.
@@ -643,17 +631,48 @@ const CornerstoneMPRLayout = forwardRef<MPRLayoutHandle, ExtendedProps>(
           return;
         }
 
-        // Force-share a single FrameOfReferenceUID across primary +
-        // fusion so Cornerstone agrees to overlay them on the same
-        // viewport. Both volumes must already be co-registered (the
-        // user explicitly opted into the fusion via "Open as PET-CT
-        // fusion"); we trust that and synthesise a shared id.
-        const sharedFoR = `bvp-for:${seriesId ?? "anon"}`;
+        // Resolve the FrameOfReferenceUID to build each volume with.
+        // Cornerstone only layers two volumes on one viewport when they
+        // share a FoR. We use the volumes' REAL FoR (recovered from
+        // ``X-Volume-*`` headers) so the FoR-mismatch safety check stays
+        // meaningful instead of being defeated by a blanket synthetic id:
+        //   - no fusion → the primary's real FoR (synthetic only for a
+        //     legacy pack with no geometry).
+        //   - fusion with MATCHING real FoRs → genuinely co-registered;
+        //     share the real FoR.
+        //   - fusion with DIFFERING / missing FoRs → not hardware
+        //     co-registered; synthesise a shared id so the overlay the
+        //     user explicitly requested still renders, and warn loudly
+        //     that the alignment is unverified.
+        const syntheticFoR = `bvp-for:${seriesId ?? "anon"}`;
+        const primaryFoR = volume.frameOfReferenceUid;
+        const fusionFoR = fusionVolume?.frameOfReferenceUid;
+        let primaryRenderFoR: string;
+        let fusionRenderFoR: string | undefined;
+        if (fusionVolume && fusionVolumeId) {
+          const coRegistered = !!primaryFoR && !!fusionFoR && primaryFoR === fusionFoR;
+          if (coRegistered) {
+            primaryRenderFoR = primaryFoR as string;
+            fusionRenderFoR = fusionFoR;
+          } else {
+            primaryRenderFoR = syntheticFoR;
+            fusionRenderFoR = syntheticFoR;
+            if (primaryFoR && fusionFoR && primaryFoR !== fusionFoR) {
+              // eslint-disable-next-line no-console
+              console.warn(
+                "[viewer:fusion] FrameOfReferenceUID mismatch — fusion overlay alignment is NOT verified",
+                { primaryFoR, fusionFoR },
+              );
+            }
+          }
+        } else {
+          primaryRenderFoR = primaryFoR ?? syntheticFoR;
+        }
         if (!cs.cache.getVolume(volumeId)) {
-          makeLocalVolume(volumeId, volume, sharedFoR);
+          buildLocalVolume(volumeId, volume, primaryRenderFoR);
         }
         if (fusionVolume && fusionVolumeId && !cs.cache.getVolume(fusionVolumeId)) {
-          makeLocalVolume(fusionVolumeId, fusionVolume, sharedFoR);
+          buildLocalVolume(fusionVolumeId, fusionVolume, fusionRenderFoR);
         }
 
         let engine = cs.getRenderingEngine(engineId);
@@ -1264,6 +1283,35 @@ const CornerstoneMPRLayout = forwardRef<MPRLayoutHandle, ExtendedProps>(
         const vp = engine.getViewport(vpId) as cs.Types.IVolumeViewport | undefined;
         if (!vp) return;
         const cam = vp.getCamera();
+        // Orientation markers: recompute this pane's edge letters +
+        // transform flags from the live camera. Done before the
+        // crosshair/index work below (which can early-return) so the
+        // letters stay correct on the very first camera event too.
+        if (hasRealGeometry) {
+          const oAxis: Axis | null =
+            vpId === vpAxial
+              ? "axial"
+              : vpId === vpSag
+                ? "sagittal"
+                : vpId === vpCor
+                  ? "coronal"
+                  : null;
+          if (oAxis) {
+            const letters = cameraEdgeLetters(cam as unknown as OrientationCamera);
+            const flags = cameraTransformFlags(cam as unknown as OrientationCamera);
+            setOrientationByAxis((prev) => {
+              const cur = prev[oAxis];
+              const same =
+                cur.flags.flipped === flags.flipped &&
+                cur.flags.rotated === flags.rotated &&
+                cur.letters?.top === letters?.top &&
+                cur.letters?.bottom === letters?.bottom &&
+                cur.letters?.left === letters?.left &&
+                cur.letters?.right === letters?.right;
+              return same ? prev : { ...prev, [oAxis]: { letters, flags } };
+            });
+          }
+        }
         if (!cam.focalPoint) return;
         let idx: cs.Types.Point3;
         try {
@@ -1406,6 +1454,7 @@ const CornerstoneMPRLayout = forwardRef<MPRLayoutHandle, ExtendedProps>(
       vpCor,
       volume.dimensions,
       volume.spacing,
+      hasRealGeometry,
     ]);
 
     // Annotation event sync (Cornerstone → legacy persistence).
@@ -3349,6 +3398,13 @@ const CornerstoneMPRLayout = forwardRef<MPRLayoutHandle, ExtendedProps>(
               inset: 0,
             }}
           />
+          {overlaysOn && hasRealGeometry && (
+            <OrientationMarkers
+              letters={orientationByAxis[axis].letters}
+              flags={orientationByAxis[axis].flags}
+              inverted={invert}
+            />
+          )}
           {axis === "axial" && overlayMarkers && overlayMarkers.length > 0 && (
             <MarkerOverlay
               containerRef={ref}

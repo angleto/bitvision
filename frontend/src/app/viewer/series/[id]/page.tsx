@@ -25,6 +25,7 @@ import SidebarSection from "@/components/SidebarSection";
 import SidebarSectionNav from "@/components/SidebarSectionNav";
 import SimilarCasesPanelViewer from "@/components/SimilarCasesPanelViewer";
 import TransferFunctionEditor from "@/components/TransferFunctionEditor";
+import ViewerIdentityBanner from "@/components/ViewerIdentityBanner";
 import type {
   BlendMode,
   ColorPreset,
@@ -37,10 +38,14 @@ import {
   type DisplayMetadata,
   type Marker,
   type MarkerKind,
+  type Patient,
   type Series,
+  type Study,
   fetchVolume,
   getStoredToken,
   markersApi,
+  parseFloatVector,
+  patientsApi,
   request,
   settingsApi,
   studiesApi,
@@ -60,10 +65,10 @@ import { useIsMobile } from "@/lib/useIsMobile";
 import { type ViewportStateBlob, useViewportState } from "@/lib/viewportState";
 import { computeAutoWL, modalityDefaults, suggestedFromDicom } from "@/lib/windowing";
 
-import WLPresetBar from "./WLPresetBar";
-import Vr3DRangeControl from "./Vr3DRangeControl";
 import Vr3DColorEditor from "./Vr3DColorEditor";
 import Vr3DCropBox from "./Vr3DCropBox";
+import Vr3DRangeControl from "./Vr3DRangeControl";
+import WLPresetBar from "./WLPresetBar";
 import { WL_BTN_STYLE } from "./viewerStyles";
 
 // Cornerstone3D-backed MPR layout — the only viewer path. Replaced
@@ -652,6 +657,12 @@ export default function SeriesViewerPage() {
   // patient_id of the parent study, populated lazily after the series
   // loads. Used by ViewerNotesOverlay to scope the quick-note input.
   const [studyPatientId, setStudyPatientId] = useState<string | null>(null);
+  // Parent study + patient identity for the always-on safety banner
+  // (never-doubt-which-patient). Both lazily fetched after series load;
+  // ``patient`` stays null when the reader isn't authorised to see the
+  // demographics (the banner then shows study-only identity).
+  const [study, setStudy] = useState<Study | null>(null);
+  const [patient, setPatient] = useState<Patient | null>(null);
   // Display metadata (photometric, pixel spacing, AND PET SUV factors
   // when the series is PT modality). Lazily fetched after series load.
   const [displayMeta, setDisplayMeta] = useState<DisplayMetadata | null>(null);
@@ -707,11 +718,28 @@ export default function SeriesViewerPage() {
       .then((s) => {
         if (cancelled) return;
         setSeries(s);
-        // Parallel fetch of the parent study to surface its patient_id.
+        // Parallel fetch of the parent study to surface its patient_id
+        // AND the patient/study identity for the safety banner.
         studiesApi
           .detail(s.study_id)
           .then((st) => {
-            if (!cancelled) setStudyPatientId(st.patient_id);
+            if (cancelled) return;
+            setStudyPatientId(st.patient_id);
+            setStudy(st);
+            // Patient identity for the banner. The backend gates this
+            // per-caller, so a successful read means the reader is
+            // authorised to see who the study belongs to; on 403/404 we
+            // simply leave the patient half of the banner blank.
+            if (st.patient_id) {
+              patientsApi
+                .detail(st.patient_id)
+                .then((p) => {
+                  if (!cancelled) setPatient(p);
+                })
+                .catch(() => {
+                  /* identity stays partial (study-only) when not authorised */
+                });
+            }
           })
           .catch(() => {
             // Non-fatal: overlay just stays hidden if we can't resolve.
@@ -1024,6 +1052,12 @@ export default function SeriesViewerPage() {
           { credentials: "include", headers },
         );
         if (!resp.ok) throw new ApiError(resp.status, await resp.text());
+        // Real DICOM geometry rides on X-Volume-* headers (the blob's
+        // binary header is frozen). Absent/partial → identity-frame
+        // fallback downstream in makeLocalVolume.
+        const geomOrigin = parseFloatVector(resp.headers.get("x-volume-origin"), 3);
+        const geomDirection = parseFloatVector(resp.headers.get("x-volume-direction"), 9);
+        const geomFor = resp.headers.get("x-volume-frame-of-reference") || undefined;
         const contentLength = Number(resp.headers.get("content-length") || 0);
         const reader = resp.body?.getReader();
         if (!reader) throw new Error("no response body");
@@ -1057,6 +1091,9 @@ export default function SeriesViewerPage() {
             dv.getUint32(0, true) * dv.getUint32(4, true) * dv.getUint32(8, true),
           ),
           range: [dv.getFloat32(24, true), dv.getFloat32(28, true)],
+          origin: geomOrigin as [number, number, number] | undefined,
+          direction: geomDirection as VolumeData["direction"],
+          frameOfReferenceUid: geomFor,
         };
         setVolume(v);
         setMprCrosshair([
@@ -1121,6 +1158,9 @@ export default function SeriesViewerPage() {
           spacing: header.spacing as [number, number, number],
           scalars,
           range: header.valueRange as [number, number],
+          origin: header.origin,
+          direction: header.direction,
+          frameOfReferenceUid: header.frameOfReferenceUid,
         };
         setCsFusionVolume(fv);
         setCsFusionSeriesId(fusionParam);
@@ -1862,412 +1902,417 @@ export default function SeriesViewerPage() {
         style={{ margin: 0, maxWidth: "none" }}
       >
         <div className="viewer-layout__canvas">
-          {fusionLoading && (
-            <div
-              aria-live="polite"
-              style={{
-                position: "absolute",
-                top: 8,
-                left: "50%",
-                transform: "translateX(-50%)",
-                zIndex: 10,
-                background: "rgba(15,20,30,0.85)",
-                color: "#e6ecf3",
-                fontSize: "0.78rem",
-                padding: "0.4rem 0.7rem",
-                borderRadius: 6,
-                border: "1px solid #2a2f3b",
-                boxShadow: "0 2px 8px rgba(0,0,0,0.4)",
-                minWidth: 240,
-                fontFamily: "ui-monospace, monospace",
-                pointerEvents: "none",
-                display: "flex",
-                flexDirection: "column",
-                gap: 4,
-              }}
-            >
-              <div style={{ display: "flex", justifyContent: "space-between", gap: 12 }}>
-                <span>
-                  {fusionLoading.state === "decoding"
-                    ? tv("decodingFusionOverlay")
-                    : tv("loadingFusionOverlay")}
-                </span>
-                {fusionLoading.state === "downloading" && fusionLoading.loaded > 0 && (
-                  <span style={{ color: "#94a3b8" }}>
-                    {/* MB only, no percentage. ``Content-Length`` is
+          <ViewerIdentityBanner patient={patient} study={study} />
+          <div className="viewer-layout__canvas-inner">
+            {fusionLoading && (
+              <div
+                aria-live="polite"
+                style={{
+                  position: "absolute",
+                  top: 8,
+                  left: "50%",
+                  transform: "translateX(-50%)",
+                  zIndex: 10,
+                  background: "rgba(15,20,30,0.85)",
+                  color: "#e6ecf3",
+                  fontSize: "0.78rem",
+                  padding: "0.4rem 0.7rem",
+                  borderRadius: 6,
+                  border: "1px solid #2a2f3b",
+                  boxShadow: "0 2px 8px rgba(0,0,0,0.4)",
+                  minWidth: 240,
+                  fontFamily: "ui-monospace, monospace",
+                  pointerEvents: "none",
+                  display: "flex",
+                  flexDirection: "column",
+                  gap: 4,
+                }}
+              >
+                <div style={{ display: "flex", justifyContent: "space-between", gap: 12 }}>
+                  <span>
+                    {fusionLoading.state === "decoding"
+                      ? tv("decodingFusionOverlay")
+                      : tv("loadingFusionOverlay")}
+                  </span>
+                  {fusionLoading.state === "downloading" && fusionLoading.loaded > 0 && (
+                    <span style={{ color: "#94a3b8" }}>
+                      {/* MB only, no percentage. ``Content-Length`` is
                         the compressed transport size when the
                         backend serves gzip/brotli; computing a ratio
                         against the decompressed ``loaded`` count
                         produces values past 100% and gaslights the
                         user — drop it and let the indeterminate bar
                         below convey "still working". */}
-                    {(fusionLoading.loaded / 1024 / 1024).toFixed(1)} MB
-                  </span>
-                )}
+                      {(fusionLoading.loaded / 1024 / 1024).toFixed(1)} MB
+                    </span>
+                  )}
+                </div>
+                <div
+                  // Decorative indeterminate bar: the parent already
+                  // carries ``aria-live="polite"`` with the textual
+                  // state, and there is no meaningful ``aria-valuenow``
+                  // to surface (the % was wrong — see comment above).
+                  // Treat it as presentation so screen readers don't
+                  // announce an empty progressbar.
+                  role="presentation"
+                  style={{
+                    height: 4,
+                    borderRadius: 2,
+                    background: "rgba(148,163,184,0.25)",
+                    overflow: "hidden",
+                    position: "relative",
+                  }}
+                >
+                  <div
+                    style={{
+                      position: "absolute",
+                      top: 0,
+                      height: "100%",
+                      width: "30%",
+                      background: "#e96b1f",
+                      animation: "bvFusionIndeterminate 1.1s ease-in-out infinite",
+                    }}
+                  />
+                </div>
               </div>
+            )}
+            {volumeLoading ? (
               <div
-                // Decorative indeterminate bar: the parent already
-                // carries ``aria-live="polite"`` with the textual
-                // state, and there is no meaningful ``aria-valuenow``
-                // to surface (the % was wrong — see comment above).
-                // Treat it as presentation so screen readers don't
-                // announce an empty progressbar.
-                role="presentation"
                 style={{
-                  height: 4,
-                  borderRadius: 2,
-                  background: "rgba(148,163,184,0.25)",
-                  overflow: "hidden",
-                  position: "relative",
+                  display: "flex",
+                  flexDirection: "column",
+                  alignItems: "center",
+                  justifyContent: "center",
+                  height: "100%",
+                  color: "#bbb",
+                  gap: "0.8rem",
                 }}
               >
                 <div
                   style={{
-                    position: "absolute",
-                    top: 0,
-                    height: "100%",
-                    width: "30%",
-                    background: "#e96b1f",
-                    animation: "bvFusionIndeterminate 1.1s ease-in-out infinite",
+                    width: 44,
+                    height: 44,
+                    border: "3px solid #333",
+                    borderTop: "3px solid #e96b1f",
+                    borderRadius: "50%",
+                    animation: "spin 1s linear infinite",
                   }}
                 />
-              </div>
-            </div>
-          )}
-          {volumeLoading ? (
-            <div
-              style={{
-                display: "flex",
-                flexDirection: "column",
-                alignItems: "center",
-                justifyContent: "center",
-                height: "100%",
-                color: "#bbb",
-                gap: "0.8rem",
-              }}
-            >
-              <div
-                style={{
-                  width: 44,
-                  height: 44,
-                  border: "3px solid #333",
-                  borderTop: "3px solid #e96b1f",
-                  borderRadius: "50%",
-                  animation: "spin 1s linear infinite",
-                }}
-              />
-              {(() => {
-                const instCount = series?.received_instance_count ?? 0;
-                const estMiB = instCount > 0 ? (instCount * 512 * 512 * 4) / 1_048_576 : 0;
-                // No percentage: ``Content-Length`` reports the
-                // compressed size when the server uses gzip/brotli,
-                // while ``loaded`` counts decompressed bytes. The
-                // ratio routinely exceeds 100% and confuses the
-                // user — show MB + elapsed seconds instead, both of
-                // which are always meaningful.
-                return (
-                  <>
-                    <div style={{ fontSize: "0.95rem" }}>
-                      {loadProgress
-                        ? `Downloading volume… ${(loadProgress.loaded / 1_048_576).toFixed(1)} MB`
-                        : `Building volume from ${instCount} slices… ${elapsedSec}s`}
-                    </div>
-                    <div
-                      style={{
-                        width: 260,
-                        height: 6,
-                        background: "#222",
-                        borderRadius: 3,
-                        overflow: "hidden",
-                        position: "relative",
-                      }}
-                    >
+                {(() => {
+                  const instCount = series?.received_instance_count ?? 0;
+                  const estMiB = instCount > 0 ? (instCount * 512 * 512 * 4) / 1_048_576 : 0;
+                  // No percentage: ``Content-Length`` reports the
+                  // compressed size when the server uses gzip/brotli,
+                  // while ``loaded`` counts decompressed bytes. The
+                  // ratio routinely exceeds 100% and confuses the
+                  // user — show MB + elapsed seconds instead, both of
+                  // which are always meaningful.
+                  return (
+                    <>
+                      <div style={{ fontSize: "0.95rem" }}>
+                        {loadProgress
+                          ? `Downloading volume… ${(loadProgress.loaded / 1_048_576).toFixed(1)} MB`
+                          : `Building volume from ${instCount} slices… ${elapsedSec}s`}
+                      </div>
                       <div
                         style={{
-                          width: "100%",
-                          height: "100%",
-                          background:
-                            "linear-gradient(90deg, transparent 0%, #e96b1f 50%, transparent 100%)",
-                          animation: "pulse-bar 1.5s ease-in-out infinite",
+                          width: 260,
+                          height: 6,
+                          background: "#222",
                           borderRadius: 3,
+                          overflow: "hidden",
+                          position: "relative",
                         }}
-                      />
-                    </div>
-                    <div style={{ fontSize: "0.75rem", color: "#666", fontFamily: "monospace" }}>
-                      {loadProgress
-                        ? `${(loadProgress.loaded / 1_048_576).toFixed(1)} MB · ${loadProgress.elapsed.toFixed(0)}s`
-                        : estMiB > 0
-                          ? `estimated ~${estMiB.toFixed(0)} MB · ${elapsedSec}s`
-                          : `${elapsedSec}s`}
-                    </div>
-                  </>
-                );
-              })()}
-            </div>
-          ) : volumeUnavailable && series ? (
-            // 2D fallback: this series can't be packed as a 3D volume but
-            // each instance can still be rasterised individually. Useful
-            // for radiographs, mammography, and any series the volume
-            // worker rejected (mixed SOP class, single slice, ...).
-            <Series2DViewer
-              seriesId={params.id}
-              sliceCount={series.received_instance_count || 1}
-              caption={
-                series.series_description
-                  ? `${series.modality ?? ""} · ${series.series_description}`.trim()
-                  : (series.modality ?? undefined)
-              }
-            />
-          ) : err ? (
-            <div
-              style={{
-                display: "flex",
-                alignItems: "center",
-                justifyContent: "center",
-                height: "100%",
-                padding: "2rem",
-              }}
-            >
+                      >
+                        <div
+                          style={{
+                            width: "100%",
+                            height: "100%",
+                            background:
+                              "linear-gradient(90deg, transparent 0%, #e96b1f 50%, transparent 100%)",
+                            animation: "pulse-bar 1.5s ease-in-out infinite",
+                            borderRadius: 3,
+                          }}
+                        />
+                      </div>
+                      <div style={{ fontSize: "0.75rem", color: "#666", fontFamily: "monospace" }}>
+                        {loadProgress
+                          ? `${(loadProgress.loaded / 1_048_576).toFixed(1)} MB · ${loadProgress.elapsed.toFixed(0)}s`
+                          : estMiB > 0
+                            ? `estimated ~${estMiB.toFixed(0)} MB · ${elapsedSec}s`
+                            : `${elapsedSec}s`}
+                      </div>
+                    </>
+                  );
+                })()}
+              </div>
+            ) : volumeUnavailable && series ? (
+              // 2D fallback: this series can't be packed as a 3D volume but
+              // each instance can still be rasterised individually. Useful
+              // for radiographs, mammography, and any series the volume
+              // worker rejected (mixed SOP class, single slice, ...).
+              <Series2DViewer
+                seriesId={params.id}
+                sliceCount={series.received_instance_count || 1}
+                caption={
+                  series.series_description
+                    ? `${series.modality ?? ""} · ${series.series_description}`.trim()
+                    : (series.modality ?? undefined)
+                }
+              />
+            ) : err ? (
               <div
                 style={{
-                  maxWidth: 560,
-                  background: "#1a1d25",
-                  border: "1px solid #2a2f3b",
-                  borderRadius: 10,
-                  padding: "1.5rem",
-                  color: "#e6ecf3",
+                  display: "flex",
+                  alignItems: "center",
+                  justifyContent: "center",
+                  height: "100%",
+                  padding: "2rem",
                 }}
               >
-                <h2 style={{ marginTop: 0, color: "#f88", fontSize: "1.05rem" }}>
-                  {tv("volumeErrorTitle")}
-                </h2>
-                <p style={{ color: "#c5cdd9", fontSize: "0.92rem", marginBottom: "1rem" }}>{err}</p>
-                {series?.study_id && (
-                  <Link
-                    href={`/studies/${series.study_id}`}
-                    style={{
-                      display: "inline-block",
-                      padding: "0.45rem 0.85rem",
-                      background: "#e96b1f",
-                      color: "#fff",
-                      borderRadius: 6,
-                      fontSize: "0.88rem",
-                      textDecoration: "none",
-                    }}
-                  >
-                    {tv("backToStudy")}
-                  </Link>
-                )}
+                <div
+                  style={{
+                    maxWidth: 560,
+                    background: "#1a1d25",
+                    border: "1px solid #2a2f3b",
+                    borderRadius: 10,
+                    padding: "1.5rem",
+                    color: "#e6ecf3",
+                  }}
+                >
+                  <h2 style={{ marginTop: 0, color: "#f88", fontSize: "1.05rem" }}>
+                    {tv("volumeErrorTitle")}
+                  </h2>
+                  <p style={{ color: "#c5cdd9", fontSize: "0.92rem", marginBottom: "1rem" }}>
+                    {err}
+                  </p>
+                  {series?.study_id && (
+                    <Link
+                      href={`/studies/${series.study_id}`}
+                      style={{
+                        display: "inline-block",
+                        padding: "0.45rem 0.85rem",
+                        background: "#e96b1f",
+                        color: "#fff",
+                        borderRadius: 6,
+                        fontSize: "0.88rem",
+                        textDecoration: "none",
+                      }}
+                    >
+                      {tv("backToStudy")}
+                    </Link>
+                  )}
+                </div>
               </div>
-            </div>
-          ) : volume ? (
-            <CornerstoneMPRLayout
-              ref={mprRef}
-              volume={volume}
-              showAxial={true}
-              showSagittal={isMobile ? false : showSagittal}
-              showCoronal={isMobile ? false : showCoronal}
-              show3D={isMobile ? false : show3D}
-              showMip={isMobile ? false : showMip}
-              layout={isMobile ? "1x1" : layout}
-              showOblique={isMobile ? false : showOblique}
-              onCrosshairChange={setMprCrosshair}
-              activeTool={activeTool ?? undefined}
-              onActiveToolChange={(t) => setActiveTool(t as Tool | null)}
-              seriesDescription={series?.series_description ?? undefined}
-              seriesId={params.id}
-              volumeViewerRef={volumeViewerRef}
-              onMeasurementsChange={setAllMeasurements}
-              measurements={allMeasurements}
-              markerFade={markerFade}
-              modality={series?.modality ?? null}
-              customOpacityStops={vrCustomOpacity}
-              customRange={vrRangeOverride}
-              customColorStops={vrCustomColors}
-              cropBox={vrCropBox}
-              fusionVolume={csFusionVolume}
-              fusionSeriesId={csFusionSeriesId}
-              fusionExpected={fusionParam != null}
-              fusionFailed={csFusionFailed}
-              fusionModality={csFusionSeriesMeta?.modality ?? null}
-              suvFactorBw={pickActiveSuvFactor(petDisplayMeta, suvVariant)}
-              petColormap={petColormap}
-              petSuvHide={suvHide}
-              studyId={series?.study_id ?? null}
-              overlayMarkers={showAiOverlay ? overlayMarkers : []}
-              focusedMarkerId={showAiOverlay ? focusedMarkerId : null}
-              onOverlayMarkerClick={(id) => focusMarker(id)}
-              onLensPin={async ({ axis, centerIjk, radiusMm, isPet, suvFactor, stats }) => {
-                if (!studyPatientId || !series) return;
-                // Persist as a ``measurement.ellipse`` with the AABB of
-                // the disc projected onto the active slice. ``computed``
-                // carries source="lens-probe", radius, and the client-
-                // side stats; the server-confirmed values land via the
-                // subsequent PATCH.
-                const halfI = Math.max(1, Math.round(radiusMm));
-                const halfJ = Math.max(1, Math.round(radiusMm));
-                const halfK = 0;
-                const min_ijk: [number, number, number] =
-                  axis === "axial"
-                    ? [centerIjk[0] - halfI, centerIjk[1] - halfJ, centerIjk[2]]
-                    : axis === "sagittal"
-                      ? [centerIjk[0], centerIjk[1] - halfJ, centerIjk[2] - halfK]
-                      : [centerIjk[0] - halfI, centerIjk[1], centerIjk[2] - halfK];
-                const max_ijk: [number, number, number] =
-                  axis === "axial"
-                    ? [centerIjk[0] + halfI, centerIjk[1] + halfJ, centerIjk[2]]
-                    : axis === "sagittal"
-                      ? [centerIjk[0], centerIjk[1] + halfJ, centerIjk[2] + halfK]
-                      : [centerIjk[0] + halfI, centerIjk[1], centerIjk[2] + halfK];
-                const computedBase: Record<string, unknown> = {
-                  radius_mm: radiusMm,
-                  voxel_count: stats.count,
-                  mean: stats.mean,
-                  std: stats.std,
-                  min: stats.min,
-                  max: stats.max,
-                  source: "lens-probe",
-                  pending: true,
-                };
-                if (isPet && suvFactor && suvFactor > 0) {
-                  computedBase.suv_mean = stats.mean * suvFactor;
-                  computedBase.suv_max = stats.max * suvFactor;
-                  computedBase.suv_variant = suvVariant;
-                }
-                let created: Marker;
-                try {
-                  created = await markersApi.create(studyPatientId, {
-                    target_kind: "series",
-                    target_id: params.id,
-                    kind: "measurement.ellipse",
-                    geometry: { axis, points: [min_ijk, max_ijk] },
-                    computed: computedBase,
-                    body: `Lens ${radiusMm.toFixed(1)} mm`,
-                  });
-                } catch (err) {
-                  console.error("lens-pin create failed", err);
-                  return;
-                }
-                // Server-confirmed roi-stats round-trip → patch the
-                // marker so the report-composer and the SUV columns
-                // get the authoritative numbers.
-                try {
-                  const roi = await request<{
-                    voxel_count: number;
-                    mean: number;
-                    std: number;
-                    min: number;
-                    max: number;
-                    peak_1cm3: number | null;
-                    suv_mean: number | null;
-                    suv_sd: number | null;
-                    suv_max: number | null;
-                    suv_peak: number | null;
-                    suv_variant_used: string | null;
-                  }>(`/api/series/${params.id}/roi-stats`, {
-                    method: "POST",
-                    json: {
-                      kind: "sphere",
-                      center_ijk: centerIjk,
-                      radius_mm: radiusMm,
-                      suv_variant: isPet ? suvVariant : undefined,
-                    },
-                  });
-                  const patched: Record<string, unknown> = {
-                    ...computedBase,
-                    pending: false,
-                    voxel_count: roi.voxel_count,
-                    mean: roi.mean,
-                    std: roi.std,
-                    min: roi.min,
-                    max: roi.max,
+            ) : volume ? (
+              <CornerstoneMPRLayout
+                ref={mprRef}
+                volume={volume}
+                showAxial={true}
+                showSagittal={isMobile ? false : showSagittal}
+                showCoronal={isMobile ? false : showCoronal}
+                show3D={isMobile ? false : show3D}
+                showMip={isMobile ? false : showMip}
+                layout={isMobile ? "1x1" : layout}
+                showOblique={isMobile ? false : showOblique}
+                onCrosshairChange={setMprCrosshair}
+                activeTool={activeTool ?? undefined}
+                onActiveToolChange={(t) => setActiveTool(t as Tool | null)}
+                seriesDescription={series?.series_description ?? undefined}
+                seriesId={params.id}
+                volumeViewerRef={volumeViewerRef}
+                onMeasurementsChange={setAllMeasurements}
+                measurements={allMeasurements}
+                markerFade={markerFade}
+                modality={series?.modality ?? null}
+                customOpacityStops={vrCustomOpacity}
+                customRange={vrRangeOverride}
+                customColorStops={vrCustomColors}
+                cropBox={vrCropBox}
+                fusionVolume={csFusionVolume}
+                fusionSeriesId={csFusionSeriesId}
+                fusionExpected={fusionParam != null}
+                fusionFailed={csFusionFailed}
+                fusionModality={csFusionSeriesMeta?.modality ?? null}
+                suvFactorBw={pickActiveSuvFactor(petDisplayMeta, suvVariant)}
+                petColormap={petColormap}
+                petSuvHide={suvHide}
+                studyId={series?.study_id ?? null}
+                overlayMarkers={showAiOverlay ? overlayMarkers : []}
+                focusedMarkerId={showAiOverlay ? focusedMarkerId : null}
+                onOverlayMarkerClick={(id) => focusMarker(id)}
+                onLensPin={async ({ axis, centerIjk, radiusMm, isPet, suvFactor, stats }) => {
+                  if (!studyPatientId || !series) return;
+                  // Persist as a ``measurement.ellipse`` with the AABB of
+                  // the disc projected onto the active slice. ``computed``
+                  // carries source="lens-probe", radius, and the client-
+                  // side stats; the server-confirmed values land via the
+                  // subsequent PATCH.
+                  const halfI = Math.max(1, Math.round(radiusMm));
+                  const halfJ = Math.max(1, Math.round(radiusMm));
+                  const halfK = 0;
+                  const min_ijk: [number, number, number] =
+                    axis === "axial"
+                      ? [centerIjk[0] - halfI, centerIjk[1] - halfJ, centerIjk[2]]
+                      : axis === "sagittal"
+                        ? [centerIjk[0], centerIjk[1] - halfJ, centerIjk[2] - halfK]
+                        : [centerIjk[0] - halfI, centerIjk[1], centerIjk[2] - halfK];
+                  const max_ijk: [number, number, number] =
+                    axis === "axial"
+                      ? [centerIjk[0] + halfI, centerIjk[1] + halfJ, centerIjk[2]]
+                      : axis === "sagittal"
+                        ? [centerIjk[0], centerIjk[1] + halfJ, centerIjk[2] + halfK]
+                        : [centerIjk[0] + halfI, centerIjk[1], centerIjk[2] + halfK];
+                  const computedBase: Record<string, unknown> = {
+                    radius_mm: radiusMm,
+                    voxel_count: stats.count,
+                    mean: stats.mean,
+                    std: stats.std,
+                    min: stats.min,
+                    max: stats.max,
+                    source: "lens-probe",
+                    pending: true,
                   };
-                  if (roi.suv_mean != null) patched.suv_mean = roi.suv_mean;
-                  if (roi.suv_max != null) patched.suv_max = roi.suv_max;
-                  if (roi.suv_peak != null) patched.suv_peak = roi.suv_peak;
-                  if (roi.suv_sd != null) patched.suv_sd = roi.suv_sd;
-                  if (roi.suv_variant_used) patched.suv_variant = roi.suv_variant_used;
-                  await markersApi.update(created.id, { computed: patched });
-                } catch (err) {
-                  // Non-fatal: the client-side stats are usable; the
-                  // ``pending`` flag stays true so the report composer
-                  // can flag it.
-                  console.warn("lens-pin server confirm failed", err);
-                }
-              }}
-            />
-          ) : (
+                  if (isPet && suvFactor && suvFactor > 0) {
+                    computedBase.suv_mean = stats.mean * suvFactor;
+                    computedBase.suv_max = stats.max * suvFactor;
+                    computedBase.suv_variant = suvVariant;
+                  }
+                  let created: Marker;
+                  try {
+                    created = await markersApi.create(studyPatientId, {
+                      target_kind: "series",
+                      target_id: params.id,
+                      kind: "measurement.ellipse",
+                      geometry: { axis, points: [min_ijk, max_ijk] },
+                      computed: computedBase,
+                      body: `Lens ${radiusMm.toFixed(1)} mm`,
+                    });
+                  } catch (err) {
+                    console.error("lens-pin create failed", err);
+                    return;
+                  }
+                  // Server-confirmed roi-stats round-trip → patch the
+                  // marker so the report-composer and the SUV columns
+                  // get the authoritative numbers.
+                  try {
+                    const roi = await request<{
+                      voxel_count: number;
+                      mean: number;
+                      std: number;
+                      min: number;
+                      max: number;
+                      peak_1cm3: number | null;
+                      suv_mean: number | null;
+                      suv_sd: number | null;
+                      suv_max: number | null;
+                      suv_peak: number | null;
+                      suv_variant_used: string | null;
+                    }>(`/api/series/${params.id}/roi-stats`, {
+                      method: "POST",
+                      json: {
+                        kind: "sphere",
+                        center_ijk: centerIjk,
+                        radius_mm: radiusMm,
+                        suv_variant: isPet ? suvVariant : undefined,
+                      },
+                    });
+                    const patched: Record<string, unknown> = {
+                      ...computedBase,
+                      pending: false,
+                      voxel_count: roi.voxel_count,
+                      mean: roi.mean,
+                      std: roi.std,
+                      min: roi.min,
+                      max: roi.max,
+                    };
+                    if (roi.suv_mean != null) patched.suv_mean = roi.suv_mean;
+                    if (roi.suv_max != null) patched.suv_max = roi.suv_max;
+                    if (roi.suv_peak != null) patched.suv_peak = roi.suv_peak;
+                    if (roi.suv_sd != null) patched.suv_sd = roi.suv_sd;
+                    if (roi.suv_variant_used) patched.suv_variant = roi.suv_variant_used;
+                    await markersApi.update(created.id, { computed: patched });
+                  } catch (err) {
+                    // Non-fatal: the client-side stats are usable; the
+                    // ``pending`` flag stays true so the report composer
+                    // can flag it.
+                    console.warn("lens-pin server confirm failed", err);
+                  }
+                }}
+              />
+            ) : (
+              <div
+                style={{
+                  display: "flex",
+                  alignItems: "center",
+                  justifyContent: "center",
+                  height: "100%",
+                  color: "#666",
+                }}
+              >
+                loading…
+              </div>
+            )}
             <div
               style={{
+                position: "absolute",
+                bottom: 6,
+                right: 6,
+                zIndex: 5,
                 display: "flex",
-                alignItems: "center",
-                justifyContent: "center",
-                height: "100%",
-                color: "#666",
+                gap: 4,
               }}
             >
-              loading…
-            </div>
-          )}
-          <div
-            style={{
-              position: "absolute",
-              bottom: 6,
-              right: 6,
-              zIndex: 5,
-              display: "flex",
-              gap: 4,
-            }}
-          >
-            {/* Toggle the AI-annotation overlay (dashed bboxes,
+              {/* Toggle the AI-annotation overlay (dashed bboxes,
                 fiducials, text labels). When the panel reports zero
                 non-cornerstone markers the button is dimmed but
                 still clickable so the preference can be set before
                 an agent writes the first annotation. */}
-            <button
-              type="button"
-              className="viewer-chip-btn"
-              onClick={toggleAiOverlay}
-              aria-pressed={showAiOverlay}
-              aria-label={showAiOverlay ? "Nascondi annotazioni AI" : "Mostra annotazioni AI"}
-              title={
-                overlayMarkers.length === 0
-                  ? "Nessuna annotazione AI da mostrare"
-                  : showAiOverlay
-                    ? `Nascondi ${overlayMarkers.length} annotazioni AI`
-                    : `Mostra ${overlayMarkers.length} annotazioni AI`
-              }
-              style={{
-                opacity: overlayMarkers.length === 0 ? 0.55 : 1,
-                ...(showAiOverlay
-                  ? { background: "rgba(251,146,60,0.55)", borderColor: "rgba(251,146,60,0.85)" }
-                  : {}),
-              }}
-            >
-              {showAiOverlay ? "⬚" : "⬜"}
-            </button>
-            {fsSupported && (
               <button
                 type="button"
                 className="viewer-chip-btn"
-                onClick={() => {
-                  void toggleFs();
+                onClick={toggleAiOverlay}
+                aria-pressed={showAiOverlay}
+                aria-label={showAiOverlay ? "Nascondi annotazioni AI" : "Mostra annotazioni AI"}
+                title={
+                  overlayMarkers.length === 0
+                    ? "Nessuna annotazione AI da mostrare"
+                    : showAiOverlay
+                      ? `Nascondi ${overlayMarkers.length} annotazioni AI`
+                      : `Mostra ${overlayMarkers.length} annotazioni AI`
+                }
+                style={{
+                  opacity: overlayMarkers.length === 0 ? 0.55 : 1,
+                  ...(showAiOverlay
+                    ? { background: "rgba(251,146,60,0.55)", borderColor: "rgba(251,146,60,0.85)" }
+                    : {}),
                 }}
-                aria-label={isFullscreen ? "Exit fullscreen" : "Enter fullscreen"}
-                title={isFullscreen ? "Exit fullscreen" : "Fullscreen"}
               >
-                {isFullscreen ? "⤢" : "⛶"}
+                {showAiOverlay ? "⬚" : "⬜"}
               </button>
-            )}
-            <button
-              type="button"
-              className="viewer-chip-btn"
-              onClick={() => setSidebarOpen(!sidebarOpen)}
-              aria-label={sidebarOpen ? "Hide sidebar" : "Show sidebar"}
-              title={sidebarOpen ? "Hide sidebar" : "Show sidebar"}
-            >
-              {sidebarOpen ? "»" : "«"}
-            </button>
+              {fsSupported && (
+                <button
+                  type="button"
+                  className="viewer-chip-btn"
+                  onClick={() => {
+                    void toggleFs();
+                  }}
+                  aria-label={isFullscreen ? "Exit fullscreen" : "Enter fullscreen"}
+                  title={isFullscreen ? "Exit fullscreen" : "Fullscreen"}
+                >
+                  {isFullscreen ? "⤢" : "⛶"}
+                </button>
+              )}
+              <button
+                type="button"
+                className="viewer-chip-btn"
+                onClick={() => setSidebarOpen(!sidebarOpen)}
+                aria-label={sidebarOpen ? "Hide sidebar" : "Show sidebar"}
+                title={sidebarOpen ? "Hide sidebar" : "Show sidebar"}
+              >
+                {sidebarOpen ? "»" : "«"}
+              </button>
+            </div>
           </div>
         </div>
         {sidebarOpen && (

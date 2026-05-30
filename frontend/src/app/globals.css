@@ -627,6 +627,18 @@ table.bv-table,
 .viewer-layout__canvas {
   position: relative;
   overflow: hidden;
+  display: flex;
+  flex-direction: column;
+}
+/* Holds the viewport panes below the always-on identity banner. Flex
+   child that fills the remaining height; ``position: relative`` so the
+   panes' absolute overlays (orientation letters, loading toast) anchor
+   here, and ``min-height: 0`` so it can shrink inside the grid cell. */
+.viewer-layout__canvas-inner {
+  position: relative;
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow: hidden;
 }
 .viewer-layout__sidebar {
   background: #12141a;
