@@ -133,6 +133,103 @@ async def _bootstrap_llm_rate_cards() -> None:
         log.warning("llm_rate_cards bootstrap skipped: %s", exc)
 
 
+@app.on_event("startup")
+async def _probe_pgvector_capabilities() -> None:
+    """Detect the connected pgvector version once, so the vector search
+    paths know whether they may use ``hnsw.iterative_scan`` (0.8+).
+
+    Failure is non-fatal: the capability defaults to ``False`` (the
+    0.8-only GUC is simply never emitted), so a probe error degrades to
+    plain HNSW rather than 500-ing the whole app at boot."""
+    import logging
+
+    from sqlalchemy import text
+
+    from bvphoenix.db.session import SessionFactory
+    from bvphoenix.services.vector_search import (
+        ITERATIVE_SCAN_MIN_VERSION,
+        parse_pgvector_version,
+        set_iterative_scan_supported,
+    )
+
+    log = logging.getLogger("bvphoenix.startup")
+    try:
+        async with SessionFactory() as db:
+            raw = (
+                await db.execute(
+                    text("SELECT extversion FROM pg_extension WHERE extname = 'vector'")
+                )
+            ).scalar_one_or_none()
+        version = parse_pgvector_version(raw)
+        supported = version is not None and version >= ITERATIVE_SCAN_MIN_VERSION
+        set_iterative_scan_supported(supported)
+        log.info(
+            "pgvector %s detected; hnsw.iterative_scan %s",
+            raw or "unknown",
+            "enabled" if supported else "unavailable (need >= 0.8)",
+        )
+    except Exception as exc:  # pragma: no cover — defensive boot path
+        log.warning("pgvector capability probe skipped (%s); iterative_scan disabled", exc)
+
+
+@app.on_event("startup")
+async def _check_embedding_registry_defaults() -> None:
+    """Resolve the registry's default image/text models at boot, cache
+    their ids on ``app.state``, and warn loudly if a default diverges from
+    the ``model_id`` search actually queries.
+
+    The registry (``embedding_models``) is meant to be the source of
+    truth for which model search uses; migration 0011 reconciled its seed
+    with what the workers write. This guard catches future drift (e.g. an
+    operator promoting a new default whose name does not match a stored
+    ``model_id``) before it silently empties search results. Non-fatal:
+    the endpoints fall back to their validated constants."""
+    import logging
+
+    from bvphoenix.db.session import SessionFactory
+    from bvphoenix.services.chunk_search import MULTILINGUAL_MODEL_ID
+    from bvphoenix.services.embedding_models import get_default_model
+
+    log = logging.getLogger("bvphoenix.startup")
+    # The model_id strings the code/workers actually read and write.
+    expected = {"image": "biomedclip-v1", "text": MULTILINGUAL_MODEL_ID}
+    try:
+        async with SessionFactory() as db:
+            for kind, expected_id in expected.items():
+                model = await get_default_model(kind, db)
+                setattr(app.state, f"default_{kind}_model_id", model.name)
+                if model.name != expected_id:
+                    log.warning(
+                        "embedding registry default for %r is %r but search queries %r — "
+                        "reconcile the registry or the code, or %r search will return empty",
+                        kind,
+                        model.name,
+                        expected_id,
+                        kind,
+                    )
+    except Exception as exc:  # pragma: no cover — defensive boot path
+        log.warning("embedding registry default check skipped: %s", exc)
+
+
+@app.on_event("startup")
+async def _load_search_thesaurus() -> None:
+    """Warm the radiology synonym cache so query expansion is a synchronous
+    lookup with no per-search DB round-trip. Non-fatal: an empty cache just
+    degrades to plain dual-config FTS."""
+    import logging
+
+    from bvphoenix.db.session import SessionFactory
+    from bvphoenix.services.thesaurus import load_thesaurus, thesaurus_version
+
+    log = logging.getLogger("bvphoenix.startup")
+    try:
+        async with SessionFactory() as db:
+            n = await load_thesaurus(db)
+        log.info("search thesaurus loaded: %d terms (version %d)", n, thesaurus_version())
+    except Exception as exc:  # pragma: no cover — defensive boot path
+        log.warning("search thesaurus load skipped: %s", exc)
+
+
 @app.exception_handler(RateLimitExceeded)
 async def _rate_limit_handler(_request: Request, exc: RateLimitExceeded) -> JSONResponse:
     return JSONResponse(
@@ -159,6 +256,20 @@ app.add_middleware(
     allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
+    # Custom response headers the viewer reads from JS. The browser hides
+    # non-safelisted response headers cross-origin unless they are listed
+    # here. ``X-Volume-*`` carry the packed volume's real patient-space
+    # geometry; ``X-Slice-*`` / ``X-Document-*`` drive the 2D slice viewer
+    # default slice and document kind/title.
+    expose_headers=[
+        "X-Volume-Origin",
+        "X-Volume-Direction",
+        "X-Volume-Frame-Of-Reference",
+        "X-Slice-Index",
+        "X-Slice-Count",
+        "X-Document-Kind",
+        "X-Document-Title",
+    ],
 )
 
 _trusted = [h.strip() for h in settings.trusted_hosts.split(",") if h.strip()]

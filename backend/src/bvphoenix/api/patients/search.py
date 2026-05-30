@@ -12,6 +12,18 @@ from fastapi import APIRouter
 from bvphoenix.api.patients import _shared  # for runtime access
 from bvphoenix.api.patients._shared import *  # noqa: F403
 
+# v3 folded the legacy ``Report`` / ``Consultation`` models into
+# ``ReportContent`` (event-scoped, distinguished by ``authority_id``).
+# These are not re-exported by ``_shared``; import them explicitly so the
+# ``reports`` / ``consultations`` search sections resolve instead of
+# raising NameError at request time.
+from bvphoenix.db.models import ClinicalEvent, ReportContent
+from bvphoenix.services.fts import dual_tsquery, dual_tsvector
+
+# Authority ids that represent an actual clinician report (as opposed to
+# a BitVision curated synthesis, which is ``canonical_synthesis``).
+_REPORT_AUTHORITIES: tuple[str, ...] = ("original", "derived")
+
 router = APIRouter()
 
 
@@ -41,25 +53,16 @@ async def patient_scoped_search(
     patient = await _get_patient_or_404(db, patient_id, user, request, action=READ_METADATA)
     wanted = _parse_sections(sections)
 
-    ts_query = func.plainto_tsquery("simple", q)
+    ts_query = dual_tsquery(q)
 
     items: list[PatientSearchItem] = []
     by_section: dict[str, int] = dict.fromkeys(SEARCH_SECTIONS, 0)
 
-    # Reports + annotations are keyed by study, not patient, so we need
-    # the patient's study ids up front regardless of whether the caller
-    # asked for studies themselves.
-    study_id_rows = (
-        await db.execute(select(ImagingStudy.id).where(ImagingStudy.patient_id == patient.id))
-    ).all()
-    study_ids = [row[0] for row in study_id_rows]
-
     # ---- studies ----
     if "studies" in wanted:
-        study_desc_vec = func.to_tsvector(
-            "simple", func.coalesce(ImagingStudy.study_description, "")
-        )
-        series_desc_vec = func.to_tsvector("simple", func.coalesce(Series.series_description, ""))
+        # Dual-config (italian || simple) generated, GIN-indexed columns.
+        study_desc_vec = ImagingStudy.study_description_tsv
+        series_desc_vec = Series.series_description_tsv
         # Take the greatest rank across study_description and the joined
         # series' series_description so series-level matches still surface.
         rank_expr = func.greatest(
@@ -90,22 +93,45 @@ async def patient_scoped_search(
             by_section["studies"] += 1
 
     # ---- reports ----
-    if "reports" in wanted and study_ids:
-        report_vec = func.to_tsvector("simple", func.coalesce(Report.text, ""))
-        report_q = (
-            select(Report, func.ts_rank(report_vec, ts_query).label("rank"))
-            .where(Report.study_id.in_(study_ids), report_vec.op("@@")(ts_query))
-            .order_by(desc("rank"), Report.created_at.desc())
+    # v3: a clinician report is a ReportContent with authority
+    # ``original`` / ``derived`` (vs ``canonical_synthesis`` = a curated
+    # synthesis, handled by the consultations section). ReportContent is
+    # event-scoped, so we reach the patient through ClinicalEvent and
+    # drop superseded (``stale``) rows so we never surface a retired
+    # version of a report.
+    if "reports" in wanted:
+        r_narr_vec = dual_tsvector(ReportContent.narrative_md)
+        r_find_vec = dual_tsvector(ReportContent.findings_md)
+        r_recs_vec = dual_tsvector(ReportContent.recommendations_md)
+        rank_expr = func.greatest(
+            func.ts_rank(r_narr_vec, ts_query),
+            func.ts_rank(r_find_vec, ts_query),
+            func.ts_rank(r_recs_vec, ts_query),
         )
-        for report, rank in (await db.execute(report_q)).all():
+        report_q = (
+            select(ReportContent, rank_expr.label("rank"))
+            .join(ClinicalEvent, ClinicalEvent.id == ReportContent.clinical_event_id)
+            .where(
+                ClinicalEvent.patient_id == patient.id,
+                ReportContent.authority_id.in_(_REPORT_AUTHORITIES),
+                ReportContent.status != "stale",
+                or_(
+                    r_narr_vec.op("@@")(ts_query),
+                    r_find_vec.op("@@")(ts_query),
+                    r_recs_vec.op("@@")(ts_query),
+                ),
+            )
+            .order_by(desc("rank"), ReportContent.created_at.desc())
+        )
+        for rc, rank in (await db.execute(report_q)).all():
             items.append(
                 PatientSearchItem(
                     section="reports",
-                    id=str(report.id),
-                    title=f"Referto v{report.version}",
-                    preview=_preview(report.text),
+                    id=str(rc.id),
+                    title=rc.title or "Referto",
+                    preview=_preview(rc.narrative_md or rc.findings_md or rc.recommendations_md),
                     rank=float(rank or 0.0),
-                    created_at=report.created_at.isoformat(),
+                    created_at=rc.created_at.isoformat(),
                 )
             )
             by_section["reports"] += 1
@@ -117,8 +143,8 @@ async def patient_scoped_search(
 
     # ---- documents ----
     if "documents" in wanted:
-        doc_title_vec = func.to_tsvector("simple", func.coalesce(Document.title, ""))
-        doc_text_vec = func.to_tsvector("simple", func.coalesce(Document.text, ""))
+        doc_title_vec = dual_tsvector(Document.title)
+        doc_text_vec = dual_tsvector(Document.text)
         # Weight the title match higher than body matches — a hit in the
         # title is a much stronger signal than one buried in the text.
         rank_expr = func.greatest(
@@ -153,11 +179,9 @@ async def patient_scoped_search(
     # crosses ClinicalEvent → Patient because ReportContent is event-
     # scoped, not patient-scoped, in the v3 schema.
     if "consultations" in wanted:
-        from bvphoenix.db.models import ClinicalEvent, ReportContent
-
-        narr_vec = func.to_tsvector("simple", func.coalesce(ReportContent.narrative_md, ""))
-        findings_vec = func.to_tsvector("simple", func.coalesce(ReportContent.findings_md, ""))
-        recs_vec = func.to_tsvector("simple", func.coalesce(ReportContent.recommendations_md, ""))
+        narr_vec = dual_tsvector(ReportContent.narrative_md)
+        findings_vec = dual_tsvector(ReportContent.findings_md)
+        recs_vec = dual_tsvector(ReportContent.recommendations_md)
         rank_expr = func.greatest(
             func.ts_rank(narr_vec, ts_query),
             func.ts_rank(findings_vec, ts_query),
@@ -346,57 +370,64 @@ async def patient_mention_search(
         )
         by_section["documents"] += 1
 
-    # ---- reports (joined back to the patient via study) ----
+    # ---- reports (v3: original/derived ReportContent, patient-scoped via ClinicalEvent) ----
     if "reports" not in wanted:
-        reports: list[Report] = []
+        report_rows: list[ReportContent] = []
     else:
-        study_ids_subq = (
-            select(ImagingStudy.id).where(ImagingStudy.patient_id == patient.id).scalar_subquery()
-        )
         report_q = (
-            select(Report)
-            .where(Report.study_id.in_(study_ids_subq))
-            .order_by(Report.created_at.desc())
+            select(ReportContent)
+            .join(ClinicalEvent, ClinicalEvent.id == ReportContent.clinical_event_id)
+            .where(
+                ClinicalEvent.patient_id == patient.id,
+                ReportContent.authority_id.in_(_REPORT_AUTHORITIES),
+                ReportContent.status != "stale",
+            )
+            .order_by(ReportContent.created_at.desc())
             .limit(limit)
         )
         if use_prefix:
-            report_q = report_q.where(Report.title.ilike(pattern, escape="\\"))
-        reports = (await db.execute(report_q)).scalars().all()
-    for r in reports:
+            report_q = report_q.where(ReportContent.title.ilike(pattern, escape="\\"))
+        report_rows = list((await db.execute(report_q)).scalars().all())
+    for rc in report_rows:
         items.append(
             PatientSearchItem(
                 section="reports",
-                id=str(r.id),
-                title=r.title or f"Report v{r.version}",
-                preview=_preview(r.text),
+                id=str(rc.id),
+                title=rc.title or "Referto",
+                preview=_preview(rc.narrative_md),
                 rank=1.0,
-                created_at=r.created_at.isoformat(),
+                created_at=rc.created_at.isoformat(),
             )
         )
         by_section["reports"] += 1
 
-    # ---- consultations ----
+    # ---- consultations (v3: canonical_synthesis ReportContent via ClinicalEvent) ----
     if "consultations" not in wanted:
-        conss: list[Consultation] = []
+        cons_rows: list[ReportContent] = []
     else:
         cons_q = (
-            select(Consultation)
-            .where(Consultation.patient_id == patient.id)
-            .order_by(Consultation.created_at.desc())
+            select(ReportContent)
+            .join(ClinicalEvent, ClinicalEvent.id == ReportContent.clinical_event_id)
+            .where(
+                ClinicalEvent.patient_id == patient.id,
+                ReportContent.authority_id == "canonical_synthesis",
+                ReportContent.status != "stale",
+            )
+            .order_by(ReportContent.created_at.desc())
             .limit(limit)
         )
         if use_prefix:
-            cons_q = cons_q.where(Consultation.title.ilike(pattern, escape="\\"))
-        conss = (await db.execute(cons_q)).scalars().all()
-    for c in conss:
+            cons_q = cons_q.where(ReportContent.title.ilike(pattern, escape="\\"))
+        cons_rows = list((await db.execute(cons_q)).scalars().all())
+    for rc in cons_rows:
         items.append(
             PatientSearchItem(
                 section="consultations",
-                id=str(c.id),
-                title=c.title,
-                preview=_preview(c.summary_md),
+                id=str(rc.id),
+                title=rc.title or "(sintesi senza titolo)",
+                preview=_preview(rc.narrative_md),
                 rank=1.0,
-                created_at=c.created_at.isoformat(),
+                created_at=rc.created_at.isoformat(),
             )
         )
         by_section["consultations"] += 1

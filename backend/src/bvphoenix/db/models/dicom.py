@@ -24,6 +24,7 @@ from sqlalchemy import (
     BigInteger,
     Boolean,
     CheckConstraint,
+    Computed,
     Date,
     Enum,
     ForeignKey,
@@ -33,7 +34,7 @@ from sqlalchemy import (
     Text,
     UniqueConstraint,
 )
-from sqlalchemy.dialects.postgresql import ARRAY
+from sqlalchemy.dialects.postgresql import ARRAY, JSONB, TSVECTOR
 from sqlalchemy.dialects.postgresql import UUID as PG_UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -115,6 +116,19 @@ class ImagingStudy(TimestampMixin, UpdatedAtMixin, Base):
     license_url: Mapped[str | None] = mapped_column(Text)
     citation_required: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default="false")
     citation_text: Mapped[str | None] = mapped_column(Text)
+    # Dual-config full-text vector: the Italian-stemmed lexemes (so
+    # "polmoni" matches "polmone") OR'd with the raw 'simple' tokens
+    # (so DICOM code-strings / acronyms like "T2 FLAIR" still match
+    # exactly). Generated + stored, mirroring text_chunks.text_tsv.
+    study_description_tsv: Mapped[str] = mapped_column(
+        TSVECTOR,
+        Computed(
+            "to_tsvector('italian'::regconfig, coalesce(study_description, '')) "
+            "|| to_tsvector('simple'::regconfig, coalesce(study_description, ''))",
+            persisted=True,
+        ),
+        nullable=False,
+    )
 
     __table_args__ = (
         UniqueConstraint(
@@ -125,6 +139,7 @@ class ImagingStudy(TimestampMixin, UpdatedAtMixin, Base):
         Index("ix_imaging_studies_uid", "study_instance_uid"),
         Index("ix_imaging_studies_public", "is_public"),
         Index("ix_imaging_studies_tier", "contribution_tier"),
+        Index("ix_studies_description_tsv", "study_description_tsv", postgresql_using="gin"),
         # Partial UNIQUE on clinical_event_id (1:1 to clinical_events)
         # is created by migration 0073 as a partial index — Alembic
         # is the source of truth; the ORM does not need to mirror it
@@ -158,6 +173,16 @@ class Series(TimestampMixin, Base):
     ingestion_complete: Mapped[bool] = mapped_column(
         Boolean, nullable=False, server_default="false"
     )
+    # Dual-config FTS (Italian-stemmed || simple); see ImagingStudy above.
+    series_description_tsv: Mapped[str] = mapped_column(
+        TSVECTOR,
+        Computed(
+            "to_tsvector('italian'::regconfig, coalesce(series_description, '')) "
+            "|| to_tsvector('simple'::regconfig, coalesce(series_description, ''))",
+            persisted=True,
+        ),
+        nullable=False,
+    )
 
     __table_args__ = (
         UniqueConstraint(
@@ -166,6 +191,7 @@ class Series(TimestampMixin, Base):
             name="uq_series_study_uid",
         ),
         Index("ix_series_uid", "series_instance_uid"),
+        Index("ix_series_description_tsv", "series_description_tsv", postgresql_using="gin"),
     )
 
 
@@ -222,6 +248,15 @@ class Derivative(TimestampMixin, Base):
     s3_key: Mapped[str] = mapped_column(String(1024), nullable=False)
     size_bytes: Mapped[int | None] = mapped_column(BigInteger)
     generator_version: Mapped[str | None] = mapped_column(String(64))
+    # Real patient-space geometry of a packed volume_f32 derivative,
+    # computed at pack time from the sorted DICOM datasets (see
+    # ``services.volumes.compute_volume_geometry``). Served back to the
+    # viewer as X-Volume-* response headers so it builds the Cornerstone
+    # volume in true LPS space instead of a fabricated identity frame.
+    # NULL for non-volume derivatives and for legacy packs predating this
+    # column (the viewer falls back to the identity frame). Shape:
+    # ``{"origin": [3]|None, "direction": [9]|None, "frame_of_reference_uid": str|None}``.
+    geometry: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
 
     __table_args__ = (
         UniqueConstraint("series_id", "kind", "format", name="uq_derivatives_series_kind_format"),

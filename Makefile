@@ -1,5 +1,5 @@
 .PHONY: help up up.infra down logs ps build \
-        backend.install backend.dev backend.test backend.lint \
+        backend.install backend.dev backend.test backend.lint backend.eval \
         workers.install workers.dev workers.test \
         crawler.install crawler.dev crawler.test \
         mcp.install mcp.dev mcp.test \
@@ -88,6 +88,13 @@ backend.dev:
 
 backend.test:
 	cd backend && uv run pytest
+
+# Search relevance gate: seeds the golden corpus into a migrated Postgres
+# and asserts recall/nDCG/MRR + cross-patient isolation. FTS-only, so no
+# ``ai`` extra is needed. Requires BVP_DATABASE_URL to point at a pgvector
+# DB already migrated to head (``make db.migrate``).
+backend.eval:
+	cd backend && BVP_RUN_SEARCH_INTEGRATION=1 uv run pytest tests/eval tests/test_search.py
 
 backend.lint:
 	cd backend && uv run ruff check . && uv run ruff format --check . && uv run python ../scripts/lint_phi_safe.py

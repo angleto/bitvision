@@ -24,7 +24,7 @@ from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 
 from bvphoenix.auth import optional_user
-from bvphoenix.db.models import Embedding
+from bvphoenix.db.models import Embedding, ReportContent
 from bvphoenix.db.session import get_db
 from bvphoenix.main import app
 
@@ -298,3 +298,149 @@ async def test_embedding_cosine_distance_operator(
     )
     dist = (await db_session.execute(stmt)).scalar_one()
     assert dist == pytest.approx(0.0, abs=1e-4)
+
+
+# ---- Patient-scoped search: ReportContent-backed sections (regression) -----
+# v3 folded the legacy ``Report`` / ``Consultation`` models into
+# ``ReportContent``. ``patients/search.py`` used to reference the removed
+# names, so the ``reports`` / ``consultations`` sections raised NameError
+# -> 500. These guard the mapping + the no-crash invariant.
+
+
+async def _add_report_content(
+    session,
+    *,
+    event_id,
+    subject_id,
+    authority: str,
+    status: str,
+    title: str,
+    narrative: str,
+):
+    """Insert a ReportContent on a clinical event; return its id."""
+    rc = ReportContent(
+        id=uuid.uuid4(),
+        clinical_event_id=event_id,
+        authority_id=authority,
+        status=status,
+        language="it",
+        title=title,
+        narrative_md=narrative,
+        structured_fields={},
+        created_by_subject_id=subject_id,
+        author_kind="human",
+    )
+    session.add(rc)
+    await session.flush()
+    return rc.id
+
+
+@pytest.mark.asyncio
+async def test_patient_search_default_sections_do_not_500(
+    db_session, make_user, make_study
+) -> None:
+    """Default sections include ``reports`` + ``consultations``; both the
+    full-text and the @mention endpoints must return 200, not 500."""
+    user = await make_user()
+    study, _ = await make_study(user, description="addome con mdc")
+    client = await _client_for(db_session, user)
+    try:
+        r = await client.get(f"/api/patients/{study.patient_id}/search", params={"q": "addome"})
+        assert r.status_code == 200, r.text
+        r2 = await client.get(f"/api/patients/{study.patient_id}/mention-search")
+        assert r2.status_code == 200, r2.text
+    finally:
+        await client.aclose()
+        app.dependency_overrides.clear()
+
+
+@pytest.mark.asyncio
+async def test_patient_search_maps_authority_to_section(db_session, make_user, make_study) -> None:
+    """``original`` / ``derived`` -> reports section; ``canonical_synthesis``
+    -> consultations section; ``stale`` rows are excluded from both."""
+    user = await make_user()
+    token = f"zz{uuid.uuid4().hex[:8]}"
+    study, _ = await make_study(user, description="rmn encefalo")
+    report_id = await _add_report_content(
+        db_session,
+        event_id=study.clinical_event_id,
+        subject_id=user.subject_id,
+        authority="original",
+        status="endorsed",
+        title="Referto RMN",
+        narrative=f"Reperti {token} in regione frontale.",
+    )
+    synth_id = await _add_report_content(
+        db_session,
+        event_id=study.clinical_event_id,
+        subject_id=user.subject_id,
+        authority="canonical_synthesis",
+        status="final",
+        title="Sintesi",
+        narrative=f"Sintesi clinica {token}.",
+    )
+    stale_id = await _add_report_content(
+        db_session,
+        event_id=study.clinical_event_id,
+        subject_id=user.subject_id,
+        authority="original",
+        status="stale",
+        title="Referto superato",
+        narrative=f"Versione superata {token}.",
+    )
+    await db_session.commit()
+
+    client = await _client_for(db_session, user)
+    try:
+        r = await client.get(f"/api/patients/{study.patient_id}/search", params={"q": token})
+        assert r.status_code == 200, r.text
+        by_section: dict[str, set[str]] = {}
+        for it in r.json()["items"]:
+            by_section.setdefault(it["section"], set()).add(it["id"])
+        assert str(report_id) in by_section.get("reports", set())
+        assert str(synth_id) in by_section.get("consultations", set())
+        all_ids = set().union(*by_section.values()) if by_section else set()
+        assert str(stale_id) not in all_ids
+    finally:
+        await client.aclose()
+        app.dependency_overrides.clear()
+
+
+# ---- Dual-config FTS (italian || simple) -----------------------------------
+
+
+@pytest.mark.asyncio
+async def test_search_italian_stemming(db_session, make_user, make_study) -> None:
+    """The dual-config tsvector stems Italian, so a plural query matches a
+    singular description ("polmoni" -> "polmone", both stem "polmon").
+    The old ``simple``-only index could not do this."""
+    user = await make_user()
+    marker = uuid.uuid4().hex[:6]
+    await make_study(user, description=f"Nodulo al polmone destro {marker}")
+    client = await _client_for(db_session, user)
+    try:
+        r = await client.get("/api/search", params={"q": "polmoni"})
+        assert r.status_code == 200, r.text
+        descs = [s.get("study_description") or "" for s in r.json()["items"]]
+        assert any(marker in d for d in descs), "plural query should stem-match singular"
+    finally:
+        await client.aclose()
+        app.dependency_overrides.clear()
+
+
+@pytest.mark.asyncio
+async def test_search_acronym_exact_token(db_session, make_user, make_study) -> None:
+    """The ``simple`` half of the dual config preserves exact radiology
+    acronyms that an Italian stemmer would otherwise mangle."""
+    user = await make_user()
+    marker = uuid.uuid4().hex[:6]
+    await make_study(user, description=f"Sequenza T2 FLAIR encefalo {marker}")
+    client = await _client_for(db_session, user)
+    try:
+        r = await client.get("/api/search", params={"q": "FLAIR"})
+        assert r.status_code == 200, r.text
+        descs = [s.get("study_description") or "" for s in r.json()["items"]]
+        assert any(marker in d for d in descs), "exact acronym token should match"
+    finally:
+        await client.aclose()
+        app.dependency_overrides.clear()

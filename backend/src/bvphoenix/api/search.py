@@ -1,9 +1,9 @@
 """Search API — metadata + full-text + similarity.
 
 `q` performs a full-text query against study and series descriptions
-using the GIN/tsvector index installed in migration 0002. Combine
-with structured filters (``modality``, ``body_part``, date range) for
-precise scoping.
+using the dual-config (italian || simple) generated tsvector columns
+and their GIN indexes (migration 0010). Combine with structured filters
+(``modality``, ``body_part``, date range) for precise scoping.
 
 ``/similar-to/{target_id}`` finds visually similar series using
 pgvector cosine distance on BiomedCLIP embeddings.
@@ -24,6 +24,7 @@ from bvphoenix.api._schemas import PaginatedStudies, StudyOut
 from bvphoenix.auth import optional_user
 from bvphoenix.db.models import Embedding, ImagingStudy, Series, Tag, User
 from bvphoenix.db.session import get_db
+from bvphoenix.services.mmr import MMRCandidate, mmr_rerank
 from bvphoenix.services.permissions import (
     READ_METADATA,
     apply_scope_filter,
@@ -31,6 +32,8 @@ from bvphoenix.services.permissions import (
     visible_studies_filter,
 )
 from bvphoenix.services.rate_limit import SEARCH_LIMIT, limiter
+from bvphoenix.services.thesaurus import expand_tsquery
+from bvphoenix.services.vector_search import tune_vector_query
 
 router = APIRouter(tags=["search"])
 
@@ -101,20 +104,20 @@ async def search(
     # asked for 'mine' → drop grants and OpenData).
     base = apply_scope_filter(base, scope, user)
 
-    ts_query = func.plainto_tsquery("simple", q) if q else None
+    # Expand acronyms / bilingual synonyms (TC -> CT -> tomografia ...) on
+    # the FTS side only; falls back to plain dual-config FTS when the
+    # thesaurus is empty (see services/thesaurus.py).
+    ts_query = expand_tsquery(q) if q else None
 
     if ts_query is not None:
-        # Full-text on study + (joined) series descriptions. The
-        # to_tsvector calls match the GIN indexes in migration 0002 so
-        # they can be used by the planner.
+        # Full-text on study + (joined) series descriptions. The match is
+        # against the dual-config (italian || simple) generated tsvector
+        # columns so the GIN indexes from migration 0009 are used and
+        # both stemmed Italian terms and exact acronyms hit.
         base = base.outerjoin(Series, Series.study_id == ImagingStudy.id).where(
             or_(
-                func.to_tsvector("simple", func.coalesce(ImagingStudy.study_description, "")).op(
-                    "@@"
-                )(ts_query),
-                func.to_tsvector("simple", func.coalesce(Series.series_description, "")).op("@@")(
-                    ts_query
-                ),
+                ImagingStudy.study_description_tsv.op("@@")(ts_query),
+                Series.series_description_tsv.op("@@")(ts_query),
             )
         )
 
@@ -158,35 +161,60 @@ async def search(
     # attached without re-joining Series (which would force DISTINCT).
     items_query = select(ImagingStudy).where(ImagingStudy.id.in_(select(filtered_ids_subq.c.id)))
     ranked = effective_sort == "relevance" and ts_query is not None
+    has_snippet = ts_query is not None
+
+    # Extra select columns, appended in a fixed order so the row tuple is
+    # predictable: [snippet?, rank?]. ImagingStudy is always column 0.
+    extra_cols = []
+    if has_snippet:
+        # ts_headline highlights the matched terms in the raw description.
+        # Computed on the final page only (it re-parses text per row), so
+        # it never touches the candidate slab.
+        extra_cols.append(
+            func.ts_headline(
+                "italian",
+                func.coalesce(ImagingStudy.study_description, ""),
+                ts_query,
+                "StartSel=<mark>, StopSel=</mark>, MaxWords=18, MinWords=5, MaxFragments=2",
+            ).label("snippet")
+        )
 
     if ranked:
-        study_tsv = func.to_tsvector("simple", func.coalesce(ImagingStudy.study_description, ""))
         # Recency decay keeps the factor in (0, 1] so it never
         # dominates the text relevance score.
         age_days = func.extract("epoch", func.now() - ImagingStudy.created_at) / literal(86400.0)
         decay = literal(1.0) / (literal(1.0) + age_days / literal(365.0))
-        rank_expr = (func.ts_rank_cd(study_tsv, ts_query) * decay).label("rank")
-        items_query = items_query.add_columns(rank_expr).order_by(
-            rank_expr.desc(), ImagingStudy.created_at.desc()
+        rank_expr = (func.ts_rank_cd(ImagingStudy.study_description_tsv, ts_query) * decay).label(
+            "rank"
         )
+        extra_cols.append(rank_expr)
+        items_query = items_query.order_by(rank_expr.desc(), ImagingStudy.created_at.desc())
     elif effective_sort == "oldest":
         items_query = items_query.order_by(ImagingStudy.created_at.asc())
     else:
         items_query = items_query.order_by(ImagingStudy.created_at.desc())
 
+    if extra_cols:
+        items_query = items_query.add_columns(*extra_cols)
     items_query = items_query.limit(limit).offset(offset)
 
     items_result = await db.execute(items_query)
-    if ranked:
-        # add_columns makes the row a tuple; ImagingStudy is in column 0.
-        studies = [row[0] for row in items_result.all()]
+    out_items: list[StudyOut] = []
+    if extra_cols:
+        # add_columns makes each row a tuple; study is column 0, snippet
+        # (if requested) is column 1.
+        for row in items_result.all():
+            study_out = StudyOut.model_validate(row[0])
+            if has_snippet:
+                study_out.snippet = row[1]
+            out_items.append(study_out)
     else:
-        studies = items_result.scalars().all()
+        out_items = [StudyOut.model_validate(s) for s in items_result.scalars().all()]
 
     facet_payload = await _compute_facets(db, filtered_ids_subq) if facets else None
 
     return PaginatedStudies(
-        items=[StudyOut.model_validate(s) for s in studies],
+        items=out_items,
         total=int(total),
         limit=limit,
         offset=offset,
@@ -286,12 +314,18 @@ async def find_similar_studies(
     target_id: uuid.UUID,
     k: int = 10,
     modality: str | None = None,
+    diversify: bool = False,
+    mmr_lambda: float = 0.7,
 ) -> list[SimilarStudyOut]:
     """Core similarity search, callable from both the HTTP handler and
     from in-process callers (A2A skills, MCP tools). The HTTP handler
     wraps this with a rate-limit decorator; callers that already go
     through their own quota (agent tokens, for instance) can call this
     directly without paying the IP-based budget twice.
+
+    ``diversify`` re-ranks the per-study representatives with MMR so the
+    panel does not fill with near-identical studies; it is opt-in because
+    it deliberately trades the pure-distance ordering for diversity.
     """
     # Resolve the query vector — try series first, then study
     source_emb = (
@@ -343,58 +377,89 @@ async def find_similar_studies(
     if not await can(db, user=user, action=READ_METADATA, study=source_study):
         raise HTTPException(status_code=404, detail="not found")
 
-    # pgvector cosine distance: <=> operator
-    # Fetch k+10 candidates to account for visibility filtering
+    # Restrict the ANN ranking to series the caller may see *before*
+    # ordering by distance, instead of over-fetching then trimming. An
+    # invisible neighbour must never consume a candidate slot (so the
+    # visible top-k is not silently starved) nor leak its existence via
+    # the result count. ``tune_vector_query(filtered=True)`` turns on
+    # iterative scan so the k*3 slab is filled with visible rows even
+    # when the caller can see only a small fraction of the corpus.
+    visible_base = await visible_studies_filter(db, user)
+    visible_study_ids = visible_base.with_only_columns(ImagingStudy.id).subquery()
+
     query_vec = source_emb.vector
+    # Over-fetch wider when diversifying so MMR has material to work with.
+    over = k * 5 if diversify else k * 3
+    await tune_vector_query(db, k=over, filtered=True)
     candidates = (
         await db.execute(
             select(
                 Embedding.target_id,
+                Embedding.vector,
                 Embedding.vector.cosine_distance(query_vec).label("distance"),
             )
+            .join(Series, Series.id == Embedding.target_id)
             .where(
                 Embedding.target_kind == "series",
                 Embedding.target_id != source_emb.target_id,
+                Series.study_id.in_(select(visible_study_ids.c.id)),
             )
             .order_by("distance")
-            .limit(k * 3)
+            .limit(over)
         )
     ).all()
 
     if not candidates:
         return []
 
-    # Resolve series → study and filter by visibility + modality
+    # Candidates are already visibility-scoped; resolve series → study
+    # for hydration + the modality filter below.
     candidate_series_ids = [c[0] for c in candidates]
-    distance_map = {c[0]: float(c[1]) for c in candidates}
+    distance_map = {c[0]: float(c[2]) for c in candidates}
+    vector_map = {c[0]: c[1] for c in candidates}
 
-    visible_base = await visible_studies_filter(db, user)
     series_study_rows = (
         await db.execute(
             select(Series, ImagingStudy)
             .join(ImagingStudy, ImagingStudy.id == Series.study_id)
-            .where(
-                Series.id.in_(candidate_series_ids),
-                ImagingStudy.id.in_(
-                    visible_base.with_only_columns(ImagingStudy.id).subquery().select()
-                ),
-            )
+            .where(Series.id.in_(candidate_series_ids))
         )
     ).all()
 
-    results: list[SimilarStudyOut] = []
-    seen_study_ids: set[uuid.UUID] = set()
-
-    # Sort by distance (similarity)
+    # Lowest-distance representative series per study, modality-filtered,
+    # best first. (similar-to returns distinct studies, one series each.)
     series_study_rows.sort(key=lambda r: distance_map.get(r[0].id, 999))
-
+    reps: list[tuple[Series, ImagingStudy]] = []
+    seen_study_ids: set[uuid.UUID] = set()
     for series, study in series_study_rows:
         if study.id in seen_study_ids:
             continue
         if modality and modality.upper() not in (study.modalities or []):
             continue
         seen_study_ids.add(study.id)
-        score = 1.0 - distance_map.get(series.id, 0)  # cosine similarity = 1 - distance
+        reps.append((series, study))
+
+    if diversify:
+        rep_by_study = {study.id: (series, study) for series, study in reps}
+        mmr_cands = [
+            MMRCandidate(
+                id=study.id,
+                vector=list(vector_map[series.id]),
+                relevance=max(0.0, 1.0 - distance_map.get(series.id, 0.0)),
+                group=study.id,
+            )
+            for series, study in reps
+            if vector_map.get(series.id) is not None
+        ]
+        ordered_reps = [rep_by_study[c.id] for c in mmr_rerank(mmr_cands, k=k, lambda_=mmr_lambda)]
+    else:
+        ordered_reps = reps[:k]
+
+    results: list[SimilarStudyOut] = []
+    for series, study in ordered_reps:
+        # cosine_distance is in [0, 2]; clamp so a dissimilar pair never
+        # surfaces a negative "similarity" score to the caller / UI.
+        score = max(0.0, 1.0 - distance_map.get(series.id, 0.0))
         results.append(
             SimilarStudyOut(
                 study=StudyOut.model_validate(study),
@@ -402,8 +467,6 @@ async def find_similar_studies(
                 matched_series_id=str(series.id),
             )
         )
-        if len(results) >= k:
-            break
 
     return results
 
@@ -417,10 +480,17 @@ async def similar_to(
     user: Annotated[User | None, Depends(optional_user)],
     k: int = Query(10, ge=1, le=100),
     modality: str | None = Query(None, max_length=16),
+    diversify: bool = Query(
+        False,
+        description="Re-rank with MMR so the results are visually diverse "
+        "instead of a cluster of near-identical studies.",
+    ),
 ) -> list[SimilarStudyOut]:
     """Find studies with visually similar series using BiomedCLIP embeddings.
 
     ``target_id`` can be a series or study UUID. If it's a study, the first
     series with an embedding is used as the query vector.
     """
-    return await find_similar_studies(db=db, user=user, target_id=target_id, k=k, modality=modality)
+    return await find_similar_studies(
+        db=db, user=user, target_id=target_id, k=k, modality=modality, diversify=diversify
+    )

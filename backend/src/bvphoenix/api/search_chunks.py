@@ -93,6 +93,11 @@ async def search_patient_chunks(
     since: date | None = Query(default=None),
     until: date | None = Query(default=None),
     source_id: uuid.UUID | None = Query(default=None),
+    rerank: bool = Query(
+        default=False,
+        description="Cross-encoder re-rank the RRF pool (slower; for agent/RAG use). "
+        "No-op when the ai extra is not installed.",
+    ),
 ) -> ChunkSearchOut:
     """Hybrid (vector + FTS) chunk search for one patient."""
 
@@ -122,6 +127,7 @@ async def search_patient_chunks(
         since=since,
         until=until,
         source_id=source_id,
+        rerank=rerank,
     )
     return ChunkSearchOut(
         q=q,

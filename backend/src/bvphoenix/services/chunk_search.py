@@ -44,6 +44,8 @@ from bvphoenix.db.models.text_chunks import (
     CHUNK_SOURCE_KINDS,
     DEFAULT_CHUNKER_VERSION,
 )
+from bvphoenix.services.reranker import rerank_order
+from bvphoenix.services.vector_search import tune_vector_query
 
 __all__ = [
     "CHUNK_AUTHOR_KINDS",
@@ -65,6 +67,10 @@ _RRF_K = 60.0
 # Over-fetch so the union of the two top-k lists has enough candidates
 # to fill k slots after RRF.
 _OVERFETCH_FACTOR = 4
+# When reranking, score this many RRF candidates with the cross-encoder
+# before trimming to k. Wide enough to recover a passage RRF underranked,
+# bounded so the per-pair CPU cost stays acceptable.
+_RERANK_POOL = 30
 
 _minilm_model: Any | None = None
 
@@ -159,6 +165,7 @@ async def search_chunks(
     until: date | None = None,
     source_id: uuid.UUID | None = None,
     chunker_version: str = DEFAULT_CHUNKER_VERSION,
+    rerank: bool = False,
 ) -> list[ChunkHit]:
     """Return up to ``k`` ranked chunks for ``query`` in this patient's data.
 
@@ -265,6 +272,11 @@ async def search_chunks(
             LIMIT :limit
             """
         )
+        # Per-patient is the most selective filter in the system (one
+        # patient out of thousands), so this is exactly where plain HNSW
+        # post-filtering under-returns; iterative scan keeps pulling until
+        # the patient's own chunks fill the slab.
+        await tune_vector_query(db, k=over, filtered=True)
         try:
             vec_rows = (
                 await db.execute(
@@ -312,10 +324,14 @@ async def search_chunks(
             s += 1.0 / (_RRF_K + rank_fts[cid])
         scored.append((cid, s))
     scored.sort(key=lambda x: x[1], reverse=True)
-    top_ids = [cid for cid, _ in scored[:k]]
+    # When reranking, enrich a wider RRF pool so the cross-encoder can
+    # promote a passage the rank fusion underranked; otherwise just k.
+    pool_size = max(k, _RERANK_POOL) if rerank else k
+    pool = scored[:pool_size]
+    top_ids = [cid for cid, _ in pool]
     if not top_ids:
         return []
-    score_by_id = dict(scored[:k])
+    score_by_id = dict(pool)
 
     # ---- enrich with chunk metadata (no S3 / no bucket leakage) ----
     # Defence-in-depth: even though the candidate ids came from a
@@ -334,24 +350,38 @@ async def search_chunks(
     enrich_rows = (await db.execute(enrich_sql, {"ids": top_ids, "patient_id": patient_id})).all()
     by_id = {r[0]: r for r in enrich_rows}
 
-    hits: list[ChunkHit] = []
+    # Keep each hit's full chunk text alongside it so the cross-encoder
+    # rescues quality on the full passage, not the truncated excerpt.
+    pooled: list[tuple[ChunkHit, str]] = []
     for cid in top_ids:
         row = by_id.get(cid)
         if row is None:
             continue
-        hits.append(
-            ChunkHit(
-                chunk_id=row[0],
-                source_kind=row[1],
-                source_id=row[2],
-                page=row[3],
-                char_start=row[4],
-                char_end=row[5],
-                excerpt=_excerpt(row[6]),
-                score=round(score_by_id[cid], 6),
-                author_kind=row[7],
-                authority_id=row[8],
-                document_kind_id=row[9],
+        full_text = row[6]
+        pooled.append(
+            (
+                ChunkHit(
+                    chunk_id=row[0],
+                    source_kind=row[1],
+                    source_id=row[2],
+                    page=row[3],
+                    char_start=row[4],
+                    char_end=row[5],
+                    excerpt=_excerpt(full_text),
+                    score=round(score_by_id[cid], 6),
+                    author_kind=row[7],
+                    authority_id=row[8],
+                    document_kind_id=row[9],
+                ),
+                full_text or "",
             )
         )
-    return hits
+
+    if rerank and len(pooled) > 1:
+        # Cross-encoder reorders the pool by true (query, passage)
+        # relevance; on no ai extra it returns None and we keep RRF order.
+        order = await rerank_order(query, [text_ for _, text_ in pooled], top_n=k)
+        if order is not None:
+            pooled = [pooled[i] for i in order]
+
+    return [hit for hit, _ in pooled[:k]]

@@ -1093,7 +1093,14 @@
     "noHybridResults": "Nessuno studio trovato per «{q}». Prova un termine più semplice o passa alla ricerca metadata.",
     "noMetaResults": "Nessun match testuale per «{q}». Prova la modalità studi.",
     "metaResultsCount": "risultati su metadata",
-    "openDataBadge": "OpenData"
+    "openDataBadge": "OpenData",
+    "studiesCount": "{n} studi",
+    "weightsLabel": "pesi:",
+    "searching": "Ricerca…",
+    "loadMore": "Carica altri",
+    "loadingMore": "Caricamento…",
+    "showingCount": "Mostrati {shown} di {total}",
+    "resultsRegionAria": "Risultati ricerca"
   },
   "searchSidebar": {
     "ariaLabel": "Filtri di ricerca",

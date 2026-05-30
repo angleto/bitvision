@@ -43,6 +43,19 @@ TOOLS = [
                     "description": "Max results to return (1-200, default 20)",
                     "default": 20,
                 },
+                "offset": {
+                    "type": "integer",
+                    "description": "Pagination offset (default 0). Page with limit+offset.",
+                    "default": 0,
+                },
+                "facets": {
+                    "type": "boolean",
+                    "description": (
+                        "If true, also return per-field counts (modality / body_part / "
+                        "year / top tags) over the filtered set, for exploratory drill-down."
+                    ),
+                    "default": False,
+                },
                 "scope": {
                     "type": "string",
                     "enum": ["all", "public", "mine"],
@@ -87,6 +100,14 @@ TOOLS = [
                     "type": "string",
                     "description": "Optionally filter results by modality (CT, MR, etc.)",
                 },
+                "diversify": {
+                    "type": "boolean",
+                    "description": (
+                        "If true, MMR re-rank for visual diversity instead of returning "
+                        "a cluster of near-identical studies."
+                    ),
+                    "default": False,
+                },
             },
             "required": ["target_id"],
         },
@@ -116,6 +137,10 @@ async def handle(name: str, arguments: dict) -> str:
             # is exactly what FastAPI's Query(list[str]) expects.
             params["tag"] = arguments["tag"]
         params["limit"] = arguments.get("limit", 20)
+        if arguments.get("offset"):
+            params["offset"] = arguments["offset"]
+        if arguments.get("facets"):
+            params["facets"] = True
         result = await api_get("/api/search", params=params)
         return json.dumps(result, indent=2)
 
@@ -123,6 +148,8 @@ async def handle(name: str, arguments: dict) -> str:
         params = {"k": arguments.get("k", 10)}
         if arguments.get("modality"):
             params["modality"] = arguments["modality"]
+        if arguments.get("diversify"):
+            params["diversify"] = True
         result = await api_get(
             f"/api/similar-to/{arguments['target_id']}",
             params=params,

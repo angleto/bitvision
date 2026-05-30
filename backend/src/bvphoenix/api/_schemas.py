@@ -40,6 +40,11 @@ class StudyOut(BaseModel):
     # entry from a user study marked is_public, without recomputing
     # the platform-owner UUID client-side.
     is_opendata: bool = False
+    # Highlighted full-text snippet (``ts_headline`` with <mark> around
+    # matched terms) — set only on ``/search`` responses when a text query
+    # was supplied, so callers can show *why* a result matched. None on
+    # browse/listing responses.
+    snippet: str | None = None
 
     @classmethod
     def model_validate(cls, obj, *args, **kwargs):  # type: ignore[override]
