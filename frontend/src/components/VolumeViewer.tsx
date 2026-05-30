@@ -18,6 +18,14 @@ export interface VolumeData {
   spacing: [number, number, number];
   scalars: Float32Array;
   range: [number, number];
+  /** Real DICOM patient-space geometry from the volume.raw X-Volume-*
+   *  headers. ``origin`` = LPS position of voxel (0,0,0); ``direction``
+   *  = 9-float [rowCos, colCos, sliceCos] (Cornerstone3D order);
+   *  ``frameOfReferenceUid`` = DICOM FoR. Optional: legacy packs omit
+   *  them and the viewer builds an identity frame. */
+  origin?: [number, number, number];
+  direction?: [number, number, number, number, number, number, number, number, number];
+  frameOfReferenceUid?: string;
 }
 
 export type ColorPreset =

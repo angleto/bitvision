@@ -129,7 +129,35 @@ def _chunked_iter(data: bytes, chunk: int = _STREAM_CHUNK_BYTES):
         yield bytes(view[offset : offset + chunk])
 
 
-def _volume_response(data: bytes, *, accept_gzip: bool) -> Response:
+def _geometry_headers(geometry: dict | None) -> dict[str, str]:
+    """Encode a packed volume's patient-space geometry as ``X-Volume-*``
+    response headers.
+
+    The 32-byte blob header is frozen for backward compat, so the real
+    DICOM origin / direction cosines / FrameOfReferenceUID travel
+    out-of-band here. The viewer reads them in ``fetchVolume`` and builds
+    its Cornerstone volume in true LPS space (see
+    ``services.volumes.compute_volume_geometry``). Empty dict when the
+    geometry is absent or partial — the viewer keeps its identity-frame
+    fallback. Floats are joined with ``,`` so the client splits and
+    ``parseFloat``s them; these are non-PHI scanner geometry numbers.
+    """
+    if not geometry:
+        return {}
+    headers: dict[str, str] = {}
+    origin = geometry.get("origin")
+    direction = geometry.get("direction")
+    for_uid = geometry.get("frame_of_reference_uid")
+    if isinstance(origin, (list, tuple)) and len(origin) == 3:
+        headers["x-volume-origin"] = ",".join(repr(float(v)) for v in origin)
+    if isinstance(direction, (list, tuple)) and len(direction) == 9:
+        headers["x-volume-direction"] = ",".join(repr(float(v)) for v in direction)
+    if for_uid:
+        headers["x-volume-frame-of-reference"] = str(for_uid)
+    return headers
+
+
+def _volume_response(data: bytes, *, accept_gzip: bool, geometry: dict | None = None) -> Response:
     """Serve a volume blob with optional gzip + chunked streaming.
 
     - If the client accepts gzip, compress with level 1 (fast; typical
@@ -138,8 +166,11 @@ def _volume_response(data: bytes, *, accept_gzip: bool) -> Response:
     - If the resulting payload is larger than ``_STREAM_THRESHOLD_BYTES``,
       return a StreamingResponse so we don't hold the full blob in a
       second buffer inside Starlette.
+    - ``geometry`` (when present) is attached as ``X-Volume-*`` headers so
+      the viewer builds its volume in true patient space.
     """
     headers = {"cache-control": "private, max-age=3600"}
+    headers.update(_geometry_headers(geometry))
     if accept_gzip:
         data = gzip.compress(data, compresslevel=1)
         headers["content-encoding"] = "gzip"

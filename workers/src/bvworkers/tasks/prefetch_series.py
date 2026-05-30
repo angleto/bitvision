@@ -20,6 +20,7 @@ non-CLI ingestion path (HTTP upload, S3 event, DICOMweb C-STORE SCP).
 from __future__ import annotations
 
 import asyncio
+import json
 import struct
 import uuid
 
@@ -122,7 +123,7 @@ async def prefetch_series(ctx: dict, series_id: str) -> dict:  # type: ignore[ty
                 await engine.dispose()
                 return {**result, "status": "no_instances"}
             bucket = instances[0]["s3_bucket"]
-            packed_bytes = await asyncio.to_thread(_pack_full, s3, bucket, instances)
+            packed_bytes, geometry = await asyncio.to_thread(_pack_full, s3, bucket, instances)
 
             cache_key = volume_key(patient_id=patient_id, series_id=sid)
             s3.put_object(
@@ -132,8 +133,9 @@ async def prefetch_series(ctx: dict, series_id: str) -> dict:  # type: ignore[ty
             )
             await db.execute(
                 text(
-                    "INSERT INTO derivatives (series_id, kind, format, s3_bucket, s3_key, size_bytes, generator_version) "
-                    "VALUES (:sid, 'volume_f32', 'raw', :bucket, :key, :size, :ver)"
+                    "INSERT INTO derivatives "
+                    "(series_id, kind, format, s3_bucket, s3_key, size_bytes, generator_version, geometry) "
+                    "VALUES (:sid, 'volume_f32', 'raw', :bucket, :key, :size, :ver, CAST(:geom AS jsonb))"
                 ),
                 {
                     "sid": sid,
@@ -141,6 +143,7 @@ async def prefetch_series(ctx: dict, series_id: str) -> dict:  # type: ignore[ty
                     "key": cache_key,
                     "size": len(packed_bytes),
                     "ver": "prefetch-v1",
+                    "geom": json.dumps(geometry) if geometry else None,
                 },
             )
             await db.commit()

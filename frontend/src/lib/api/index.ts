@@ -5,7 +5,6 @@
 
 export * from "./core";
 import {
-  _markAuthExpired,
   API_BASE_URL,
   ApiError,
   type Paginated,
@@ -13,6 +12,7 @@ import {
   type SearchFacets,
   type SearchParams,
   type StudyListParams,
+  _markAuthExpired,
   absoluteApiUrl,
   authedDownload,
   getStoredToken,
@@ -2659,6 +2659,31 @@ export interface PackedVolumeHeader {
   nz: number;
   spacing: [number, number, number];
   valueRange: [number, number];
+  /** Real DICOM patient-space geometry, recovered from the
+   *  ``X-Volume-*`` response headers (the blob's 32-byte binary header
+   *  is frozen and carries none of it). ``origin`` is the LPS position
+   *  of voxel (0,0,0); ``direction`` is the 9-float
+   *  [rowCos, colCos, sliceCos] matrix in Cornerstone3D order;
+   *  ``frameOfReferenceUid`` is the DICOM FoR. All optional: legacy
+   *  packs (and series predating the geometry column) omit them and the
+   *  viewer falls back to an identity frame. */
+  origin?: [number, number, number];
+  direction?: [number, number, number, number, number, number, number, number, number];
+  frameOfReferenceUid?: string;
+}
+
+/** Parse one ``X-Volume-*`` header of N comma-separated floats. Returns
+ *  ``undefined`` when the header is absent or malformed so the caller
+ *  can fall back to the identity frame rather than feed Cornerstone
+ *  NaNs. Exported so the viewer page's bespoke volume decoder reads the
+ *  same geometry without duplicating the parse. */
+export function parseFloatVector(raw: string | null, expected: number): number[] | undefined {
+  if (!raw) return undefined;
+  const parts = raw.split(",").map((s) => Number.parseFloat(s.trim()));
+  if (parts.length !== expected || parts.some((n) => !Number.isFinite(n))) {
+    return undefined;
+  }
+  return parts;
 }
 
 export async function fetchVolume(
@@ -2693,6 +2718,13 @@ export async function fetchVolume(
     signal: opts?.signal,
   });
   if (!resp.ok) throw new ApiError(resp.status, await resp.text());
+  // Real patient-space geometry travels out-of-band in X-Volume-* headers
+  // (the blob's binary header is frozen). Read them before consuming the
+  // body. Absent/partial → undefined, and makeLocalVolume keeps the
+  // identity-frame fallback.
+  const originHdr = parseFloatVector(resp.headers.get("x-volume-origin"), 3);
+  const directionHdr = parseFloatVector(resp.headers.get("x-volume-direction"), 9);
+  const frameOfReferenceUid = resp.headers.get("x-volume-frame-of-reference") || undefined;
   // Stream the body so the caller can render a progress bar; fall back
   // to a plain ``arrayBuffer()`` when the platform doesn't expose a
   // readable body (older Safari, some test environments).
@@ -2756,7 +2788,16 @@ export async function fetchVolume(
   const vmax = dv.getFloat32(28, true);
   const scalars = new Float32Array(buf, 32, nx * ny * nz);
   return {
-    header: { nx, ny, nz, spacing: [sx, sy, sz], valueRange: [vmin, vmax] },
+    header: {
+      nx,
+      ny,
+      nz,
+      spacing: [sx, sy, sz],
+      valueRange: [vmin, vmax],
+      origin: originHdr as [number, number, number] | undefined,
+      direction: directionHdr as PackedVolumeHeader["direction"],
+      frameOfReferenceUid,
+    },
     scalars,
   };
 }

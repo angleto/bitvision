@@ -23,6 +23,7 @@ instead of doubling it.
 from __future__ import annotations
 
 import io
+import json
 import logging
 import struct
 import uuid
@@ -32,6 +33,7 @@ import numpy as np
 import pydicom
 from botocore.client import Config
 from bvphoenix.services.derivative_keys import volume_key
+from bvphoenix.services.volumes import compute_volume_geometry
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
 
@@ -89,8 +91,15 @@ class _Unpackable(Exception):
     still works; the user just doesn't get the volume cache."""
 
 
-def _pack(s3_client, bucket: str, instance_rows: list[dict]) -> bytes:
-    """Download DICOMs from S3, decode, stack, return packed bytes.
+def _pack(s3_client, bucket: str, instance_rows: list[dict]) -> tuple[bytes, dict | None]:
+    """Download DICOMs from S3, decode, stack, return ``(packed_bytes,
+    geometry)``.
+
+    ``geometry`` is the real patient-space frame computed from the same
+    sorted datasets (origin / direction cosines / FrameOfReferenceUID;
+    see ``compute_volume_geometry``), served back to the viewer so it
+    builds the Cornerstone volume in true LPS space. ``None`` for legacy
+    series without orientation tags.
 
     Frees each pydicom Dataset immediately after copying its pixel
     data into the output volume so peak RAM stays close to the
@@ -143,6 +152,10 @@ def _pack(s3_client, bucket: str, instance_rows: list[dict]) -> bytes:
         )
 
     datasets.sort(key=_sort_key)
+    # Geometry MUST be computed here, before the fill loop frees each
+    # dataset (datasets[i] = None below), and from the sorted order so it
+    # matches the on-wire scalar layout.
+    geometry = compute_volume_geometry(datasets)
     first = datasets[0]
     rows = int(first.Rows)
     cols = int(first.Columns)
@@ -183,7 +196,7 @@ def _pack(s3_client, bucket: str, instance_rows: list[dict]) -> bytes:
 
     vmin, vmax = float(volume.min()), float(volume.max())
     header = HEADER_STRUCT.pack(cols, rows, nz, sx, sy, slice_thickness, vmin, vmax)
-    return header + volume.tobytes(order="C")
+    return header + volume.tobytes(order="C"), geometry
 
 
 async def pack_volume(ctx: dict, series_id: str) -> dict:  # type: ignore[type-arg]
@@ -258,7 +271,7 @@ async def pack_volume(ctx: dict, series_id: str) -> dict:  # type: ignore[type-a
         import asyncio
 
         try:
-            packed_bytes = await asyncio.to_thread(_pack, s3, bucket, instances)
+            packed_bytes, geometry = await asyncio.to_thread(_pack, s3, bucket, instances)
         except _VolumeTooLarge as exc:
             log.warning("pack_volume: skipping series %s — %s", series_id, exc)
             await engine.dispose()
@@ -303,11 +316,16 @@ async def pack_volume(ctx: dict, series_id: str) -> dict:  # type: ignore[type-a
             **settings.put_extra_args(),
         )
 
-        # Record derivative
+        # Record derivative. ``geometry`` carries the real patient-space
+        # frame so the viewer's volume.raw fetch (which may be a cache
+        # hit on this row) gets X-Volume-* headers instead of falling
+        # back to an identity frame. Cast to jsonb explicitly: asyncpg
+        # binds the dumped string, Postgres parses it.
         await db.execute(
             text(
-                "INSERT INTO derivatives (series_id, kind, format, s3_bucket, s3_key, size_bytes, generator_version) "
-                "VALUES (:sid, :kind, :fmt, :bucket, :key, :size, :ver)"
+                "INSERT INTO derivatives "
+                "(series_id, kind, format, s3_bucket, s3_key, size_bytes, generator_version, geometry) "
+                "VALUES (:sid, :kind, :fmt, :bucket, :key, :size, :ver, CAST(:geom AS jsonb))"
             ),
             {
                 "sid": sid,
@@ -317,6 +335,7 @@ async def pack_volume(ctx: dict, series_id: str) -> dict:  # type: ignore[type-a
                 "key": cache_key,
                 "size": len(packed_bytes),
                 "ver": "worker-pack-v1",
+                "geom": json.dumps(geometry) if geometry else None,
             },
         )
         await db.commit()

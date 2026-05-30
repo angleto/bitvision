@@ -740,7 +740,11 @@ async def get_series_volume(
             bucket=derivative.s3_bucket,
             key=derivative.s3_key,
         )
-        return _volume_response(cached, accept_gzip=_client_accepts_gzip(request))
+        return _volume_response(
+            cached,
+            accept_gzip=_client_accepts_gzip(request),
+            geometry=derivative.geometry,
+        )
 
     # Pre-check: avoid an S3 round-trip for series that are obviously
     # non-volumetric (every instance is a Secondary Capture, Presentation
@@ -807,11 +811,16 @@ async def get_series_volume(
             generator_version=(
                 "pack_series-v1" if earl_fwhm_mm <= 0 else f"pack_series-v1+earl-{earl_fwhm_mm:.1f}"
             ),
+            geometry=packed.geometry,
         )
     )
     await db.commit()
 
-    return _volume_response(packed.bytes_, accept_gzip=_client_accepts_gzip(request))
+    return _volume_response(
+        packed.bytes_,
+        accept_gzip=_client_accepts_gzip(request),
+        geometry=packed.geometry,
+    )
 
 
 @router.get("/series/{series_id}/volume-preview.raw")
@@ -943,6 +952,7 @@ async def get_series_volume_preview(
                 s3_key=full_key,
                 size_bytes=packed.size,
                 generator_version="pack_series-v1",
+                geometry=packed.geometry,
             )
         )
 

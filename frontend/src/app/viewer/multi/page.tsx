@@ -19,9 +19,23 @@ import { useSearchParams } from "next/navigation";
 import { Suspense, useEffect, useMemo, useRef, useState } from "react";
 
 import type { MPRLayoutHandle } from "@/components/MPRLayoutTypes";
+import ViewerIdentityBanner from "@/components/ViewerIdentityBanner";
 import type { VolumeData } from "@/components/VolumeViewer";
-import { ApiError, type Series, fetchVolume, studiesApi } from "@/lib/api";
+import {
+  ApiError,
+  type Patient,
+  type Series,
+  type Study,
+  fetchVolume,
+  patientsApi,
+  studiesApi,
+} from "@/lib/api";
 import { modalityDefaults } from "@/lib/windowing";
+
+// Distinct, high-contrast accent per patient so a 2- or 4-pane grid makes
+// "these two panes are the SAME patient / DIFFERENT patients" obvious at a
+// glance — the colour backs up the textual correct-patient guard.
+const PATIENT_ACCENTS = ["#38bdf8", "#f472b6", "#a3e635", "#fbbf24"];
 
 const CornerstoneMPRLayout = dynamic(() => import("@/components/CornerstoneMPRLayout"), {
   ssr: false,
@@ -33,6 +47,8 @@ interface PaneState {
   seriesId: string;
   series: Series | null;
   volume: VolumeData | null;
+  study: Study | null;
+  patient: Patient | null;
   err: string | null;
 }
 
@@ -71,6 +87,8 @@ function MultiViewerInner() {
       seriesId,
       series: null,
       volume: null,
+      study: null,
+      patient: null,
       err: null,
     })),
   );
@@ -85,6 +103,8 @@ function MultiViewerInner() {
             seriesId: id,
             series: null,
             volume: null,
+            study: null,
+            patient: null,
             err: null,
           },
       );
@@ -106,7 +126,17 @@ function MultiViewerInner() {
       void (async () => {
         try {
           const series = await studiesApi.series(pane.seriesId);
-          const { header, scalars } = await fetchVolume(pane.seriesId);
+          // Volume + study/patient identity in parallel. Identity is
+          // best-effort (the correct-patient guard degrades gracefully);
+          // the volume fetch drives the pane's success/error.
+          const [{ header, scalars }, study] = await Promise.all([
+            fetchVolume(pane.seriesId),
+            studiesApi.detail(series.study_id).catch(() => null),
+          ]);
+          let patient: Patient | null = null;
+          if (study?.patient_id) {
+            patient = await patientsApi.detail(study.patient_id).catch(() => null);
+          }
           if (cancelled) return;
           setPanes((prev) =>
             prev.map((p) =>
@@ -114,11 +144,16 @@ function MultiViewerInner() {
                 ? {
                     ...p,
                     series,
+                    study,
+                    patient,
                     volume: {
                       dimensions: [header.nx, header.ny, header.nz],
                       spacing: header.spacing,
                       scalars,
                       range: header.valueRange,
+                      origin: header.origin,
+                      direction: header.direction,
+                      frameOfReferenceUid: header.frameOfReferenceUid,
                     },
                   }
                 : p,
@@ -167,6 +202,19 @@ function MultiViewerInner() {
   const cols = count <= 2 ? count : 2;
   const rows = count <= 2 ? 1 : 2;
 
+  // Correct-patient guard: assign a stable accent per distinct patient and
+  // flag when the grid mixes more than one. Comparing series from
+  // different patients side-by-side is almost always a mistake; the rare
+  // legitimate case (e.g. teaching) is still allowed, just loudly marked.
+  const patientColor = new Map<string, string>();
+  for (const p of panes) {
+    const pid = p.patient?.id;
+    if (pid && !patientColor.has(pid)) {
+      patientColor.set(pid, PATIENT_ACCENTS[patientColor.size % PATIENT_ACCENTS.length]);
+    }
+  }
+  const mixedPatients = patientColor.size > 1;
+
   return (
     <div
       style={{
@@ -174,15 +222,49 @@ function MultiViewerInner() {
         padding: 0,
         height: "calc(100vh - 56px)",
         background: "#000",
-        display: "grid",
-        gridTemplateColumns: `repeat(${cols}, 1fr)`,
-        gridTemplateRows: `repeat(${rows}, 1fr)`,
-        gap: 4,
+        display: "flex",
+        flexDirection: "column",
       }}
     >
-      {panes.map((pane) => (
-        <Pane key={pane.seriesId} pane={pane} onRemove={() => removePane(pane.seriesId)} />
-      ))}
+      {mixedPatients && (
+        <div
+          role="alert"
+          style={{
+            flex: "0 0 auto",
+            background: "#7f1d1d",
+            color: "#fee2e2",
+            fontFamily: "ui-monospace, monospace",
+            fontSize: "0.8rem",
+            fontWeight: 700,
+            letterSpacing: "0.04em",
+            padding: "5px 12px",
+            borderBottom: "2px solid #ef4444",
+            textShadow: "0 1px 2px rgba(0,0,0,0.6)",
+          }}
+        >
+          ⚠ DIFFERENT PATIENTS — this layout shows {patientColor.size} different patients
+          side-by-side. Verify every measurement and finding against the correct study.
+        </div>
+      )}
+      <div
+        style={{
+          flex: "1 1 auto",
+          minHeight: 0,
+          display: "grid",
+          gridTemplateColumns: `repeat(${cols}, 1fr)`,
+          gridTemplateRows: `repeat(${rows}, 1fr)`,
+          gap: 4,
+        }}
+      >
+        {panes.map((pane) => (
+          <Pane
+            key={pane.seriesId}
+            pane={pane}
+            accentColor={pane.patient?.id ? patientColor.get(pane.patient.id) : undefined}
+            onRemove={() => removePane(pane.seriesId)}
+          />
+        ))}
+      </div>
     </div>
   );
 }
@@ -197,7 +279,15 @@ type PaneTool =
   | "measure-probe"
   | "measure-area";
 
-function Pane({ pane, onRemove }: { pane: PaneState; onRemove: () => void }) {
+function Pane({
+  pane,
+  onRemove,
+  accentColor,
+}: {
+  pane: PaneState;
+  onRemove: () => void;
+  accentColor?: string;
+}) {
   const mprRef = useRef<MPRLayoutHandle | null>(null);
   const [tool, setTool] = useState<PaneTool>("wl");
   const presets = pane.series
@@ -210,11 +300,21 @@ function Pane({ pane, onRemove }: { pane: PaneState; onRemove: () => void }) {
         position: "relative",
         background: "#000",
         overflow: "hidden",
-        border: "1px solid #1a1f2b",
+        // Accent the border with the per-patient colour so SAME vs
+        // DIFFERENT patient is obvious across panes (correct-patient guard).
+        border: accentColor ? `2px solid ${accentColor}` : "1px solid #1a1f2b",
         display: "grid",
-        gridTemplateRows: "auto 1fr",
+        gridTemplateRows: "auto auto 1fr",
       }}
     >
+      {(pane.patient || pane.study) && (
+        <ViewerIdentityBanner
+          patient={pane.patient}
+          study={pane.study}
+          accentColor={accentColor}
+          compact
+        />
+      )}
       {/* Compact per-pane toolbar — gives the multi-series viewer
           the controls a single-pane viewer has, without dragging in
           the full sidebar (which would crowd a 2- or 4-pane grid).

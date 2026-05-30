@@ -21,8 +21,8 @@ import { useCallback, useEffect, useRef, useState } from "react";
 
 import { API_BASE_URL, ApiError, fetchVolume, getStoredToken } from "@/lib/api";
 import { ensureCornerstoneInit } from "@/lib/cornerstoneSetup";
+import { buildLocalVolume } from "@/lib/cornerstoneVolume";
 import { useIsMobile } from "@/lib/useIsMobile";
-import type { VolumeData } from "./VolumeViewer";
 
 interface Props {
   /** Primary anatomic series id (typically CT). The grayscale base. */
@@ -47,46 +47,9 @@ const VIEWPORT_AXIAL = "bvp-mpr-axial";
 const VIEWPORT_SAG = "bvp-mpr-sagittal";
 const VIEWPORT_COR = "bvp-mpr-coronal";
 
-/** Build a Cornerstone ``LocalVolume`` from the float32 volume the
- *  backend serves at ``/api/series/{id}/volume.raw`` (32-byte header
- *  + Float32 scalars). Wraps ``createLocalVolume`` so the volume id
- *  is stable across re-mounts and the cache reuses the same buffer
- *  on the second visit to the same study. */
-function makeVolumeFromVolumeData(volumeId: string, data: VolumeData): cs.Types.IImageVolume {
-  // Identity orientation. Our ``volume.raw`` is sampled along the
-  // canonical i/j/k axes; co-registration with the fusion volume
-  // assumes both come from the same frame of reference (same scanner
-  // bed, same coordinate system) — which is true for PET/CT combo
-  // scanners. For unrelated series the user should not enable fusion.
-  const direction: cs.Types.Mat3 = [1, 0, 0, 0, 1, 0, 0, 0, 1];
-  const origin: cs.Types.Point3 = [0, 0, 0];
-  const dimensions: cs.Types.Point3 = [data.dimensions[0], data.dimensions[1], data.dimensions[2]];
-  const spacing: cs.Types.Point3 = [data.spacing[0], data.spacing[1], data.spacing[2]];
-  return cs.volumeLoader.createLocalVolume(volumeId, {
-    metadata: {
-      BitsAllocated: 32,
-      BitsStored: 32,
-      SamplesPerPixel: 1,
-      HighBit: 31,
-      PhotometricInterpretation: "MONOCHROME2",
-      PixelRepresentation: 0,
-      Modality: "OT",
-      ImagePositionPatient: origin,
-      ImageOrientationPatient: [1, 0, 0, 0, 1, 0],
-      PixelSpacing: [data.spacing[0], data.spacing[1]],
-      Columns: data.dimensions[0],
-      Rows: data.dimensions[1],
-      FrameOfReferenceUID: volumeId,
-      voiLut: [{ windowCenter: 0, windowWidth: 1 }],
-      VOILUTFunction: "LINEAR",
-    } as unknown as cs.Types.Metadata,
-    dimensions,
-    spacing,
-    origin,
-    direction,
-    scalarData: data.scalars,
-  });
-}
+// Volume building is centralised in ``@/lib/cornerstoneVolume`` so this
+// route and the main MPR layout produce identical volumes (geometry from
+// the X-Volume-* headers, identity-frame fallback for legacy packs).
 
 export default function CornerstoneMPRPanel({ primarySeriesId, fusionSeriesId, className }: Props) {
   const axialRef = useRef<HTMLDivElement | null>(null);
@@ -118,19 +81,25 @@ export default function CornerstoneMPRPanel({ primarySeriesId, fusionSeriesId, c
     //    by volumeId; calling it twice for the same id reuses the
     //    cached entry, so HMR re-mounts don't re-allocate.
     if (!cs.cache.getVolume(primaryVolumeId)) {
-      makeVolumeFromVolumeData(primaryVolumeId, {
+      buildLocalVolume(primaryVolumeId, {
         dimensions: [primary.header.nx, primary.header.ny, primary.header.nz],
         spacing: primary.header.spacing,
         scalars: primary.scalars,
         range: primary.header.valueRange,
+        origin: primary.header.origin,
+        direction: primary.header.direction,
+        frameOfReferenceUid: primary.header.frameOfReferenceUid,
       });
     }
     if (fusion && fusionVolumeId && !cs.cache.getVolume(fusionVolumeId)) {
-      makeVolumeFromVolumeData(fusionVolumeId, {
+      buildLocalVolume(fusionVolumeId, {
         dimensions: [fusion.header.nx, fusion.header.ny, fusion.header.nz],
         spacing: fusion.header.spacing,
         scalars: fusion.scalars,
         range: fusion.header.valueRange,
+        origin: fusion.header.origin,
+        direction: fusion.header.direction,
+        frameOfReferenceUid: fusion.header.frameOfReferenceUid,
       });
     }
 
