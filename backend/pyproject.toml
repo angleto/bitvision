@@ -202,6 +202,13 @@ quote-style = "double"
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
+# The async engine in db/session.py is module-level, so its connection
+# pool binds to one event loop. Run all async fixtures + tests on a
+# single session-scoped loop so a later test never finds the engine
+# "attached to a different loop" (the long-standing integration-test
+# flakiness that kept these suites opt-in).
+asyncio_default_fixture_loop_scope = "session"
+asyncio_default_test_loop_scope = "session"
 testpaths = ["tests"]
 
 [tool.mypy]
