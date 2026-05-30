@@ -76,6 +76,50 @@ jobs:
           uv run alembic upgrade head
           uv run pytest tests/eval tests/test_search.py -q
 
+  search-eval-ai:
+    name: Search relevance gate (ai / semantic)
+    runs-on: ubuntu-latest
+    # Tag-only + heavy: installs the ``ai`` extra (torch + sentence-
+    # transformers, ~600 MB) and downloads the multilingual MiniLM + the
+    # cross-encoder to validate the DENSE retrieval path end-to-end with
+    # the real model. Deliberately NOT a ``needs`` of docker-images — a
+    # HuggingFace download hiccup must never block a release; the fast,
+    # model-free ``search-eval`` gate is the blocking one.
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    services:
+      postgres:
+        image: pgvector/pgvector:pg16
+        env:
+          POSTGRES_USER: bvphoenix
+          POSTGRES_PASSWORD: bvphoenix
+          POSTGRES_DB: bvphoenix
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U bvphoenix"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+    env:
+      BVP_DATABASE_URL: postgresql+asyncpg://bvphoenix:bvphoenix@localhost:5432/bvphoenix
+      BVP_DATABASE_URL_SYNC: postgresql+psycopg://bvphoenix:bvphoenix@localhost:5432/bvphoenix
+      BVP_RUN_SEARCH_INTEGRATION: "1"
+      HF_HOME: /home/runner/.cache/huggingface
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+      - name: Cache HuggingFace models
+        uses: actions/cache@v4
+        with:
+          path: /home/runner/.cache/huggingface
+          key: hf-${{ runner.os }}-search-eval-ai-v1
+      - name: Migrate + run semantic relevance eval
+        working-directory: backend
+        run: |
+          uv sync --extra dev --extra ai
+          uv run alembic upgrade head
+          uv run pytest tests/eval/test_semantic_relevance.py -q
+
   frontend-build:
     name: Frontend build
     runs-on: ubuntu-latest
