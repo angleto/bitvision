@@ -451,7 +451,15 @@ def main(
 
 
 def _enqueue_pack_jobs(redis_url: str, series_ids: list[str]) -> None:
-    """Enqueue volume pre-packing jobs for each imported series."""
+    """Enqueue volume pre-packing AND image-embedding jobs per series.
+
+    ``pack_volume`` builds the cached volume; ``embed_series`` builds the
+    BiomedCLIP image vector so the study is reachable by similarity
+    search (``/api/similar-to``) right after import. Without the embed
+    enqueue, imported studies have no image vectors and similarity
+    search returns nothing. ``embed_series`` is idempotent (skips when
+    the vector already exists), so re-imports stay cheap.
+    """
     try:
         import asyncio
 
@@ -463,12 +471,13 @@ def _enqueue_pack_jobs(redis_url: str, series_ids: list[str]) -> None:
             redis = await create_pool(redis_settings(redis_url))
             for sid in series_ids:
                 await redis.enqueue_job("pack_volume", sid)
+                await redis.enqueue_job("embed_series", sid)
             await redis.close()
 
         asyncio.run(_enqueue())
-        click.echo(f"enqueued {len(series_ids)} volume pack job(s)")
+        click.echo(f"enqueued {len(series_ids)} volume pack + {len(series_ids)} embedding job(s)")
     except Exception as exc:
-        click.echo(f"warning: could not enqueue pack jobs: {exc}", err=True)
+        click.echo(f"warning: could not enqueue pack/embed jobs: {exc}", err=True)
 
 
 if __name__ == "__main__":

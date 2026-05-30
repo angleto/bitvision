@@ -21,6 +21,7 @@ from sqlalchemy import func, literal, or_, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from bvphoenix.api._schemas import PaginatedStudies, StudyOut
+from bvphoenix.api.search_hybrid import SERIES_EMBED_MODEL_ID
 from bvphoenix.auth import optional_user
 from bvphoenix.db.models import Embedding, ImagingStudy, Series, Tag, User
 from bvphoenix.db.session import get_db
@@ -333,6 +334,7 @@ async def find_similar_studies(
             select(Embedding).where(
                 Embedding.target_kind == "series",
                 Embedding.target_id == target_id,
+                Embedding.model_id == SERIES_EMBED_MODEL_ID,
             )
         )
     ).scalar_one_or_none()
@@ -346,6 +348,7 @@ async def find_similar_studies(
                 .where(
                     Embedding.target_kind == "series",
                     Series.study_id == target_id,
+                    Embedding.model_id == SERIES_EMBED_MODEL_ID,
                 )
                 .limit(1)
             )
@@ -413,6 +416,7 @@ async def find_similar_studies(
             .where(
                 Embedding.target_kind == "series",
                 Embedding.target_id != source_emb.target_id,
+                Embedding.model_id == SERIES_EMBED_MODEL_ID,
                 Series.study_id.in_(select(visible_study_ids.c.id)),
             )
             .order_by("distance")
