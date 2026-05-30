@@ -352,15 +352,26 @@ async def find_similar_studies(
         ).scalar_one_or_none()
 
     if source_emb is None:
-        # Indexing happens asynchronously by the embedding worker after
-        # ingestion. Fresh uploads, or studies whose pixel data never
-        # materialised (e.g. SR-only series), won't have a vector.
-        # Treat this as "no similar cases yet" rather than a hard 404:
-        # the resource (the study) DOES exist, the FE always rendered
-        # ``[]`` and ``404`` identically as "No similar cases found"
-        # anyway, and the 404 was generating spurious red entries in
-        # every viewer's DevTools console (one per page load). The
-        # ``not_indexed`` distinction was never surfaced anywhere.
+        # Distinguish two cases that both leave ``source_emb`` empty:
+        #
+        # * The target series/study EXISTS but has no vector yet (indexing
+        #   is async; SR-only series never get pixels). Return ``[]`` —
+        #   "no similar cases yet" — because the FE renders ``[]`` and a
+        #   404 identically and the 404 spammed the viewer console.
+        # * The target id does not resolve to any series or study at all.
+        #   That is a genuine 404 (a typo'd / deleted id), not "no
+        #   results", and callers — agents especially — need the
+        #   distinction.
+        target_exists = (
+            await db.execute(
+                select(
+                    select(Series.id).where(Series.id == target_id).exists()
+                    | select(ImagingStudy.id).where(ImagingStudy.id == target_id).exists()
+                )
+            )
+        ).scalar()
+        if not target_exists:
+            raise HTTPException(status_code=404, detail="not found")
         return []
 
     # Check the user can see the source study
