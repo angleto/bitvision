@@ -19,6 +19,11 @@ interface Props {
   onFusionChange: (fusion: FusionVolume | null) => void;
   onOpacityChange: (opacity: number) => void;
   onColormapChange: (colormap: FusionColormap) => void;
+  /** Uptake-isolation threshold for the PET (or other) overlay, in
+   *  [0, 0.95]: voxels below this fraction of the displayed range are
+   *  transparent. Higher = only the hottest focal lesions; lower =
+   *  more diffuse / background uptake. */
+  onThresholdChange: (threshold: number) => void;
   /** Optional callback for the parent to track which sibling series
    *  is currently fused. Useful when a separate consumer (e.g. the
    *  Cornerstone MPR layout) wants to load the same volume by id
@@ -49,6 +54,7 @@ export default function FusionControls({
   onFusionChange,
   onOpacityChange,
   onColormapChange,
+  onThresholdChange,
   onActiveSeriesIdChange,
   onLoadingChange,
 }: Props) {
@@ -73,6 +79,11 @@ export default function FusionControls({
   // 0.1 saturate quickly into the silhouette-cylinder territory.
   const [opacity, setOpacity] = useState(0.05);
   const [colormap, setColormap] = useState<FusionColormap>("hot");
+  // Uptake-isolation threshold (fraction of the overlay's displayed
+  // range below which it is transparent). 0.65 = the engine's previous
+  // fixed cutoff; raise toward 0.95 to keep only the hottest focal
+  // lesions, lower toward 0.3 to reveal diffuse/background uptake.
+  const [threshold, setThreshold] = useState(0.65);
 
   useEffect(() => {
     let cancelled = false;
@@ -306,6 +317,34 @@ export default function FusionControls({
                       const v = Number(e.target.value);
                       setOpacity(v);
                       onOpacityChange(v);
+                    }}
+                  />
+                </label>
+                <label
+                  className="meta"
+                  style={{ display: "block", fontSize: "0.7rem", marginTop: "0.5rem" }}
+                  title="Suppress background uptake. Higher = only the hottest focal lesions; lower = more diffuse uptake."
+                >
+                  Uptake threshold: {Math.round(threshold * 100)}%{" "}
+                  <span style={{ opacity: 0.6 }}>
+                    (
+                    {threshold >= 0.8
+                      ? "lesions only"
+                      : threshold <= 0.45
+                        ? "all uptake"
+                        : "balanced"}
+                    )
+                  </span>
+                  <input
+                    type="range"
+                    min={0.3}
+                    max={0.95}
+                    step={0.01}
+                    value={threshold}
+                    onChange={(e) => {
+                      const v = Number(e.target.value);
+                      setThreshold(v);
+                      onThresholdChange(v);
                     }}
                   />
                 </label>

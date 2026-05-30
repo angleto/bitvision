@@ -1806,6 +1806,7 @@ export default function SeriesViewerPage() {
           }}
           onOpacityChange={(v) => volumeViewerRef.current?.setFusionOpacity(v)}
           onColormapChange={(c) => volumeViewerRef.current?.setFusionColormap(c)}
+          onThresholdChange={(v) => volumeViewerRef.current?.setFusionThreshold(v)}
           onActiveSeriesIdChange={(id) => setCsFusionSeriesId(id)}
           onLoadingChange={(info) => {
             setFusionLoading(info.state === "idle" ? null : info);
