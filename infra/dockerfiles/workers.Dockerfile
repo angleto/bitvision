@@ -44,6 +44,12 @@ RUN --mount=type=cache,target=/root/.cache/uv uv sync --extra ai --extra seg --n
 ENV HF_HOME=/app/.cache/huggingface
 RUN --mount=type=cache,target=/root/.cache/uv \
     /app/.venv/bin/python -c "from sentence_transformers import SentenceTransformer; SentenceTransformer('paraphrase-multilingual-MiniLM-L12-v2')"
+# Pre-bake BGE-M3 (BAAI/bge-m3, ~1-2 GB) so workers never download it at
+# runtime — runtime HF fetch is slow/rate-limited and times out on CPU
+# ARM (proven with BiomedCLIP). Cached in HF_HOME, copied into the
+# runtime image below.
+RUN --mount=type=cache,target=/root/.cache/uv \
+    /app/.venv/bin/python -c "from FlagEmbedding import BGEM3FlagModel; BGEM3FlagModel('BAAI/bge-m3', use_fp16=False)"
 
 # ---
 

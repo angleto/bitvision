@@ -471,10 +471,14 @@ async def _persist_chunks_and_embed(
     if redis is not None:
         for cid, ch in zip(chunk_ids, chunks, strict=True):
             try:
+                # MiniLM (current default) + BGE-M3 dense (the upgrade):
+                # populate both stores during the transition so flipping
+                # the registry default to bge-m3-v1 has data to read.
                 await redis.enqueue_job("embed_text_ml", "document_chunk", str(cid), ch.text)
+                await redis.enqueue_job("embed_bge_m3_dense", "document_chunk", str(cid), ch.text)
                 enqueued += 1
             except Exception:
-                logger.exception("failed to enqueue embed_text_ml for chunk %s", cid)
+                logger.exception("failed to enqueue embed jobs for chunk %s", cid)
 
     return {
         "status": "chunked",

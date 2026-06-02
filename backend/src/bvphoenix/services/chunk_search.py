@@ -44,6 +44,9 @@ from bvphoenix.db.models.text_chunks import (
     CHUNK_SOURCE_KINDS,
     DEFAULT_CHUNKER_VERSION,
 )
+from bvphoenix.services.bge_m3 import BGE_M3_MODEL_ID
+from bvphoenix.services.bge_m3 import embed_query_dense as _embed_query_bge_m3
+from bvphoenix.services.embedding_models import get_default_model
 from bvphoenix.services.reranker import rerank_order
 from bvphoenix.services.vector_search import tune_vector_query
 
@@ -249,21 +252,40 @@ async def search_chunks(
 
     where_sql = " AND ".join(where_clauses)
 
-    # ---- vector top-k ----
-    # Local MiniLM lives in the optional ``ai`` extra. When it is not
-    # installed (CI without ``uv sync --extra ai``, lightweight test
-    # envs) we degrade to FTS-only retrieval rather than 500-ing.
+    # ---- resolve the active text model (registry default) ----
+    # Both stores are populated during the MiniLM -> BGE-M3 transition;
+    # the registry's default-for-kind decides which one search reads, so
+    # flipping the default (post-backfill) switches retrieval with no code
+    # change. Falls back to MiniLM if the registry can't be resolved.
+    active_model_id = MULTILINGUAL_MODEL_ID
     try:
-        vec = await _embed_query(query)
+        active_model_id = (await get_default_model("text", db)).name
+    except Exception:
+        active_model_id = MULTILINGUAL_MODEL_ID
+    if active_model_id == BGE_M3_MODEL_ID:
+        vec_table = "text_embeddings_bge_m3"
+        _embed = _embed_query_bge_m3
+    else:
+        active_model_id = MULTILINGUAL_MODEL_ID
+        vec_table = "text_embeddings"
+        _embed = _embed_query
+
+    # ---- vector top-k ----
+    # The active text encoder lives in the optional ``ai`` extra. When it
+    # is not installed (CI without ``uv sync --extra ai``, lightweight
+    # test envs) we degrade to FTS-only retrieval rather than 500-ing.
+    try:
+        vec = await _embed(query)
     except (ImportError, ModuleNotFoundError):
         vec = None
     vec_rows: list = []
     if vec is not None:
+        # ``vec_table`` is one of two fixed literals (never user input).
         vec_sql = text(
             f"""
             SELECT ch.id AS chunk_id, te.vector <=> (:vec)::vector AS distance
             FROM text_chunks ch
-            JOIN text_embeddings te
+            JOIN {vec_table} te
               ON te.target_id = ch.id
              AND te.target_kind = 'document_chunk'
              AND te.model_id = :model_id
@@ -284,7 +306,7 @@ async def search_chunks(
                     {
                         **params,
                         "vec": _vec_literal(vec),
-                        "model_id": MULTILINGUAL_MODEL_ID,
+                        "model_id": active_model_id,
                         "limit": over,
                     },
                 )
