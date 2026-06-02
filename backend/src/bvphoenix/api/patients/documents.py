@@ -125,6 +125,67 @@ async def get_document(
     )
 
 
+_OCR_INGEST_MIMES = ("application/pdf",)
+
+
+async def _auto_enqueue_ocr_on_ingest(
+    db: AsyncSession,
+    *,
+    user: User,
+    doc: Document,
+    files: list[DocumentFile],
+    settings: object,
+) -> None:
+    """Best-effort: auto-OCR an ingested document so its text becomes
+    searchable (OCR -> chunk -> MiniLM + BGE-M3).
+
+    Only OCR-able files (PDF / image); the ``run_document_ocr`` worker
+    chains ``chunk_and_embed_document`` on success. A failed enqueue must
+    NEVER fail the upload, so everything is wrapped and swallowed.
+    """
+    target = next(
+        (
+            f
+            for f in files
+            if (f.file_content_type or "").startswith("image/")
+            or (f.file_content_type or "") in _OCR_INGEST_MIMES
+        ),
+        None,
+    )
+    if target is None:
+        return
+    try:
+        from arq import create_pool
+
+        from bvphoenix.services.arq_redis import redis_settings
+        from bvphoenix.services.jobs import enqueue_or_get, set_arq_job_id
+
+        result = await enqueue_or_get(
+            db,
+            kind="run_document_ocr",
+            owner_subject_id=user.subject_id,
+            scope_ids=[str(doc.id)],
+            canonical_input={
+                "document_id": str(doc.id),
+                "file_id": str(target.id),
+                "force": False,
+                "language": None,
+            },
+        )
+        await db.commit()
+        if not result.deduped:
+            redis = await create_pool(redis_settings(settings.redis_url))  # type: ignore[attr-defined]
+            arq_handle = await redis.enqueue_job("run_document_ocr", str(result.job.id))
+            await redis.close()
+            if arq_handle is not None:
+                await set_arq_job_id(db, result.job.id, arq_handle.job_id)
+                await db.commit()
+    except Exception:
+        import logging
+
+        logging.getLogger(__name__).exception("auto-OCR enqueue failed for document %s", doc.id)
+
+
 @router.post(
     "/patients/{patient_id}/documents",
     response_model=PatientDocumentOut,
@@ -284,6 +345,9 @@ async def create_document(
             "n_files": len(incoming_files),
         },
     )
+    # Index the document for search: OCR -> chunk -> embed (MiniLM +
+    # BGE-M3). Best-effort, never fails the upload.
+    await _auto_enqueue_ocr_on_ingest(db, user=user, doc=doc, files=file_records, settings=settings)
     return _doc_out(doc, files=file_records)
 
 

@@ -19,6 +19,7 @@ from bvworkers.tasks.dispatch_notification import (
     dispatch_notification,
     notification_safety_net,
 )
+from bvworkers.tasks.embed_bge_m3 import embed_bge_m3_dense
 from bvworkers.tasks.embed_series import embed_series
 from bvworkers.tasks.embed_text import embed_text_target
 from bvworkers.tasks.embed_text_multilingual import embed_text_ml
@@ -51,6 +52,7 @@ FUNCTIONS = [
     embed_series,
     embed_text_target,
     embed_text_ml,
+    embed_bge_m3_dense,
     chunk_and_embed_document,
     chunk_and_embed_clinical_note,
     chunk_and_embed_summary,

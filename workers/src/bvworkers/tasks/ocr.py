@@ -29,6 +29,24 @@ from bvworkers.job_safety import mark_job_failed_raw, with_safety_net
 log = logging.getLogger(__name__)
 
 
+async def _enqueue_chunk_embed(ctx: dict, doc_id: uuid.UUID) -> None:  # type: ignore[type-arg]
+    """After OCR succeeds, chain document chunking + embedding so the new
+    text becomes searchable (MiniLM + BGE-M3). Best-effort: a failed
+    enqueue must not fail the OCR job, and ``chunk_and_embed_document`` is
+    idempotent on the content hash so a re-OCR is cheap.
+    """
+    try:
+        from bvphoenix.db.models.text_chunks import DEFAULT_CHUNKER_VERSION
+
+        redis = ctx.get("redis") if isinstance(ctx, dict) else None
+        if redis is not None:
+            await redis.enqueue_job(
+                "chunk_and_embed_document", str(doc_id), DEFAULT_CHUNKER_VERSION
+            )
+    except Exception:
+        log.exception("failed to enqueue chunk_and_embed_document for %s", doc_id)
+
+
 @with_safety_net("run_document_ocr")
 async def run_document_ocr(
     ctx: dict,  # type: ignore[type-arg]
@@ -42,9 +60,9 @@ async def run_document_ocr(
 
     try:
         from bvphoenix.db.models import (
-            DocumentOCR,
             Document,
             DocumentFile,
+            DocumentOCR,
         )
         from bvphoenix.db.session import SERVICE_SUBJECT, set_current_subject
         from bvphoenix.services import jobs as jobs_service
@@ -147,6 +165,7 @@ async def run_document_ocr(
                 if cached is not None:
                     await jobs_service.mark_succeeded(db, jid, result_uri=None)
                     await db.commit()
+                    await _enqueue_chunk_embed(ctx, doc.id)
                     return {
                         "status": "succeeded",
                         "cached": True,
@@ -167,6 +186,7 @@ async def run_document_ocr(
             await db.flush()
             await jobs_service.mark_succeeded(db, jid, result_uri=None)
             await db.commit()
+            await _enqueue_chunk_embed(ctx, doc.id)
             return {
                 "status": "succeeded",
                 "cached": False,
