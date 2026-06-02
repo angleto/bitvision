@@ -33,11 +33,11 @@ RUN --mount=type=cache,target=/root/.cache/uv uv sync --extra ai --no-dev
 ENV HF_HOME=/app/.cache/huggingface
 RUN --mount=type=cache,target=/root/.cache/uv \
     /app/.venv/bin/python -c "from sentence_transformers import SentenceTransformer; SentenceTransformer('paraphrase-multilingual-MiniLM-L12-v2')"
-# Pre-bake BGE-M3 so the query encoder loads from local cache, never from
-# the network at runtime (same reason as MiniLM above; runtime HF fetch
-# is slow/rate-limited and times out on CPU ARM).
+# Pre-bake BGE-M3 (1024-d dense, via sentence-transformers) so the query
+# encoder loads from local cache, never from the network at runtime (same
+# reason as MiniLM above; runtime HF fetch is slow and times out on CPU ARM).
 RUN --mount=type=cache,target=/root/.cache/uv \
-    /app/.venv/bin/python -c "from FlagEmbedding import BGEM3FlagModel; BGEM3FlagModel('BAAI/bge-m3', use_fp16=False)"
+    /app/.venv/bin/python -c "from sentence_transformers import SentenceTransformer; SentenceTransformer('BAAI/bge-m3')"
 
 # ---
 

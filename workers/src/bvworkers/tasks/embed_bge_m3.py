@@ -1,25 +1,29 @@
-"""BGE-M3 (BAAI/bge-m3, FlagEmbedding) text embeddings.
+"""BGE-M3 (BAAI/bge-m3) DENSE text embeddings.
 
-BGE-M3 exposes three retrieval signals from a single forward pass:
-1024-d **dense**, lexical **sparse** (token-id -> weight), and **ColBERT**
-multi-vector (per-token). Phase 1 persists only the dense vector (into
-``text_embeddings_bge_m3``, ``model_id='bge-m3-v1'``); the sparse +
-ColBERT outputs are wired in Phase 2/3 — which is why the loader can
-already return all three on request.
+Phase 1 uses BGE-M3's 1024-d **dense** vector via ``sentence-transformers``
+(already a worker dependency, battle-tested on ARM). This deliberately
+avoids the ``FlagEmbedding`` package for now: FlagEmbedding pulls
+``ir-datasets`` (+ a ``zlib-state`` C extension that needs a compiler),
+heavy IR-benchmark tooling that has no place in a medical image. The
+dense vector from sentence-transformers matches FlagEmbedding's dense
+output (same weights, CLS pooling, L2-normalized), and the query encoder
+on the backend uses the same path so the spaces line up.
 
-The model is lazy-loaded as a module-global singleton so jobs on the same
-worker reuse it. It is PRE-BAKED into the worker image at build time:
-downloading from the HF Hub at runtime is slow/rate-limited and times out
-on CPU ARM (proven painful with BiomedCLIP), so the constructor must load
-from the local HF cache.
+BGE-M3's **sparse** + **ColBERT** signals (Phase 2/3) DO require
+FlagEmbedding; that dependency (and its build deps) will be introduced
+then, when those signals are actually produced.
 
-Requires the ``ai`` extra: ``uv sync --extra ai`` (adds FlagEmbedding).
+The model is pre-baked into the worker image (HF_HOME): a runtime HF
+download is slow/rate-limited and times out on CPU ARM.
+
+Requires the ``ai`` extra: ``uv sync --extra ai``.
 """
 
 from __future__ import annotations
 
 import asyncio
 import uuid
+from typing import Any
 
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
@@ -42,62 +46,37 @@ ALLOWED_TARGET_KINDS: frozenset[str] = frozenset(
     }
 )
 
-_model = None  # lazy: loaded once per worker on first call
+_model: Any | None = None  # lazy: loaded once per worker on first call
 
 
-def _ensure_model():
-    """Load the BGE-M3 model on first use (module-global singleton)."""
+def _ensure_model() -> Any:
+    """Load BGE-M3 (sentence-transformers) on first use (module singleton)."""
     global _model
     if _model is not None:
         return _model
 
-    from FlagEmbedding import BGEM3FlagModel
+    from sentence_transformers import SentenceTransformer
 
-    # ``use_fp16`` only helps on CUDA; the prod workers are CPU-only (ARM),
-    # so keep fp32 for correctness. Weights are pre-baked into the image
-    # (HF_HOME) so this constructor loads from local cache, not the network.
-    _model = BGEM3FlagModel(MODEL_NAME, use_fp16=False)
+    # Weights are pre-baked into the image (HF_HOME), so this loads from
+    # local cache rather than the network.
+    _model = SentenceTransformer(MODEL_NAME)
     return _model
 
 
-def compute_bge_m3(
-    text_value: str,
-    *,
-    dense: bool = True,
-    sparse: bool = False,
-    colbert: bool = False,
-) -> dict:
-    """Encode one string with BGE-M3; return only the requested signals.
+def _compute_dense(text_value: str) -> list[float]:
+    """Run BGE-M3 on a string, return the 1024-d dense vector.
 
-    * ``dense``  -> ``result['dense']``: 1024-d list[float] (the model
-      L2-normalizes, matching the ``vector_cosine_ops`` HNSW index).
-    * ``sparse`` -> ``result['sparse']``: {token_id: weight} (Phase 2).
-    * ``colbert``-> ``result['colbert']``: list[list[float]] per-token
-      vectors (Phase 3).
-
-    Unrequested signals are not computed, to save CPU on the dense-only
-    Phase-1 path.
+    L2-normalized so dot-product equals cosine similarity and matches the
+    ``vector_cosine_ops`` HNSW index used at query time.
     """
     model = _ensure_model()
-    out = model.encode(
-        [text_value],
-        return_dense=dense,
-        return_sparse=sparse,
-        return_colbert_vecs=colbert,
+    vector = model.encode(
+        text_value,
+        normalize_embeddings=True,
+        convert_to_numpy=True,
+        show_progress_bar=False,
     )
-    result: dict = {}
-    if dense:
-        result["dense"] = out["dense_vecs"][0].tolist()
-    if sparse:
-        # lexical_weights[0]: {token_id (str) -> weight (float)}
-        result["sparse"] = {str(k): float(v) for k, v in out["lexical_weights"][0].items()}
-    if colbert:
-        result["colbert"] = [v.tolist() for v in out["colbert_vecs"][0]]
-    return result
-
-
-def _compute_dense(text_value: str) -> list[float]:
-    return compute_bge_m3(text_value, dense=True)["dense"]
+    return vector.tolist()
 
 
 async def embed_bge_m3_dense(

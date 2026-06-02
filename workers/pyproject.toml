@@ -45,10 +45,10 @@ ai = [
     "monai>=1.4.0",
     "torchio>=0.20.0",
     "open-clip-torch>=2.28.0",
+    # sentence-transformers serves MiniLM AND BGE-M3 dense (embed_bge_m3).
+    # BGE-M3 sparse + ColBERT (Phase 2/3) will add FlagEmbedding then;
+    # it is kept out for now because it drags ir-datasets + a C extension.
     "sentence-transformers>=2.7.0",
-    # BGE-M3 (BAAI/bge-m3): 1024-d dense + sparse + ColBERT multilingual
-    # retrieval from one forward pass. Used by embed_bge_m3.
-    "FlagEmbedding>=1.2.10",
 ]
 # Auto segmentation engine. ``totalsegmentator`` ships its own pinned
 # ``torch``, so we don't co-pin it with the ``ai`` extra (versions can
