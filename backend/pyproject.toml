@@ -134,16 +134,16 @@ bvphoenix-backfill = "bvphoenix.cli.backfill:main"
 
 [project.optional-dependencies]
 # Sentence embeddings for chunk_search vector retrieval. Heavy (torch CPU
-# wheel + sentence-transformers + transformers + FlagEmbedding/BGE-M3
+# wheel + sentence-transformers + transformers + the BGE-M3 weights
 # ≈ 2.5 GB on disk) so it's kept optional. Production backend image
 # enables it via ``uv sync --extra ai`` so /api/patients/{id}/search/chunks
 # returns semantic ranking (not FTS-only) and can encode the query with
-# the active text model (MiniLM today, BGE-M3 after the registry flip).
+# the active text model: MiniLM today, BGE-M3 (1024-d dense, loaded via
+# sentence-transformers) after the registry flip. BGE-M3 sparse + ColBERT
+# (Phase 2/3) will add FlagEmbedding then.
 ai = [
     "sentence-transformers>=2.7.0",
     "torch>=2.5.0",
-    # BGE-M3 query encoder (matches the workers' embed_bge_m3 store).
-    "FlagEmbedding>=1.2.10",
 ]
 dev = [
     "pytest>=8.3.0",
