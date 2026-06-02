@@ -112,7 +112,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: /home/runner/.cache/huggingface
-          key: hf-${{ runner.os }}-search-eval-ai-v1
+          key: hf-${{ runner.os }}-search-eval-ai-v2
       - name: Migrate + run semantic relevance eval
         working-directory: backend
         run: |

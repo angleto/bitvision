@@ -23,7 +23,7 @@ from __future__ import annotations
 from typing import Annotated, Literal
 
 from arq import create_pool
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -33,6 +33,8 @@ from bvphoenix.config import get_settings
 from bvphoenix.db.models import User
 from bvphoenix.db.session import get_db
 from bvphoenix.services.arq_redis import redis_settings
+from bvphoenix.services.embedding_models import get_default_model
+from bvphoenix.services.text_models import DEFAULT_TEXT_MODEL_ID, TEXT_MODELS
 
 router = APIRouter(prefix="/embeddings", tags=["embeddings-admin"])
 
@@ -316,10 +318,30 @@ async def embed_missing(
 
 
 # ---------------------------------------------------------------------------
-# Text-chunk coverage (MiniLM 384-d) — distinct from BiomedCLIP which
-# embeds DICOM series. text_chunks rows come from the chunk_and_embed_*
-# workers; their vectors live in text_embeddings target_kind='document_chunk'.
+# Text-chunk coverage — distinct from BiomedCLIP which embeds DICOM series.
+# text_chunks rows come from the chunk_and_embed_* workers; their vectors
+# live in the active text model's store (text_embeddings for MiniLM,
+# text_embeddings_bge_m3 for BGE-M3) under target_kind='document_chunk'.
+# Store + task are resolved per-model from the shared TEXT_MODELS spec, so
+# this surface tracks whatever model is active instead of hard-coding one.
 # ---------------------------------------------------------------------------
+
+
+async def _resolve_text_model(db: AsyncSession, model: str | None) -> str:
+    """Resolve + validate a text ``model_id``, defaulting to the registry's
+    active text default. 400 on an unknown model so a typo can't silently
+    target a non-existent store."""
+    if model is None:
+        try:
+            model = (await get_default_model("text", db)).name
+        except Exception:
+            model = DEFAULT_TEXT_MODEL_ID
+    if model not in TEXT_MODELS:
+        raise HTTPException(
+            status_code=400,
+            detail=f"unknown text model {model!r}; known: {sorted(TEXT_MODELS)}",
+        )
+    return model
 
 
 class TextChunkCoverageOut(BaseModel):
@@ -335,16 +357,23 @@ class TextChunkCoverageOut(BaseModel):
 async def text_chunk_coverage(
     db: Annotated[AsyncSession, Depends(get_db)],
     _admin: Annotated[User, Depends(require_admin)],
+    model: Annotated[str | None, Query(max_length=128)] = None,
 ) -> TextChunkCoverageOut:
-    """Coverage of the multilingual MiniLM 384-d sentence embeddings
-    over every ``text_chunks`` row (documents, clinical_notes,
-    summaries, report_contents). The Q&A free / standard / premium
-    paths all consume these vectors via ``services.chunk_search``."""
+    """Coverage of one text model's chunk embeddings over every
+    ``text_chunks`` row (documents, clinical_notes, summaries,
+    report_contents). ``model`` defaults to the registry's active text
+    default; pass a model_id to inspect a specific store. The Q&A free /
+    standard / premium paths consume these vectors via
+    ``services.chunk_search``."""
+    resolved = await _resolve_text_model(db, model)
+    store = TEXT_MODELS[resolved].store_table
     total = (await db.execute(text("SELECT COUNT(*) FROM text_chunks"))).scalar_one()
     embedded = (
         await db.execute(
+            # ``store`` comes only from the validated TEXT_MODELS spec, so
+            # the f-string interpolation (table names can't be bound) is safe.
             text(
-                "SELECT COUNT(*) FROM text_embeddings te "
+                f"SELECT COUNT(*) FROM {store} te "
                 "JOIN text_chunks tc ON tc.id = te.target_id "
                 "WHERE te.target_kind = 'document_chunk'"
             )
@@ -357,7 +386,7 @@ async def text_chunk_coverage(
                 "  COUNT(*) AS total, "
                 "  COUNT(te.target_id) AS embedded "
                 "FROM text_chunks tc "
-                "LEFT JOIN text_embeddings te ON te.target_id = tc.id "
+                f"LEFT JOIN {store} te ON te.target_id = tc.id "
                 "  AND te.target_kind = 'document_chunk' "
                 "GROUP BY tc.source_kind "
                 "ORDER BY tc.source_kind"
@@ -376,7 +405,7 @@ async def text_chunk_coverage(
             {"source_kind": k, "total": int(t), "embedded": int(e), "pending": int(t) - int(e)}
             for (k, t, e) in by_kind
         ],
-        model_id="paraphrase-multilingual-MiniLM-L12-v2",
+        model_id=resolved,
     )
 
 
@@ -384,17 +413,21 @@ async def text_chunk_coverage(
 async def embed_missing_text_chunks(
     db: Annotated[AsyncSession, Depends(get_db)],
     _admin: Annotated[User, Depends(require_admin)],
+    model: Annotated[str | None, Query(max_length=128)] = None,
 ) -> EnqueueResult:
-    """Enqueue ``embed_text_ml`` jobs for every text_chunks row that
-    has no matching text_embeddings row. Useful right after rolling
-    out the worker image with the ``ai`` extra (the chunks already
-    exist but their vectors do not)."""
+    """Enqueue the text model's embed task for every ``text_chunks`` row
+    with no vector in that model's store. ``model`` defaults to the
+    registry's active text default. Useful right after rolling out a new
+    text model (the chunks exist but their vectors do not)."""
+    resolved = await _resolve_text_model(db, model)
+    spec = TEXT_MODELS[resolved]
     rows = (
         await db.execute(
+            # ``spec.store_table`` is from the validated TEXT_MODELS spec.
             text(
                 "SELECT tc.id::text, tc.text FROM text_chunks tc "
                 "WHERE NOT EXISTS ("
-                "    SELECT 1 FROM text_embeddings te "
+                f"    SELECT 1 FROM {spec.store_table} te "
                 "    WHERE te.target_kind = 'document_chunk' "
                 "      AND te.target_id = tc.id"
                 ")"
@@ -404,25 +437,22 @@ async def embed_missing_text_chunks(
     if not rows:
         return EnqueueResult(
             status="enqueued",
-            model_id="paraphrase-multilingual-MiniLM-L12-v2",
+            model_id=resolved,
             target_kind="document_chunk",
             enqueued=0,
         )
-
-    from bvphoenix.config import get_settings
-    from bvphoenix.services.arq_redis import redis_settings
 
     pool = await create_pool(redis_settings(get_settings().redis_url))
     enq = 0
     for cid, body in rows:
         try:
-            await pool.enqueue_job("embed_text_ml", "document_chunk", cid, body)
+            await pool.enqueue_job(spec.arq_task, "document_chunk", cid, body)
             enq += 1
         except Exception:
             pass
     return EnqueueResult(
         status="enqueued",
-        model_id="paraphrase-multilingual-MiniLM-L12-v2",
+        model_id=resolved,
         target_kind="document_chunk",
         enqueued=enq,
     )
