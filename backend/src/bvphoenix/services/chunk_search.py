@@ -44,10 +44,14 @@ from bvphoenix.db.models.text_chunks import (
     CHUNK_SOURCE_KINDS,
     DEFAULT_CHUNKER_VERSION,
 )
-from bvphoenix.services.bge_m3 import BGE_M3_MODEL_ID
 from bvphoenix.services.bge_m3 import embed_query_dense as _embed_query_bge_m3
 from bvphoenix.services.embedding_models import get_default_model
 from bvphoenix.services.reranker import rerank_order
+from bvphoenix.services.text_models import (
+    BGE_M3_MODEL_ID,
+    MULTILINGUAL_MODEL_ID,
+    TEXT_MODELS,
+)
 from bvphoenix.services.vector_search import tune_vector_query
 
 __all__ = [
@@ -60,7 +64,6 @@ __all__ = [
 ]
 
 
-MULTILINGUAL_MODEL_ID = "minilm-multi-v1"
 MULTILINGUAL_MODEL_NAME = "paraphrase-multilingual-MiniLM-L12-v2"
 EMBEDDING_DIM = 384
 
@@ -263,12 +266,14 @@ async def search_chunks(
     except Exception:
         active_model_id = MULTILINGUAL_MODEL_ID
     if active_model_id == BGE_M3_MODEL_ID:
-        vec_table = "text_embeddings_bge_m3"
         _embed = _embed_query_bge_m3
     else:
         active_model_id = MULTILINGUAL_MODEL_ID
-        vec_table = "text_embeddings"
         _embed = _embed_query
+    # Store table is the single routing fact, shared with the backfill CLI
+    # and the write path via TEXT_MODELS, so a model/table change touches
+    # one place. active_model_id is guaranteed to be a TEXT_MODELS key here.
+    vec_table = TEXT_MODELS[active_model_id].store_table
 
     # ---- vector top-k ----
     # The active text encoder lives in the optional ``ai`` extra. When it

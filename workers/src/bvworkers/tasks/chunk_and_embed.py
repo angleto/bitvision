@@ -46,6 +46,7 @@ from bvphoenix.services.chunking import (
     DEFAULT_CHUNKER_VERSION,
     chunk_document_text,
 )
+from bvphoenix.services.text_models import TEXT_MODELS
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, create_async_engine
 
@@ -471,11 +472,13 @@ async def _persist_chunks_and_embed(
     if redis is not None:
         for cid, ch in zip(chunk_ids, chunks, strict=True):
             try:
-                # MiniLM (current default) + BGE-M3 dense (the upgrade):
-                # populate both stores during the transition so flipping
-                # the registry default to bge-m3-v1 has data to read.
-                await redis.enqueue_job("embed_text_ml", "document_chunk", str(cid), ch.text)
-                await redis.enqueue_job("embed_bge_m3_dense", "document_chunk", str(cid), ch.text)
+                # Dual-write every text model's store during the transition
+                # so flipping the registry default has data to read. The set
+                # of (arq_task, store_table) is the shared TEXT_MODELS spec
+                # (also read by the query path + the backfill CLI); adding a
+                # model there future-proofs this loop with no edit here.
+                for spec in TEXT_MODELS.values():
+                    await redis.enqueue_job(spec.arq_task, "document_chunk", str(cid), ch.text)
                 enqueued += 1
             except Exception:
                 logger.exception("failed to enqueue embed jobs for chunk %s", cid)

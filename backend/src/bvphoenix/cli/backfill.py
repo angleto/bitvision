@@ -40,6 +40,7 @@ from bvphoenix.db.models.text_chunks import (
     DEFAULT_CHUNKER_VERSION,
 )
 from bvphoenix.services.arq_redis import redis_settings
+from bvphoenix.services.text_models import TEXT_MODELS
 
 
 @click.group()
@@ -354,6 +355,153 @@ def embed(
 
     n = asyncio.run(_enqueue_embed(ids))
     click.echo(f"enqueued embed_series: {n} jobs")
+    click.echo("Run an Arq worker with the `ai` extra to process the queue.")
+
+
+# Text-chunk embedding backfill -----------------------------------------
+# Replaces the ad-hoc one-off snippet used to backfill the 122 document
+# chunks. The model -> {arq_task, store_table} routing lives in the shared
+# bvphoenix.services.text_models.TEXT_MODELS spec (the same one the query
+# path in chunk_search and the write path in chunk_and_embed read), so a
+# model/table change touches one place. The --model value is the registry
+# name, which by design equals the worker MODEL_ID and the value written
+# into the store's ``model_id`` column.
+
+
+def _chunk_candidates(
+    session: Session,
+    *,
+    patient_id: uuid.UUID | None,
+    only_missing: bool,
+    store_table: str,
+    model_id: str,
+) -> list[tuple[uuid.UUID, str]]:
+    where: list[str] = []
+    params: dict[str, object] = {}
+    if patient_id is not None:
+        where.append("tc.patient_id = :pid")
+        params["pid"] = patient_id
+    if only_missing:
+        # ``store_table`` is f-string-interpolated because table names cannot
+        # be bind parameters. It is injection-safe: the value comes only from
+        # the validated TEXT_MODELS spec, never from raw user input.
+        where.append(
+            f"NOT EXISTS (SELECT 1 FROM {store_table} te "
+            "WHERE te.target_kind = 'document_chunk' AND te.target_id = tc.id "
+            "AND te.model_id = :model)"
+        )
+        params["model"] = model_id
+    clause = (" WHERE " + " AND ".join(where)) if where else ""
+    sql = f"SELECT tc.id, tc.text FROM text_chunks tc{clause} ORDER BY tc.id"
+    rows = session.execute(text(sql), params).all()
+    return [(uuid.UUID(str(r[0])), r[1]) for r in rows]
+
+
+async def _enqueue_embed_text(
+    task_name: str,
+    rows: list[tuple[uuid.UUID, str]],
+) -> int:
+    settings = get_settings()
+    redis = await create_pool(redis_settings(settings.redis_url))
+    try:
+        count = 0
+        for cid, body in rows:
+            await redis.enqueue_job(task_name, "document_chunk", str(cid), body)
+            count += 1
+        return count
+    finally:
+        await redis.close()
+
+
+@main.command("embed-text")
+@click.option(
+    "--model",
+    "model",
+    required=True,
+    type=click.Choice(sorted(TEXT_MODELS)),
+    help="Text embedding model name (minilm-multi-v1 | bge-m3-v1).",
+)
+@click.option(
+    "--patient",
+    "patient",
+    default=None,
+    help="Patient UUID. Mutually exclusive with --all.",
+)
+@click.option(
+    "--all",
+    "all_patients",
+    is_flag=True,
+    default=False,
+    help="Backfill text-chunk embeddings for every patient. Use with care.",
+)
+@click.option(
+    "--only-missing/--all-chunks",
+    "only_missing",
+    default=True,
+    show_default=True,
+    help="Only chunks lacking a vector for the chosen model (default), or re-embed all.",
+)
+@click.option(
+    "--dry-run",
+    is_flag=True,
+    help="Count candidate chunks and print the plan without enqueueing.",
+)
+def embed_text(
+    model: str,
+    patient: str | None,
+    all_patients: bool,
+    only_missing: bool,
+    dry_run: bool,
+) -> None:
+    """Enqueue per-chunk text-embedding jobs for the chosen model.
+
+    Routes to the model's arq task and pgvector store table
+    (minilm-multi-v1 -> embed_text_ml / text_embeddings; bge-m3-v1 ->
+    embed_bge_m3_dense / text_embeddings_bge_m3). The tasks are idempotent
+    (ON CONFLICT upsert) and no-op on blank chunk text. Requires an Arq
+    worker with the ``ai`` extra running to process the queue.
+    """
+    if (patient is None) == (not all_patients):
+        click.echo("specify exactly one of --patient <id> or --all", err=True)
+        sys.exit(2)
+
+    patient_uuid: uuid.UUID | None = None
+    if patient is not None:
+        try:
+            patient_uuid = uuid.UUID(patient)
+        except ValueError:
+            click.echo(f"--patient must be a UUID, got {patient!r}", err=True)
+            sys.exit(2)
+
+    spec = TEXT_MODELS[model]
+    task_name = spec.arq_task
+    store_table = spec.store_table
+
+    engine = _engine()
+    with Session(engine) as session:
+        rows = _chunk_candidates(
+            session,
+            patient_id=patient_uuid,
+            only_missing=only_missing,
+            store_table=store_table,
+            model_id=model,
+        )
+
+    scope = f"patient {patient_uuid}" if patient_uuid else "ALL patients"
+    click.echo(f"scope            : {scope}")
+    click.echo(f"model            : {model}")
+    click.echo(f"only-missing     : {only_missing}")
+    click.echo(f"chunk candidates : {len(rows)}")
+
+    if dry_run:
+        click.echo("DRY RUN — no jobs enqueued.")
+        return
+    if not rows:
+        click.echo("nothing to do")
+        return
+
+    n = asyncio.run(_enqueue_embed_text(task_name, rows))
+    click.echo(f"enqueued {task_name}: {n} jobs")
     click.echo("Run an Arq worker with the `ai` extra to process the queue.")
 
 

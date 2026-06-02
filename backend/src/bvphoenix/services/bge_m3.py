@@ -18,7 +18,8 @@ from __future__ import annotations
 import asyncio
 from typing import Any
 
-BGE_M3_MODEL_ID = "bge-m3-v1"
+from bvphoenix.services.text_models import BGE_M3_MODEL_ID
+
 BGE_M3_MODEL_NAME = "BAAI/bge-m3"
 BGE_M3_DENSE_DIM = 1024
 
