@@ -27,6 +27,12 @@ RUN --mount=type=cache,target=/root/.cache/uv \
     uv sync --extra ai --no-install-project --no-dev || uv sync --extra ai --no-install-project
 RUN --mount=type=cache,target=/root/.cache/uv uv sync --extra ai --no-dev
 
+# FlagEmbedding (BGE-M3 sparse + ColBERT query encoding) installed --no-deps:
+# real inference deps are pinned in the `ai` extra; --no-deps drops the
+# import-dead ir-datasets (zlib-state C ext / gcc). Pinned, out of uv.lock.
+RUN --mount=type=cache,target=/root/.cache/uv \
+    uv pip install --python /app/.venv/bin/python --no-deps "FlagEmbedding==1.4.0"
+
 # Pre-fetch the multilingual MiniLM checkpoint into the venv's HF cache
 # so the first query on a freshly-rolled pod doesn't pay a 470 MB HF
 # download (and doesn't depend on egress to huggingface.co at runtime).
@@ -38,6 +44,12 @@ RUN --mount=type=cache,target=/root/.cache/uv \
 # reason as MiniLM above; runtime HF fetch is slow and times out on CPU ARM).
 RUN --mount=type=cache,target=/root/.cache/uv \
     /app/.venv/bin/python -c "from sentence_transformers import SentenceTransformer; SentenceTransformer('BAAI/bge-m3')"
+# Build-time smoke test of the FlagEmbedding read-out path (construct + encode
+# dense/sparse/colbert) so a missed --no-deps dep fails the build, not prod.
+# Also bakes the sparse_linear/colbert_linear heads into HF_HOME (fetched from
+# HF here, CI egress) so the runtime backend never fetches them at query time.
+RUN --mount=type=cache,target=/root/.cache/uv \
+    /app/.venv/bin/python -c "from FlagEmbedding import BGEM3FlagModel; m=BGEM3FlagModel('BAAI/bge-m3', use_fp16=False); m.encode(['ciao mondo'], return_dense=True, return_sparse=True, return_colbert_vecs=True)"
 
 # ---
 

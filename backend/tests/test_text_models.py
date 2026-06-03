@@ -10,8 +10,12 @@ mapping was unified out of four hand-synced copies.
 
 from __future__ import annotations
 
-from bvphoenix.db.models import TextEmbeddingBgeM3
-from bvphoenix.services.bge_m3 import BGE_M3_DENSE_DIM
+from bvphoenix.db.models import (
+    TextEmbeddingBgeM3,
+    TextEmbeddingBgeM3Colbert,
+    TextEmbeddingBgeM3Sparse,
+)
+from bvphoenix.db.models.text_embeddings_bge_m3 import BGE_M3_DENSE_DIM, BGE_M3_SPARSE_DIM
 from bvphoenix.services.text_models import (
     BGE_M3_MODEL_ID,
     DEFAULT_TEXT_MODEL_ID,
@@ -37,11 +41,23 @@ def test_minilm_routing() -> None:
 
 def test_bge_m3_routing_matches_orm() -> None:
     spec = TEXT_MODELS[BGE_M3_MODEL_ID]
-    assert spec.arq_task == "embed_bge_m3_dense"
-    # Store table + vector width are anchored to the ORM model / migration,
+    # embed_bge_m3_all: one FlagEmbedding forward -> dense + sparse + colbert.
+    assert spec.arq_task == "embed_bge_m3_all"
+    # Store tables + vector width are anchored to the ORM models / migration,
     # so editing the spec without the column (or vice versa) fails here.
     assert spec.store_table == TextEmbeddingBgeM3.__tablename__ == "text_embeddings_bge_m3"
+    assert spec.sparse_store_table == TextEmbeddingBgeM3Sparse.__tablename__
+    assert spec.colbert_store_table == TextEmbeddingBgeM3Colbert.__tablename__
     assert spec.dim == BGE_M3_DENSE_DIM == 1024
+    assert BGE_M3_SPARSE_DIM == 250002
+
+
+def test_minilm_has_no_aux_stores() -> None:
+    # A registry flip-back to MiniLM (dense-only) must disable the sparse +
+    # ColBERT arms; chunk_search keys those off these being None.
+    spec = TEXT_MODELS[MULTILINGUAL_MODEL_ID]
+    assert spec.sparse_store_table is None
+    assert spec.colbert_store_table is None
 
 
 def test_default_is_minilm() -> None:

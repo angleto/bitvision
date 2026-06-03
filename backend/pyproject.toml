@@ -144,6 +144,16 @@ bvphoenix-backfill = "bvphoenix.cli.backfill:main"
 ai = [
     "sentence-transformers>=2.7.0",
     "torch>=2.5.0",
+    # FlagEmbedding's real inference deps for BGE-M3 sparse + ColBERT query
+    # encoding. FlagEmbedding itself is --no-deps in the Dockerfile (pinned)
+    # to drop the import-dead ir-datasets (its zlib-state C ext is the only
+    # gcc need). `datasets` is imported eagerly by BGEM3FlagModel so it stays;
+    # it drags pyarrow+pandas (aarch64 wheels, no compiler).
+    "datasets>=2.19.0",
+    "peft>=0.7.0",
+    "accelerate>=0.20.1",
+    "sentencepiece>=0.2.0",
+    "protobuf>=4.0.0",
 ]
 dev = [
     "pytest>=8.3.0",

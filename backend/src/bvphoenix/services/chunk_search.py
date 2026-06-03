@@ -156,6 +156,79 @@ def _validate_enum(values: list[str] | None, allowed: tuple[str, ...], name: str
             raise ValueError(f"{name}={v!r} not in {allowed}")
 
 
+async def _colbert_maxsim_order(
+    db: AsyncSession,
+    query_colbert: Any,
+    chunk_ids: list[uuid.UUID],
+    *,
+    colbert_table: str,
+    model_id: str,
+    top_n: int,
+) -> list[int] | None:
+    """Reorder ``chunk_ids`` by BGE-M3 ColBERT late-interaction MaxSim.
+
+    Fetches each pooled chunk's packed token matrix (bounded to the RRF pool,
+    read by id), reassembles ``[n_tokens, 1024]`` fp16 -> fp32, and computes
+    MaxSim = sum over query tokens of the max over doc tokens of the dot
+    product. Stored + query token vectors are L2-normalized, so dot == cosine.
+    Returns the index permutation (best first, length ``top_n``) matching the
+    ``rerank_order`` contract, or None on any failure so the caller keeps RRF
+    order / falls back to the cross-encoder. ``colbert_table`` is a TEXT_MODELS
+    literal (never user input).
+    """
+    if not chunk_ids:
+        return None
+    import numpy as np
+
+    try:
+        rows = (
+            await db.execute(
+                text(
+                    f"""
+                    SELECT te.target_id, te.n_tokens, te.colbert
+                    FROM {colbert_table} te
+                    WHERE te.target_kind = 'document_chunk'
+                      AND te.model_id = :model_id
+                      AND te.target_id = ANY(:ids)
+                    """
+                ),
+                {"model_id": model_id, "ids": chunk_ids},
+            )
+        ).all()
+    except ProgrammingError:
+        await db.rollback()
+        return None
+    if not rows:
+        return None
+
+    # Reassembly + MaxSim is inside the try so a malformed/odd-length blob, an
+    # n_tokens desync, or a dim != 1024 row returns None (keep RRF order) rather
+    # than 500-ing — honouring the "None on any failure" contract above. The
+    # explicit reshape(n_tokens, 1024) (not -1) makes a byte-length mismatch a
+    # caught ValueError instead of a silently wrong inferred dim.
+    try:
+        mats: dict[uuid.UUID, Any] = {}
+        for target_id, n_tokens, blob in rows:
+            mats[target_id] = (
+                np.frombuffer(blob, dtype="float16").reshape(int(n_tokens), 1024).astype("float32")
+            )
+
+        q = np.asarray(query_colbert, dtype="float32")  # [Tq, dim]
+        scored: list[tuple[int, float]] = []
+        for idx, cid in enumerate(chunk_ids):
+            d = mats.get(cid)
+            if d is None:
+                # No ColBERT row (e.g. not yet re-embedded) -> sort last, but
+                # keep it in the pool so the result never shrinks below RRF.
+                scored.append((idx, float("-inf")))
+                continue
+            scored.append((idx, float((q @ d.T).max(axis=1).sum())))
+    except (ValueError, TypeError):
+        return None
+    scored.sort(key=lambda x: x[1], reverse=True)
+    return [idx for idx, _ in scored[:top_n]]
+
+
 async def search_chunks(
     db: AsyncSession,
     *,
@@ -264,28 +337,53 @@ async def search_chunks(
     try:
         active_model_id = (await get_default_model("text", db)).name
     except Exception:
+        # If the registry read itself errored it may have aborted the tx;
+        # roll back so the downstream FTS query (which has no degrade guard of
+        # its own) runs on a clean tx rather than 500-ing. Mirrors the
+        # rollback-on-degrade pattern of the dense/sparse fetches below.
+        await db.rollback()
         active_model_id = MULTILINGUAL_MODEL_ID
-    if active_model_id == BGE_M3_MODEL_ID:
-        _embed = _embed_query_bge_m3
-    else:
+    if active_model_id != BGE_M3_MODEL_ID:
         active_model_id = MULTILINGUAL_MODEL_ID
-        _embed = _embed_query
-    # Store table is the single routing fact, shared with the backfill CLI
-    # and the write path via TEXT_MODELS, so a model/table change touches
-    # one place. active_model_id is guaranteed to be a TEXT_MODELS key here.
-    vec_table = TEXT_MODELS[active_model_id].store_table
+    # Store tables are the single routing fact, shared with the backfill CLI
+    # and the write path via TEXT_MODELS, so a model/table change touches one
+    # place. active_model_id is guaranteed to be a TEXT_MODELS key here.
+    spec = TEXT_MODELS[active_model_id]
+    vec_table = spec.store_table
 
-    # ---- vector top-k ----
-    # The active text encoder lives in the optional ``ai`` extra. When it
-    # is not installed (CI without ``uv sync --extra ai``, lightweight
-    # test envs) we degrade to FTS-only retrieval rather than 500-ing.
-    try:
-        vec = await _embed(query)
-    except (ImportError, ModuleNotFoundError):
-        vec = None
+    # ---- encode the query ----
+    # For BGE-M3 with its sparse/colbert aux stores we do ONE FlagEmbedding
+    # forward (dense + sparse + colbert). If FlagEmbedding is unavailable we
+    # degrade to the sentence-transformers DENSE vector only (sparse + colbert
+    # arms skipped); MiniLM uses its own ST dense encoder. The whole encode is
+    # behind ImportError so a lean env degrades to FTS-only rather than 500-ing.
+    dense_vec: list[float] | None = None
+    sparse_text: str | None = None
+    query_colbert: Any = None
+    if active_model_id == BGE_M3_MODEL_ID and spec.sparse_store_table is not None:
+        try:
+            from bvphoenix.services.bge_m3 import embed_query_all
+
+            qall = await embed_query_all(query)
+            dense_vec = qall["dense"]
+            sparse_text = qall["sparse_text"]
+            query_colbert = qall["colbert"]
+        except (ImportError, ModuleNotFoundError):
+            try:
+                dense_vec = await _embed_query_bge_m3(query)
+            except (ImportError, ModuleNotFoundError):
+                dense_vec = None
+    else:
+        encoder = _embed_query_bge_m3 if active_model_id == BGE_M3_MODEL_ID else _embed_query
+        try:
+            dense_vec = await encoder(query)
+        except (ImportError, ModuleNotFoundError):
+            dense_vec = None
+
+    # ---- dense vector top-k ----
     vec_rows: list = []
-    if vec is not None:
-        # ``vec_table`` is one of two fixed literals (never user input).
+    if dense_vec is not None:
+        # ``vec_table`` is a fixed literal from TEXT_MODELS (never user input).
         vec_sql = text(
             f"""
             SELECT ch.id AS chunk_id, te.vector <=> (:vec)::vector AS distance
@@ -310,17 +408,54 @@ async def search_chunks(
                     vec_sql,
                     {
                         **params,
-                        "vec": _vec_literal(vec),
+                        "vec": _vec_literal(dense_vec),
                         "model_id": active_model_id,
                         "limit": over,
                     },
                 )
             ).all()
         except ProgrammingError:
-            # text_embeddings or pgvector extension not provisioned —
+            # store table or pgvector extension not provisioned —
             # degrade to FTS-only rather than 500-ing.
             await db.rollback()
             vec_rows = []
+
+    # ---- sparse (BGE-M3 lexical) top-k ----
+    # Inner product over the learned token weights (== FlagEmbedding lexical
+    # matching; pgvector ``<#>`` is negative inner product, so ORDER BY ASC
+    # ranks the strongest lexical overlap first). Only when BGE is active, the
+    # sparse store is routed, and the query encoded to sparse. Same degrade
+    # guards as the dense fetch. ``sparse_store_table`` is a TEXT_MODELS literal.
+    sparse_rows: list = []
+    if sparse_text is not None and spec.sparse_store_table is not None:
+        sparse_sql = text(
+            f"""
+            SELECT ch.id AS chunk_id, (tes.sparse <#> (:qsparse)::sparsevec) AS neg_ip
+            FROM text_chunks ch
+            JOIN {spec.sparse_store_table} tes
+              ON tes.target_id = ch.id
+             AND tes.target_kind = 'document_chunk'
+             AND tes.model_id = :model_id
+            WHERE {where_sql}
+            ORDER BY neg_ip ASC
+            LIMIT :limit
+            """
+        )
+        try:
+            sparse_rows = (
+                await db.execute(
+                    sparse_sql,
+                    {
+                        **params,
+                        "qsparse": sparse_text,
+                        "model_id": active_model_id,
+                        "limit": over,
+                    },
+                )
+            ).all()
+        except ProgrammingError:
+            await db.rollback()
+            sparse_rows = []
 
     # ---- FTS top-k ----
     fts_sql = text(
@@ -338,8 +473,9 @@ async def search_chunks(
 
     # ---- RRF ----
     rank_vec = {row[0]: i + 1 for i, row in enumerate(vec_rows)}
+    rank_sparse = {row[0]: i + 1 for i, row in enumerate(sparse_rows)}
     rank_fts = {row[0]: i + 1 for i, row in enumerate(fts_rows)}
-    candidates = set(rank_vec) | set(rank_fts)
+    candidates = set(rank_vec) | set(rank_sparse) | set(rank_fts)
     if not candidates:
         return []
     scored: list[tuple[uuid.UUID, float]] = []
@@ -347,6 +483,8 @@ async def search_chunks(
         s = 0.0
         if cid in rank_vec:
             s += 1.0 / (_RRF_K + rank_vec[cid])
+        if cid in rank_sparse:
+            s += 1.0 / (_RRF_K + rank_sparse[cid])
         if cid in rank_fts:
             s += 1.0 / (_RRF_K + rank_fts[cid])
         scored.append((cid, s))
@@ -405,9 +543,22 @@ async def search_chunks(
         )
 
     if rerank and len(pooled) > 1:
-        # Cross-encoder reorders the pool by true (query, passage)
-        # relevance; on no ai extra it returns None and we keep RRF order.
-        order = await rerank_order(query, [text_ for _, text_ in pooled], top_n=k)
+        # Same ``rerank`` contract (better ordering, ai-gated, degrades to RRF
+        # order) but the implementation switches by active model: BGE-M3 uses
+        # ColBERT late-interaction MaxSim over the pooled token matrices;
+        # MiniLM (or BGE when ColBERT is unavailable) uses the cross-encoder.
+        order: list[int] | None = None
+        if query_colbert is not None and spec.colbert_store_table is not None:
+            order = await _colbert_maxsim_order(
+                db,
+                query_colbert,
+                [hit.chunk_id for hit, _ in pooled],
+                colbert_table=spec.colbert_store_table,
+                model_id=active_model_id,
+                top_n=k,
+            )
+        if order is None:
+            order = await rerank_order(query, [text_ for _, text_ in pooled], top_n=k)
         if order is not None:
             pooled = [pooled[i] for i in order]
 
