@@ -10,6 +10,7 @@ import {
   type Series,
   type SimilarStudy,
   type Study,
+  errorCode,
   searchApi,
   studiesApi,
 } from "@/lib/api";
@@ -323,16 +324,13 @@ function NeighborsView({
       })
       .catch((e) => {
         if (cancelled) return;
-        if (e instanceof ApiError) {
-          const detail = e.detail as { code?: string; message?: string } | string | undefined;
-          if (typeof detail === "object" && detail?.code) {
-            setErrCode(detail.code);
-            setErr(detail.message ?? e.message);
-          } else {
-            setErr(e.message);
-          }
+        const code = errorCode(e);
+        if (code) {
+          // Structured signal (e.g. study_not_indexed) -> render the right card.
+          setErrCode(code);
+          setErr(e instanceof ApiError ? e.message : null);
         } else {
-          setErr("load failed");
+          setErr(e instanceof ApiError ? e.message : "load failed");
         }
       });
     return () => {
@@ -403,7 +401,9 @@ function NeighborsView({
       )}
       {!results && !err && <p className="meta">Searching…</p>}
       {results && results.length === 0 && (
-        <p className="meta">No similar cases found. Try removing the modality filter.</p>
+        <p className="meta">
+          No similar cases found.{modality ? " Try removing the modality filter." : ""}
+        </p>
       )}
 
       <div className="series-grid">

@@ -75,7 +75,22 @@ def _dicom_to_pil(dcm_bytes: bytes):
     if "PixelData" not in ds:
         raise ValueError("no pixel data")
 
-    arr = ds.pixel_array.astype(np.float32)
+    arr = np.asarray(ds.pixel_array)
+
+    # Reduce to a displayable 2D (H,W) or RGB (H,W,3) frame. Multi-frame
+    # series — 4D (frames,H,W,C) or 3D (frames,H,W) grayscale — collapse to a
+    # representative middle frame; stray singleton axes are squeezed. Anything
+    # that still isn't a 2D / HxWx3 image (e.g. a degenerate (1,1,N) buffer
+    # that is not a displayable image) raises a clean ValueError so the worker
+    # logs a skip instead of crashing on PIL's cryptic "Cannot handle this
+    # data type" TypeError.
+    if arr.ndim == 4 or (arr.ndim == 3 and arr.shape[-1] not in (3, 4)):
+        arr = arr[arr.shape[0] // 2]
+    arr = np.squeeze(arr)
+    if not (arr.ndim == 2 or (arr.ndim == 3 and arr.shape[-1] in (3, 4))):
+        raise ValueError(f"unsupported pixel layout {arr.shape}")
+
+    arr = arr.astype(np.float32)
     slope = float(getattr(ds, "RescaleSlope", 1.0) or 1.0)
     intercept = float(getattr(ds, "RescaleIntercept", 0.0) or 0.0)
     if slope != 1.0 or intercept != 0.0:
@@ -83,10 +98,7 @@ def _dicom_to_pil(dcm_bytes: bytes):
 
     # Normalize to 0-255 for PIL
     vmin, vmax = arr.min(), arr.max()
-    if vmax > vmin:
-        arr = (arr - vmin) / (vmax - vmin) * 255.0
-    else:
-        arr = np.zeros_like(arr)
+    arr = (arr - vmin) / (vmax - vmin) * 255.0 if vmax > vmin else np.zeros_like(arr)
     arr = arr.astype(np.uint8)
 
     img = Image.fromarray(arr)

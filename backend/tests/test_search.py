@@ -224,20 +224,21 @@ async def test_similar_to_404_unknown_target(db_session, make_user) -> None:
 
 
 @pytest.mark.asyncio
-async def test_similar_to_empty_when_target_has_no_embedding(
+async def test_similar_to_422_when_target_not_indexed(
     db_session, make_user, make_study
 ) -> None:
-    # A target whose pixel data was never embedded returns an empty list,
-    # not a 404: indexing is async, and find_similar_studies deliberately
-    # treats "not embedded yet" as "no similar cases" so the viewer does
-    # not log a spurious 404 on every load. (See find_similar_studies.)
+    # A target that EXISTS but whose pixel data was never embedded is NOT a
+    # 404 (indexing is async) and NOT an empty 200 (that is reserved for
+    # "indexed, zero neighbours"): it returns 422 with a structured
+    # ``study_not_indexed`` code so the FE renders a "not indexed yet" card and
+    # the viewer panel stays quiet. (See find_similar_studies.)
     user = await make_user()
     _, series = await make_study(user, description="unembedded")
     # Intentionally no make_embedding call
     client = await _client_for(db_session, user)
     r = await client.get(f"/api/similar-to/{series.id}")
-    assert r.status_code == 200
-    assert r.json() == []
+    assert r.status_code == 422
+    assert r.json()["detail"]["code"] == "study_not_indexed"
     await client.aclose()
     app.dependency_overrides.clear()
 

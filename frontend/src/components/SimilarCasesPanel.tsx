@@ -3,7 +3,14 @@
 import Link from "next/link";
 import { useEffect, useState } from "react";
 
-import { API_BASE_URL, ApiError, type SimilarStudy, getStoredToken, searchApi } from "@/lib/api";
+import {
+  API_BASE_URL,
+  ApiError,
+  type SimilarStudy,
+  errorCode,
+  getStoredToken,
+  searchApi,
+} from "@/lib/api";
 
 interface Props {
   targetId: string;
@@ -26,8 +33,10 @@ export default function SimilarCasesPanel({ targetId, k = 8, modality }: Props) 
       })
       .catch((e) => {
         if (cancelled) return;
-        // 404 = "no embedding yet" — treat as empty, not an error
-        if (e instanceof ApiError && e.status === 404) setItems([]);
+        // 404 (no embedding) or study_not_indexed (422, async / non-pixel)
+        // are both "not indexed" — treat as empty, not an error.
+        if (e instanceof ApiError && (e.status === 404 || errorCode(e) === "study_not_indexed"))
+          setItems([]);
         else setErr(e instanceof ApiError ? e.message : "load failed");
       });
     return () => {

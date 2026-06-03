@@ -2,7 +2,14 @@
 
 import { useEffect, useState } from "react";
 
-import { API_BASE_URL, ApiError, type SimilarStudy, getStoredToken, searchApi } from "@/lib/api";
+import {
+  API_BASE_URL,
+  ApiError,
+  type SimilarStudy,
+  errorCode,
+  getStoredToken,
+  searchApi,
+} from "@/lib/api";
 
 interface Props {
   seriesId: string;
@@ -26,7 +33,9 @@ export default function SimilarCasesPanelViewer({ seriesId, k = 5 }: Props) {
       })
       .catch((e) => {
         if (cancelled) return;
-        if (e instanceof ApiError && e.status === 404) {
+        // 404 (no embedding) or study_not_indexed (422, async indexing /
+        // non-pixel series) -> quiet empty state, not an error in the viewer.
+        if (e instanceof ApiError && (e.status === 404 || errorCode(e) === "study_not_indexed")) {
           setItems([]);
         } else {
           setErr(e instanceof ApiError ? e.message : "load failed");
