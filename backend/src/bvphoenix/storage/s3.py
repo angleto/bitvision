@@ -255,6 +255,70 @@ class S3Storage:
             raise
         return UploadResult(bucket=bucket, key=key, size_bytes=total_bytes)
 
+    # --- Discrete multipart primitives -----------------------------------
+    # Drive ONE S3 multipart upload across SEPARATE HTTP requests — the
+    # resumable chunked-upload session: each client PATCH appends one part.
+    # The caller persists (upload_id, parts, received_offset) per file so a
+    # dropped connection resumes from the last acked part. ``upload_iter``
+    # above is the one-shot in-process pipeline; these expose the same boto3
+    # calls individually. Encryption policy (``self._put_extra``) is applied
+    # on create so every part inherits it. All bytes still flow THROUGH the
+    # backend — no presigned PUT, storage isolation preserved.
+
+    def create_multipart(self, *, bucket: str, key: str, content_type: str | None = None) -> str:
+        """Begin a multipart upload; return its ``UploadId``."""
+        create_kwargs: dict[str, Any] = dict(self._put_extra)
+        if content_type:
+            create_kwargs["ContentType"] = content_type
+        mp = self._client.create_multipart_upload(Bucket=bucket, Key=key, **create_kwargs)
+        return mp["UploadId"]
+
+    def upload_part(
+        self, *, bucket: str, key: str, upload_id: str, part_number: int, body: bytes
+    ) -> str:
+        """Upload one part; return its ``ETag``.
+
+        ``part_number`` is 1-based and MUST be derived deterministically from
+        the byte offset by the caller (``offset // part_size + 1``) so a
+        re-sent chunk at an already-acked offset maps to the same part and is
+        idempotent. Every part except the last must be ≥ 5 MiB (S3 rule); the
+        caller enforces a fixed chunk size and exempts the final part.
+        """
+        resp = self._client.upload_part(
+            Bucket=bucket,
+            Key=key,
+            PartNumber=part_number,
+            UploadId=upload_id,
+            Body=body,
+        )
+        return resp["ETag"]
+
+    def complete_multipart(
+        self, *, bucket: str, key: str, upload_id: str, parts: list[dict[str, Any]]
+    ) -> None:
+        """Finalize the object from its uploaded parts.
+
+        ``parts`` is ``[{"PartNumber": int, "ETag": str}, ...]``; we sort by
+        PartNumber (S3 requires ascending order) so the caller can persist
+        them in receipt order.
+        """
+        parts_sorted = sorted(parts, key=lambda p: int(p["PartNumber"]))
+        self._client.complete_multipart_upload(
+            Bucket=bucket,
+            Key=key,
+            UploadId=upload_id,
+            MultipartUpload={"Parts": parts_sorted},
+        )
+
+    def abort_multipart(self, *, bucket: str, key: str, upload_id: str) -> None:
+        """Abort an in-flight multipart upload, dropping its parts immediately.
+
+        The GC sweeper calls this on abandoned sessions so incomplete parts
+        are released within minutes instead of waiting up to a day for the
+        ``AbortIncompleteMultipartUpload`` lifecycle rule.
+        """
+        self._client.abort_multipart_upload(Bucket=bucket, Key=key, UploadId=upload_id)
+
     def put_extra_args(self) -> dict[str, Any]:
         """Expose the encryption kwargs so callers that reach boto3 directly
         (e.g. workers) can keep the same policy without depending on config.

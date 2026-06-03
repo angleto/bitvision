@@ -33,16 +33,22 @@ class _StubDB:
         self,
         settings: dict[str, object] | None = None,
         usage_bytes: int = 0,
+        user_quota_bytes: int | None = None,
     ) -> None:
         self.settings_map = settings or {}
         self.usage_bytes = usage_bytes
+        # Mirrors ``users.storage_quota_bytes`` — the per-user override the
+        # admin dashboard writes and quota.check_quota_or_raise honors;
+        # resolve_quota_gb now honors it too (the reconcile).
+        self.user_quota_bytes = user_quota_bytes
         self.calls: list[str] = []
 
     async def execute(self, stmt, params=None):
         sql = str(stmt).strip()
         # Heuristic dispatch: SELECT against app_settings goes through
-        # the resolver path; a text() CTE with ``owned_patients`` is
-        # the usage query. Everything else returns "no row".
+        # the resolver path; the ``users.storage_quota_bytes`` override
+        # query returns a bare scalar; a text() CTE with ``owned_patients``
+        # is the usage query. Everything else returns "no row".
         if "app_settings" in sql.lower():
             try:
                 compiled_params = stmt.compile().params
@@ -51,6 +57,9 @@ class _StubDB:
             key = compiled_params.get("key_1") or compiled_params.get("param_1")
             self.calls.append(f"setting:{key}")
             return _AppSettingResult(self.settings_map.get(str(key)))
+        if "storage_quota_bytes" in sql.lower():
+            self.calls.append("user_override")
+            return _ScalarResult(self.user_quota_bytes)
         if "owned_patients" in sql.lower() or "instances i" in sql.lower():
             self.calls.append("usage_query")
             return _UsageResult(self.usage_bytes)
@@ -65,6 +74,14 @@ class _AppSettingResult:
         if self._value is None:
             return None
         return SimpleNamespace(value=self._value)
+
+
+class _ScalarResult:
+    def __init__(self, value: object | None) -> None:
+        self._value = value
+
+    def scalar_one_or_none(self) -> object | None:
+        return self._value
 
 
 class _UsageResult:
@@ -136,6 +153,50 @@ async def test_malformed_value_falls_through_to_default() -> None:
     gb, is_default = await resolve_quota_gb(db, subject_id=sid)
     assert gb == DEFAULT_QUOTA_GB
     assert is_default is True
+
+
+@pytest.mark.asyncio
+async def test_user_storage_quota_bytes_override_is_honored() -> None:
+    """The reconcile: users.storage_quota_bytes (the admin-UI per-user value
+    already honored by quota.check_quota_or_raise) is now the effective
+    per-user quota for the hard-cap gate too, so a quota raised in the UI
+    actually lifts the upload gate instead of leaving it on DEFAULT_QUOTA_GB.
+    """
+    sid = uuid.uuid4()
+    db = _StubDB(settings={}, user_quota_bytes=200 * GB_IN_BYTES)
+    gb, is_default = await resolve_quota_gb(db, subject_id=sid)
+    assert gb == 200.0
+    assert is_default is False
+
+
+@pytest.mark.asyncio
+async def test_per_user_app_setting_wins_over_user_column() -> None:
+    """The explicit per-user app_setting stays the highest-precedence ops
+    override; the users.storage_quota_bytes column is the next layer."""
+    sid = uuid.uuid4()
+    db = _StubDB(
+        settings={f"{KEY_USER_QUOTA_PREFIX}{sid}": 100},
+        user_quota_bytes=200 * GB_IN_BYTES,
+    )
+    gb, is_default = await resolve_quota_gb(db, subject_id=sid)
+    assert gb == 100.0
+    assert is_default is False
+
+
+@pytest.mark.asyncio
+async def test_user_column_honored_even_when_app_override_disabled() -> None:
+    """``allow_user_override`` only gates the app_setting layer; the canonical
+    users.storage_quota_bytes override is honored regardless, mirroring
+    quota.check_quota_or_raise so the two gates never diverge on the override.
+    """
+    sid = uuid.uuid4()
+    db = _StubDB(
+        settings={KEY_DEFAULT_QUOTA_GB: 5, KEY_ALLOW_USER_OVERRIDE: False},
+        user_quota_bytes=200 * GB_IN_BYTES,
+    )
+    gb, is_default = await resolve_quota_gb(db, subject_id=sid)
+    assert gb == 200.0
+    assert is_default is False
 
 
 # ---------------------------------------------------------------------------

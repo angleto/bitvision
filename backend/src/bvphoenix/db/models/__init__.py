@@ -144,6 +144,7 @@ from bvphoenix.db.models.training_licenses import (
     LicensedDataset,
     TrainingLicense,
 )
+from bvphoenix.db.models.upload_sessions import UploadSession, UploadSessionFile
 from bvphoenix.db.models.user_api_keys import UserAPIKey
 from bvphoenix.db.models.verification import EmailVerificationToken
 from bvphoenix.db.models.versioning import (
@@ -288,6 +289,8 @@ __all__ = [
     "TextEmbeddingBgeM3Sparse",
     "TrainingConsent",
     "TrainingLicense",
+    "UploadSession",
+    "UploadSessionFile",
     "User",
     "UserAPIKey",
     "ViewportState",

@@ -65,6 +65,7 @@ from bvphoenix.api import studies as studies_routes
 from bvphoenix.api import summaries as summaries_routes
 from bvphoenix.api import tags as tags_routes
 from bvphoenix.api import transparency as transparency_routes
+from bvphoenix.api import upload_sessions as upload_sessions_routes
 from bvphoenix.api import user_api_keys as user_api_keys_routes
 from bvphoenix.api import version as version_routes
 from bvphoenix.api import viewport_state as viewport_state_routes
@@ -126,6 +127,7 @@ api_router.include_router(pet_mip_routes.router)
 api_router.include_router(embeddings_admin_routes.router)
 api_router.include_router(summaries_routes.router)
 api_router.include_router(bulk_upload_routes.router)
+api_router.include_router(upload_sessions_routes.router)
 api_router.include_router(bulk_routes.router)
 api_router.include_router(transparency_routes.router)
 api_router.include_router(user_api_keys_routes.router)
