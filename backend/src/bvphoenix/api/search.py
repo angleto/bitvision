@@ -25,6 +25,7 @@ from bvphoenix.api.search_hybrid import SERIES_EMBED_MODEL_ID
 from bvphoenix.auth import optional_user
 from bvphoenix.db.models import Embedding, ImagingStudy, Series, Tag, User
 from bvphoenix.db.session import get_db
+from bvphoenix.middleware.problem_details import problem
 from bvphoenix.services.mmr import MMRCandidate, mmr_rerank
 from bvphoenix.services.permissions import (
     READ_METADATA,
@@ -375,12 +376,14 @@ async def find_similar_studies(
         ).scalar()
         if not target_exists:
             raise HTTPException(status_code=404, detail="not found")
-        raise HTTPException(
-            status_code=422,
-            detail={
-                "code": "study_not_indexed",
-                "message": "This study is not yet indexed for visual search.",
-            },
+        # RFC 7807 problem: the machine-readable kind is the ``type`` slug
+        # (".../study_not_indexed"), which the FE reads to render the
+        # "not indexed yet" card and keep the viewer panel quiet.
+        raise problem(
+            422,
+            "study_not_indexed",
+            "This study is not yet indexed for visual search.",
+            title="Not indexed for visual search",
         )
 
     # Check the user can see the source study

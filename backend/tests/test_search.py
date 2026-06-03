@@ -224,9 +224,7 @@ async def test_similar_to_404_unknown_target(db_session, make_user) -> None:
 
 
 @pytest.mark.asyncio
-async def test_similar_to_422_when_target_not_indexed(
-    db_session, make_user, make_study
-) -> None:
+async def test_similar_to_422_when_target_not_indexed(db_session, make_user, make_study) -> None:
     # A target that EXISTS but whose pixel data was never embedded is NOT a
     # 404 (indexing is async) and NOT an empty 200 (that is reserved for
     # "indexed, zero neighbours"): it returns 422 with a structured
@@ -238,7 +236,8 @@ async def test_similar_to_422_when_target_not_indexed(
     client = await _client_for(db_session, user)
     r = await client.get(f"/api/similar-to/{series.id}")
     assert r.status_code == 422
-    assert r.json()["detail"]["code"] == "study_not_indexed"
+    # RFC 7807 problem: the kind is the last segment of the ``type`` URI.
+    assert r.json()["type"].rsplit("/", 1)[-1] == "study_not_indexed"
     await client.aclose()
     app.dependency_overrides.clear()
 

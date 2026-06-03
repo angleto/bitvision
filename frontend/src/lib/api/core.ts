@@ -74,17 +74,24 @@ export class ApiError extends Error {
 }
 
 /**
- * Our structured error code, if any: a 4xx whose detail is ``{code, message}``
- * (e.g. visual search ``study_not_indexed``). Handles BOTH the unwrapped
- * ``{code}`` and FastAPI's ``{detail: {code}}`` wrapping (request() stores the
- * full parsed body on ``ApiError.detail``, so the code lands one level deep).
- * Returns null for plain-string details, Pydantic validation arrays, and
- * non-ApiError errors.
+ * The machine-readable kind of an error, if any. Our backend emits RFC 7807
+ * problem bodies (see middleware/problem_details.py) whose ``type`` ends in a
+ * slug — ``".../study_not_indexed"``, ``".../not_found"``, etc.; this returns
+ * that slug. Falls back to a top-level ``code`` or a nested ``detail.code``
+ * for any non-problem-details structured error. Returns null for plain-string
+ * details, Pydantic validation arrays, and non-ApiError errors.
  */
 export function errorCode(e: unknown): string | null {
   if (!(e instanceof ApiError)) return null;
-  const d = e.detail as { code?: unknown; detail?: { code?: unknown } } | null | undefined;
+  const d = e.detail as
+    | { type?: unknown; code?: unknown; detail?: { code?: unknown } }
+    | null
+    | undefined;
   if (!d || typeof d !== "object") return null;
+  if (typeof d.type === "string") {
+    const slug = d.type.split("/").pop();
+    if (slug) return slug;
+  }
   const code = typeof d.code === "string" ? d.code : d.detail?.code;
   return typeof code === "string" ? code : null;
 }
