@@ -40,6 +40,14 @@ RUN --mount=type=cache,target=/root/.cache/uv \
 COPY workers/src ./src
 RUN --mount=type=cache,target=/root/.cache/uv uv sync --extra ai --extra seg --no-dev
 
+# FlagEmbedding (BGE-M3 sparse lexical_weights + ColBERT colbert_vecs)
+# installed --no-deps: its real inference deps are pinned in the `ai` extra
+# above; --no-deps drops the import-DEAD ir-datasets, whose zlib-state C
+# extension is the only thing that needs gcc (the Phase-1 build failure).
+# Pinned exactly because it is intentionally out of uv.lock.
+RUN --mount=type=cache,target=/root/.cache/uv \
+    uv pip install --python /app/.venv/bin/python --no-deps "FlagEmbedding==1.4.0"
+
 # Pre-fetch HF checkpoint, same reasoning as the backend image.
 ENV HF_HOME=/app/.cache/huggingface
 RUN --mount=type=cache,target=/root/.cache/uv \
@@ -50,6 +58,14 @@ RUN --mount=type=cache,target=/root/.cache/uv \
 # Cached in HF_HOME, copied into the runtime image below.
 RUN --mount=type=cache,target=/root/.cache/uv \
     /app/.venv/bin/python -c "from sentence_transformers import SentenceTransformer; SentenceTransformer('BAAI/bge-m3')"
+# Build-time smoke test of the FULL FlagEmbedding read-out path (construct +
+# encode dense/sparse/colbert). Turns any missed --no-deps transitive dep
+# into a BUILD failure, not a prod 500. The dense transformer loads from the
+# ST-baked cache above; FlagEmbedding's sparse_linear/colbert_linear heads are
+# fetched from HF here (CI egress, same as the ST pre-bakes) into HF_HOME, so
+# they are baked into the runtime image — no runtime HF fetch.
+RUN --mount=type=cache,target=/root/.cache/uv \
+    /app/.venv/bin/python -c "from FlagEmbedding import BGEM3FlagModel; m=BGEM3FlagModel('BAAI/bge-m3', use_fp16=False); m.encode(['ciao mondo'], return_dense=True, return_sparse=True, return_colbert_vecs=True)"
 
 # ---
 

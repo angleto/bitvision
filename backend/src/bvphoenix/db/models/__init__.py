@@ -133,7 +133,11 @@ from bvphoenix.db.models.text_chunks import (
     TextChunk,
 )
 from bvphoenix.db.models.text_embeddings import TextEmbedding
-from bvphoenix.db.models.text_embeddings_bge_m3 import TextEmbeddingBgeM3
+from bvphoenix.db.models.text_embeddings_bge_m3 import (
+    TextEmbeddingBgeM3,
+    TextEmbeddingBgeM3Colbert,
+    TextEmbeddingBgeM3Sparse,
+)
 from bvphoenix.db.models.training_consents import TrainingConsent
 from bvphoenix.db.models.training_licenses import (
     DatasetStudy,
@@ -280,6 +284,8 @@ __all__ = [
     "TextChunk",
     "TextEmbedding",
     "TextEmbeddingBgeM3",
+    "TextEmbeddingBgeM3Colbert",
+    "TextEmbeddingBgeM3Sparse",
     "TrainingConsent",
     "TrainingLicense",
     "User",

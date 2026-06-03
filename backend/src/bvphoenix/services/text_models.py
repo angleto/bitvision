@@ -36,12 +36,21 @@ BGE_M3_MODEL_ID = "bge-m3-v1"
 
 @dataclass(frozen=True)
 class TextModelSpec:
-    """How to produce, and where to store, one text model's chunk vectors."""
+    """How to produce, and where to store, one text model's chunk vectors.
+
+    ``sparse_store_table`` / ``colbert_store_table`` are the optional auxiliary
+    BGE-M3 stores (lexical sparsevec + packed ColBERT token-vectors) of the
+    SAME model; None for dense-only models (MiniLM). The query path adds the
+    sparse RRF arm + the ColBERT MaxSim rerank ONLY when these are set, so a
+    registry flip-back to a dense-only model disables both arms automatically.
+    """
 
     model_id: str
     arq_task: str
     store_table: str
     dim: int
+    sparse_store_table: str | None = None
+    colbert_store_table: str | None = None
 
 
 # One entry per text embedding model. ``dim`` must match the pgvector
@@ -56,9 +65,15 @@ TEXT_MODELS: dict[str, TextModelSpec] = {
     ),
     BGE_M3_MODEL_ID: TextModelSpec(
         model_id=BGE_M3_MODEL_ID,
-        arq_task="embed_bge_m3_dense",
+        # embed_bge_m3_all: one FlagEmbedding forward writes dense + sparse +
+        # colbert in one txn (degrades to sentence-transformers dense-only if
+        # FlagEmbedding is unavailable). The dense-only embed_bge_m3_dense task
+        # stays registered as the explicit fallback.
+        arq_task="embed_bge_m3_all",
         store_table="text_embeddings_bge_m3",
         dim=1024,
+        sparse_store_table="text_embeddings_bge_m3_sparse",
+        colbert_store_table="text_embeddings_bge_m3_colbert",
     ),
 }
 

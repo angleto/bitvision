@@ -45,10 +45,21 @@ ai = [
     "monai>=1.4.0",
     "torchio>=0.20.0",
     "open-clip-torch>=2.28.0",
-    # sentence-transformers serves MiniLM AND BGE-M3 dense (embed_bge_m3).
-    # BGE-M3 sparse + ColBERT (Phase 2/3) will add FlagEmbedding then;
-    # it is kept out for now because it drags ir-datasets + a C extension.
+    # sentence-transformers serves MiniLM AND BGE-M3 dense.
     "sentence-transformers>=2.7.0",
+    # FlagEmbedding's real inference deps for BGE-M3 sparse (lexical_weights)
+    # + ColBERT (colbert_vecs). FlagEmbedding ITSELF is installed --no-deps in
+    # the Dockerfile (pinned) to drop its import-DEAD ir-datasets dep, whose
+    # zlib-state C extension is the only thing that needed gcc (the Phase-1
+    # build failure). `datasets` stays because BGEM3FlagModel imports it
+    # eagerly (abc.finetune.embedder.AbsDataset); it drags pyarrow+pandas but
+    # ships aarch64 wheels, no compiler. peft/accelerate/sentencepiece/protobuf
+    # are the remaining real inference deps not already pulled by torch/ST.
+    "datasets>=2.19.0",
+    "peft>=0.7.0",
+    "accelerate>=0.20.1",
+    "sentencepiece>=0.2.0",
+    "protobuf>=4.0.0",
 ]
 # Auto segmentation engine. ``totalsegmentator`` ships its own pinned
 # ``torch``, so we don't co-pin it with the ``ai`` extra (versions can

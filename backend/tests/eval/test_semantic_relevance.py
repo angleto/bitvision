@@ -428,3 +428,194 @@ async def test_bge_m3_beats_minilm_on_hard_synonym(db_session, make_user, make_s
     assert mrr_bge >= mrr_minilm, (
         f"BGE-M3 MRR {mrr_bge} regressed below MiniLM {mrr_minilm} on the same corpus"
     )
+
+
+# ===================================================================
+# BGE-M3 FULL HYBRID: dense + sparse (lexical) + ColBERT (Phase 2/3)
+# ===================================================================
+#
+# These exercise the FlagEmbedding read-out path end to end: the corpus is
+# seeded with REAL dense + sparse + ColBERT vectors via the SAME
+# ``flag_encode_sync`` the worker's ``embed_bge_m3_all`` uses, then the 3-arm
+# RRF (+ ColBERT MaxSim rerank) is replayed through ``search_chunks``. Gated on
+# FlagEmbedding (in addition to the module's sentence_transformers gate) so a
+# lean env / an image without FlagEmbedding skips rather than errors. Run in
+# the tag-only search-eval-ai CI job.
+
+
+async def _insert_chunk_bge_full(session, *, patient_id, body: str) -> uuid.UUID:
+    """Insert one text_chunk + its REAL dense/sparse/colbert vectors via the
+    exact serialization the worker writes (bvphoenix.services.bge_m3), so this
+    test also proves the worker's DB round-trip (sparsevec literal + packed
+    fp16 colbert bytea)."""
+    from bvphoenix.services.bge_m3 import flag_encode_sync
+
+    chunk_id = uuid.uuid4()
+    sha = hashlib.sha256(body.encode()).hexdigest()
+    await session.execute(
+        text(
+            "INSERT INTO text_chunks "
+            "(id, source_kind, source_id, patient_id, author_kind, chunker_version, "
+            " char_start, char_end, text, content_sha256) "
+            "VALUES (:id, 'document', :sid, :pid, 'human', :cv, 0, :ce, :txt, :sha)"
+        ),
+        {
+            "id": chunk_id,
+            "sid": uuid.uuid4(),
+            "pid": patient_id,
+            "cv": chunk_search.DEFAULT_CHUNKER_VERSION,
+            "ce": len(body),
+            "txt": body,
+            "sha": sha,
+        },
+    )
+    full = flag_encode_sync(body)
+    dense_str = "[" + ",".join(str(v) for v in full["dense"]) + "]"
+    await session.execute(
+        text(
+            "INSERT INTO text_embeddings_bge_m3 (target_kind, target_id, model_id, vector) "
+            "VALUES ('document_chunk', :tid, :model, (:vec)::vector)"
+        ),
+        {"tid": chunk_id, "model": BGE_M3_MODEL_ID, "vec": dense_str},
+    )
+    await session.execute(
+        text(
+            "INSERT INTO text_embeddings_bge_m3_sparse (target_kind, target_id, model_id, sparse) "
+            "VALUES ('document_chunk', :tid, :model, (:sparse)::sparsevec)"
+        ),
+        {"tid": chunk_id, "model": BGE_M3_MODEL_ID, "sparse": full["sparse_text"]},
+    )
+    await session.execute(
+        text(
+            "INSERT INTO text_embeddings_bge_m3_colbert "
+            "(target_kind, target_id, model_id, n_tokens, token_dim, colbert) "
+            "VALUES ('document_chunk', :tid, :model, :n, 1024, :blob)"
+        ),
+        {
+            "tid": chunk_id,
+            "model": BGE_M3_MODEL_ID,
+            "n": full["n_tokens"],
+            "blob": full["colbert_blob"],
+        },
+    )
+    return chunk_id
+
+
+@pytest_asyncio.fixture
+async def seeded_chunks_bge_full(db_session, make_user, make_study):
+    """Seed the 3 distinct-topic chunks with REAL dense+sparse+colbert vectors
+    (all three bge stores) for one patient. Skips if FlagEmbedding is absent."""
+    pytest.importorskip("FlagEmbedding")
+    user = await make_user()
+    study, _ = await make_study(user)
+    patient_id = study.patient_id
+    label_to_id: dict[str, uuid.UUID] = {}
+    for label, body in _CHUNKS.items():
+        label_to_id[label] = await _insert_chunk_bge_full(
+            db_session, patient_id=patient_id, body=body
+        )
+    await db_session.commit()
+    return patient_id, label_to_id
+
+
+@pytest.mark.asyncio
+async def test_bge_m3_full_hybrid_pipeline(bge_default, seeded_chunks_bge_full, db_session) -> None:
+    """The full 3-arm pipeline (dense + sparse + FTS RRF) retrieves the right
+    chunk #1 on the IT paraphrase set, AND the sparse + ColBERT stores are
+    populated (positive control: the worker serialization round-trips through
+    the DB — sparsevec literal + packed fp16 colbert bytea — so a silent
+    serialization bug fails here, not in prod)."""
+    assert (await get_default_model("text", db_session)).name == BGE_M3_MODEL_ID
+    patient_id, label_to_id = seeded_chunks_bge_full
+    ids = list(label_to_id.values())
+
+    # Round-trip proof: every seeded chunk has a sparse AND a colbert row.
+    n_sparse = (
+        await db_session.execute(
+            text(
+                "SELECT count(*) FROM text_embeddings_bge_m3_sparse "
+                "WHERE target_kind = 'document_chunk' AND target_id = ANY(:ids)"
+            ),
+            {"ids": ids},
+        )
+    ).scalar_one()
+    n_colbert = (
+        await db_session.execute(
+            text(
+                "SELECT count(*) FROM text_embeddings_bge_m3_colbert "
+                "WHERE target_kind = 'document_chunk' AND target_id = ANY(:ids) AND n_tokens > 0"
+            ),
+            {"ids": ids},
+        )
+    ).scalar_one()
+    assert n_sparse == len(_CHUNKS), f"sparse store not fully populated: {n_sparse}/{len(_CHUNKS)}"
+    assert n_colbert == len(_CHUNKS), (
+        f"colbert store not fully populated: {n_colbert}/{len(_CHUNKS)}"
+    )
+
+    k = 3
+    for label, query in _BGE_QUERIES.items():
+        target = label_to_id[label]
+        hits = await search_chunks(db_session, patient_id=patient_id, query=query, k=k)
+        ranked = [h.chunk_id for h in hits]
+        assert ranked, f"BGE-M3 hybrid returned nothing for {query!r}"
+        assert recall_at_k(ranked, {target}, k) == 1.0, (
+            f"{query!r}: target not in top-{k} ({ranked})"
+        )
+        assert mrr(ranked, {target}) == 1.0, f"{query!r}: target not rank 1 ({ranked})"
+        assert ndcg_at_k(ranked, {target: 1.0}, k) == 1.0, f"{query!r}: nDCG@{k} < 1.0 ({ranked})"
+
+
+@pytest.mark.asyncio
+async def test_bge_m3_colbert_rerank_reorders(
+    bge_default, db_session, make_user, make_study
+) -> None:
+    """ColBERT late-interaction (rerank=True) puts the token-aligned chunk #1
+    on a near-paraphrase pair that dense/sparse find nearly tied. 'liver mets
+    FROM lung primary' vs 'lung mets FROM liver primary' for a liver-mets query
+    differ only by token order; MaxSim aligns the query tokens to chunk-1.
+
+    Non-vacuity: the two chunks share the SAME tokens (only the order differs),
+    so the dense + sparse arms are near-tied and the FTS arm matches both, i.e.
+    the RRF baseline cannot reliably separate them. The two ways this could
+    pass without ColBERT both fail on this pair: (a) a near-tied baseline only
+    lands target #1 by an arbitrary tie-break (not asserted, to avoid a flaky
+    coin-flip), and (b) the cross-encoder FALLBACK is an English model, weak on
+    Italian, so a stable target-#1 under rerank=True is attributable to the
+    ColBERT MaxSim path. The populated-store control (n_colbert == 2) proves the
+    rerank actually had token matrices to score, so a dead path can't pass."""
+    pytest.importorskip("FlagEmbedding")
+    user = await make_user()
+    study, _ = await make_study(user)
+    patient_id = study.patient_id
+
+    target = await _insert_chunk_bge_full(
+        db_session,
+        patient_id=patient_id,
+        body="Riscontro di metastasi epatiche da neoplasia primitiva polmonare.",
+    )
+    _distractor = await _insert_chunk_bge_full(
+        db_session,
+        patient_id=patient_id,
+        body="Riscontro di metastasi polmonari da neoplasia primitiva epatica.",
+    )
+    await db_session.commit()
+
+    n_colbert = (
+        await db_session.execute(
+            text(
+                "SELECT count(*) FROM text_embeddings_bge_m3_colbert "
+                "WHERE target_kind = 'document_chunk' AND target_id = ANY(:ids)"
+            ),
+            {"ids": [target, _distractor]},
+        )
+    ).scalar_one()
+    assert n_colbert == 2, f"colbert store not populated for the rerank pair: {n_colbert}"
+
+    query = "metastasi al fegato da tumore primitivo del polmone"
+    hits = await search_chunks(db_session, patient_id=patient_id, query=query, k=2, rerank=True)
+    ranked = [h.chunk_id for h in hits]
+    assert ranked, "ColBERT rerank returned nothing"
+    assert ranked[0] == target, (
+        f"ColBERT MaxSim did not rank the token-aligned chunk first: {ranked} (target {target})"
+    )
