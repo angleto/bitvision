@@ -40,6 +40,7 @@ from bvphoenix.db.models.text_chunks import (
     DEFAULT_CHUNKER_VERSION,
 )
 from bvphoenix.services.arq_redis import redis_settings
+from bvphoenix.services.embeddable import embeddable_modality_clause
 from bvphoenix.services.text_models import TEXT_MODELS
 
 
@@ -253,6 +254,10 @@ def _series_candidate_ids(
 ) -> list[uuid.UUID]:
     where: list[str] = []
     params: dict[str, object] = {}
+    # Never enqueue non-image series (SR / PR / SEG / ...) — they cannot be
+    # embedded and would only churn the worker + pollute embedding_errors.
+    # Single source of truth: bvphoenix.services.embeddable.
+    where.append(embeddable_modality_clause("s.modality"))
     if patient_id is not None:
         where.append("st.patient_id = :pid")
         params["pid"] = patient_id

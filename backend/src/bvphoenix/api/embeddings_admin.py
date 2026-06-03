@@ -33,6 +33,7 @@ from bvphoenix.config import get_settings
 from bvphoenix.db.models import User
 from bvphoenix.db.session import get_db
 from bvphoenix.services.arq_redis import redis_settings
+from bvphoenix.services.embeddable import embeddable_modality_clause
 from bvphoenix.services.embedding_models import get_default_model
 from bvphoenix.services.text_models import DEFAULT_TEXT_MODEL_ID, TEXT_MODELS
 
@@ -54,7 +55,10 @@ def _total_sql_for_kind(target_kind: str) -> str:
     ``SELECT`` with no parameters.
     """
     if target_kind == "series":
-        return "SELECT COUNT(*) FROM series"
+        # Denominator counts only EMBEDDABLE series — non-image series
+        # (SR / PR / SEG) are not eligible for BiomedCLIP, so including them
+        # would permanently mask the percentage. Source: services.embeddable.
+        return f"SELECT COUNT(*) FROM series WHERE {embeddable_modality_clause('modality')}"
     if target_kind == "study":
         # v3 (0073): table renamed studies → imaging_studies.
         return "SELECT COUNT(*) FROM imaging_studies"
@@ -233,6 +237,16 @@ async def retry_failed(
             enqueued=0,
         )
 
+    # For the series kind, never re-enqueue a non-image series: its error
+    # rows are non-actionable (it can never embed), so retrying would only
+    # churn the worker. Source of truth: services.embeddable.
+    series_filter = ""
+    if target_kind == "series":
+        series_filter = (
+            " AND EXISTS (SELECT 1 FROM series s WHERE s.id = ee.target_id "
+            f"AND {embeddable_modality_clause('s.modality')})"
+        )
+
     rows = (
         await db.execute(
             text(
@@ -243,7 +257,7 @@ async def retry_failed(
                 "    WHERE e.model_id = ee.model_id "
                 "      AND e.target_kind = ee.target_kind "
                 "      AND e.target_id = ee.target_id"
-                ")"
+                ")" + series_filter
             ),
             {"model": model_id, "kind": target_kind},
         )
@@ -285,7 +299,10 @@ async def embed_missing(
     # exclude rows currently in embedding_errors; the worker itself
     # de-duplicates against the embeddings table on entry.
     if target_kind == "series":
-        src_sql = "SELECT id FROM series"
+        # Only embeddable series — exclude non-image (SR / PR / SEG) so the
+        # admin "embed missing" button never enqueues a job that can only
+        # no-op. Source of truth: services.embeddable.
+        src_sql = f"SELECT id FROM series WHERE {embeddable_modality_clause('modality')}"
     elif target_kind == "study":
         # v3 (0073): table renamed studies → imaging_studies.
         src_sql = "SELECT id FROM imaging_studies"
