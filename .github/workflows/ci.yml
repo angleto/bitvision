@@ -117,6 +117,10 @@ jobs:
         working-directory: backend
         run: |
           uv sync --extra dev --extra ai
+          # FlagEmbedding (--no-deps, mirrors the Dockerfile) so the BGE-M3
+          # sparse + ColBERT eval tests run here instead of self-skipping on
+          # importorskip('FlagEmbedding'). Its real deps come from --extra ai.
+          uv pip install --no-deps "FlagEmbedding==1.4.0"
           uv run alembic upgrade head
           uv run pytest tests/eval/test_semantic_relevance.py -q
 
