@@ -97,6 +97,36 @@ export function errorCode(e: unknown): string | null {
 }
 
 /**
+ * Detect the backend's storage-quota 413 and return the used/quota bytes.
+ *
+ * Both storage gates emit a 413 whose lifted problem body carries
+ * ``storage_quota_exceeded`` — storage_quota.py uses ``code`` +
+ * ``bytes_used``/``bytes_quota``; quota.py uses ``error`` +
+ * ``used_bytes``/``quota_bytes``. We accept either shape. This lets the UI
+ * say "X of Y GiB used — free space or raise the limit" instead of the
+ * generic RFC 7807 title "Payload too large", which misleads the user into
+ * thinking a single file is oversized when in fact their storage cap is full.
+ * Returns null for any non-quota error.
+ */
+export function storageQuotaExceeded(e: unknown): { usedBytes: number; quotaBytes: number } | null {
+  if (!(e instanceof ApiError) || e.status !== 413) return null;
+  const d = e.detail as Record<string, unknown> | null | undefined;
+  if (!d || typeof d !== "object") return null;
+  if (d.code !== "storage_quota_exceeded" && d.error !== "storage_quota_exceeded") return null;
+  const num = (...keys: string[]): number => {
+    for (const k of keys) {
+      const v = d[k];
+      if (typeof v === "number") return v;
+    }
+    return 0;
+  };
+  return {
+    usedBytes: num("bytes_used", "used_bytes"),
+    quotaBytes: num("bytes_quota", "quota_bytes"),
+  };
+}
+
+/**
  * Produce a string suitable for ``Error.message`` from a FastAPI /
  * Starlette response body. Three shapes are common:
  *

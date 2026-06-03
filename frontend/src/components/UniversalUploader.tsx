@@ -21,6 +21,7 @@ import {
   bulkUploadApi,
   patientTreeApi,
   patientsApi,
+  storageQuotaExceeded,
 } from "@/lib/api";
 import { extractIsoFiles, isLikelyIsoFile } from "@/lib/iso9660";
 import { JOB_TERMINAL_STATUSES, jobsApi, jobsStorage } from "@/lib/jobs";
@@ -576,11 +577,25 @@ export default function UniversalUploader({ onComplete, patientId, targetFolderI
       setPhase("polling");
     } catch (e) {
       if (e instanceof ApiError) {
-        setErr(
-          e.status === 404
-            ? t("uploadFailed404")
-            : e.message || t("uploadFailedHttp", { status: e.status }),
-        );
+        const quota = storageQuotaExceeded(e);
+        if (quota) {
+          // A 413 here is a STORAGE-QUOTA cap, not an oversized file — the
+          // generic "Payload too large" title misleads. Show used/quota +
+          // the real remedy.
+          const gib = (b: number) => (b / 1024 ** 3).toFixed(2);
+          setErr(
+            t("uploadFailedQuota", {
+              used: gib(quota.usedBytes),
+              quota: gib(quota.quotaBytes),
+            }),
+          );
+        } else {
+          setErr(
+            e.status === 404
+              ? t("uploadFailed404")
+              : e.message || t("uploadFailedHttp", { status: e.status }),
+          );
+        }
       } else {
         setErr(t("uploadFailedUnknown"));
       }

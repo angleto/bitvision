@@ -117,6 +117,24 @@ async def resolve_quota_gb(db: AsyncSession, *, subject_id: uuid.UUID) -> tuple[
         if per_user is not None:
             return per_user, False
 
+    # ``users.storage_quota_bytes`` is the canonical per-user override the
+    # admin dashboard writes, and it is already honored by
+    # ``quota.check_quota_or_raise`` (the free-tier gate). Honor it here too so
+    # ONE admin-set value is the effective per-user quota for BOTH storage
+    # gates. Without this, the two checks read different override stores: a
+    # quota raised in the UI (users.storage_quota_bytes) left this hard-cap
+    # gate on DEFAULT_QUOTA_GB, 413-ing uploads even though the user's
+    # configured quota was far higher. Honored regardless of
+    # ``allow_override`` (which only governs the app_setting layer above),
+    # mirroring quota.py so the two gates can never diverge on the override.
+    from bvphoenix.db.models import User
+
+    override_bytes = (
+        await db.execute(select(User.storage_quota_bytes).where(User.subject_id == subject_id))
+    ).scalar_one_or_none()
+    if override_bytes is not None:
+        return int(override_bytes) / GB_IN_BYTES, False
+
     default = _coerce_gb(await _read_setting(db, KEY_DEFAULT_QUOTA_GB))
     if default is not None:
         return default, True

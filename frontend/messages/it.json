@@ -1866,6 +1866,7 @@
     "openStudy": "Apri studio",
     "uploadFailed404": "Endpoint di bulk upload non disponibile su questo server.",
     "uploadFailedHttp": "Caricamento non riuscito (HTTP {status})",
+    "uploadFailedQuota": "Spazio storage esaurito: {used} GiB di {quota} GiB usati. La dimensione del file è a posto — libera spazio (elimina upload inutili) o aumenta il limite storage nelle impostazioni admin.",
     "uploadFailedUnknown": "Caricamento non riuscito — errore inatteso",
     "uploadDisabledNoPatient": "Scegli un paziente di destinazione per attivare il caricamento.",
     "filterTitle": "Mantieni solo:",

@@ -44,6 +44,15 @@ from pydantic import BaseModel
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from bvphoenix.api._upload_common import (
+    resolve_folder as _resolve_folder,
+)
+from bvphoenix.api._upload_common import (
+    resolve_owner_subject as _resolve_owner_subject,
+)
+from bvphoenix.api._upload_common import (
+    resolve_patient as _resolve_patient,
+)
 from bvphoenix.api.jobs import JobOut, _job_to_out, cap_exceeded_to_http
 from bvphoenix.auth import enforce_agent_patient_scope, require_user
 from bvphoenix.config import get_settings
@@ -150,46 +159,10 @@ class _Staging:
 # ---- Helpers ----
 
 
-async def _resolve_owner_subject(db: AsyncSession, user: User) -> Subject:
-    row = (
-        await db.execute(select(Subject).where(Subject.id == user.subject_id))
-    ).scalar_one_or_none()
-    if row is None:
-        raise HTTPException(status_code=500, detail="owner subject missing for authenticated user")
-    return row
-
-
-async def _resolve_patient(
-    db: AsyncSession,
-    user: User,
-    patient_id: uuid.UUID | None,
-    request: Request,
-) -> Patient | None:
-    if patient_id is None:
-        return None
-    patient = (
-        await db.execute(select(Patient).where(Patient.id == patient_id))
-    ).scalar_one_or_none()
-    if patient is None:
-        raise HTTPException(status_code=404, detail="patient not found")
-    enforce_agent_patient_scope(request, patient.id)
-    if not await can_patient(db, user=user, action=READ_METADATA, patient=patient):
-        raise HTTPException(status_code=404, detail="patient not found")
-    perms = await effective_permissions_on_patient(db, user=user, patient=patient)
-    if WRITE_REPORT not in perms and DELETE not in perms:
-        raise HTTPException(status_code=403, detail="cannot write to this patient")
-    return patient
-
-
-async def _resolve_folder(
-    db: AsyncSession, user: User, folder_id: uuid.UUID | None
-) -> Folder | None:
-    if folder_id is None:
-        return None
-    folder = (await db.execute(select(Folder).where(Folder.id == folder_id))).scalar_one_or_none()
-    if folder is None or not (user.is_admin or folder.owner_subject_id == user.subject_id):
-        raise HTTPException(status_code=404, detail="folder not found")
-    return folder
+# ``_resolve_owner_subject`` / ``_resolve_patient`` / ``_resolve_folder`` were
+# lifted to ``api/_upload_common`` (imported above as the same private names)
+# so the resumable session endpoints share one permission gate. Behaviour is
+# unchanged.
 
 
 def _unpack_zip(data: bytes, base_path: str, depth: int, staging: _Staging) -> None:

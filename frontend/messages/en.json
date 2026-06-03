@@ -1866,6 +1866,7 @@
     "openStudy": "Open study",
     "uploadFailed404": "Bulk upload endpoint not available on this server.",
     "uploadFailedHttp": "Upload failed (HTTP {status})",
+    "uploadFailedQuota": "Storage quota full: {used} GiB of {quota} GiB used. The file size is fine — free up space (delete unused uploads) or raise the storage limit in admin settings.",
     "uploadFailedUnknown": "Upload failed — unexpected error",
     "uploadDisabledNoPatient": "Pick a destination patient to enable upload.",
     "filterTitle": "Keep only:",
