@@ -1037,6 +1037,18 @@ async def enqueue_embed_series(
     if not await can(db, user=user, action=READ_PIXELS, study=study):
         raise HTTPException(status_code=404, detail="series not found")
 
+    # Non-image series (SR / PR / SEG, ...) cannot be embedded by BiomedCLIP —
+    # skip without enqueuing rather than handing the worker a job that can
+    # only no-op. The MCP ``embed_series`` tool calls this endpoint, so this
+    # also keeps the agent path from churning. Source: services.embeddable.
+    if not is_embeddable_modality(_series.modality):
+        return {
+            "status": "skipped",
+            "reason": "non_image_modality",
+            "series_id": str(series_id),
+            "modality": _series.modality,
+        }
+
     settings = get_settings()
     redis = await create_pool(redis_settings(settings.redis_url))
     await redis.enqueue_job("embed_series", str(series_id))

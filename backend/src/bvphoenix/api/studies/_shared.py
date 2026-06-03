@@ -67,6 +67,7 @@ from bvphoenix.services.dicom_documents import (
     UnsupportedDocumentError,
     read_dicom_document,
 )
+from bvphoenix.services.embeddable import is_embeddable_modality
 from bvphoenix.services.permissions import (
     DOWNLOAD_DICOM,
     READ_METADATA,
@@ -773,6 +774,7 @@ __all__ = [
     "get_settings",
     "gzip",
     "io",
+    "is_embeddable_modality",
     "is_image_sop_class",
     "optional_user",
     "pack_low_res",

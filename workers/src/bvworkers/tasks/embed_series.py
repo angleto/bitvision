@@ -20,6 +20,11 @@ import uuid
 import numpy as np
 import pydicom
 from botocore.client import Config
+from bvphoenix.services.embeddable import (
+    SeriesNotEmbeddable,
+    is_embeddable_modality,
+    is_embeddable_sop_class,
+)
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
 
@@ -49,7 +54,7 @@ def _ensure_model():
 
     import open_clip
 
-    model, preprocess_train, preprocess_val = open_clip.create_model_and_transforms(MODEL_HUB_ID)
+    model, _preprocess_train, preprocess_val = open_clip.create_model_and_transforms(MODEL_HUB_ID)
     _tokenizer = open_clip.get_tokenizer(MODEL_HUB_ID)
     model.eval()
     _model = model
@@ -73,7 +78,7 @@ def _dicom_to_pil(dcm_bytes: bytes):
 
     ds = pydicom.dcmread(io.BytesIO(dcm_bytes))
     if "PixelData" not in ds:
-        raise ValueError("no pixel data")
+        raise SeriesNotEmbeddable("no_pixel_data")
 
     arr = np.asarray(ds.pixel_array)
 
@@ -81,14 +86,15 @@ def _dicom_to_pil(dcm_bytes: bytes):
     # series — 4D (frames,H,W,C) or 3D (frames,H,W) grayscale — collapse to a
     # representative middle frame; stray singleton axes are squeezed. Anything
     # that still isn't a 2D / HxWx3 image (e.g. a degenerate (1,1,N) buffer
-    # that is not a displayable image) raises a clean ValueError so the worker
-    # logs a skip instead of crashing on PIL's cryptic "Cannot handle this
-    # data type" TypeError.
+    # that is not a displayable image — a SEG label map is the canonical case)
+    # is a terminal skip, NOT a failure: raising SeriesNotEmbeddable lets the
+    # worker return a ``skipped`` status instead of crashing on PIL's cryptic
+    # "Cannot handle this data type" TypeError and triggering arq retries.
     if arr.ndim == 4 or (arr.ndim == 3 and arr.shape[-1] not in (3, 4)):
         arr = arr[arr.shape[0] // 2]
     arr = np.squeeze(arr)
     if not (arr.ndim == 2 or (arr.ndim == 3 and arr.shape[-1] in (3, 4))):
-        raise ValueError(f"unsupported pixel layout {arr.shape}")
+        raise SeriesNotEmbeddable("unsupported_pixel_layout")
 
     arr = arr.astype(np.float32)
     slope = float(getattr(ds, "RescaleSlope", 1.0) or 1.0)
@@ -274,11 +280,26 @@ async def embed_series(ctx: dict, series_id: str) -> dict:  # type: ignore[type-
             if existing.first():
                 return {"status": "already_embedded", "series_id": series_id}
 
+            # Whole-series modality gate. A non-image series (SR, PR, SEG,
+            # ...) is a TERMINAL SKIP, not a failure — returning a status
+            # (below) keeps arq from retrying it and keeps embedding_errors
+            # clean. This is the worker-side backstop for series that slipped
+            # past the enqueue-time modality filter (null / mislabeled
+            # modality). See bvphoenix.services.embeddable.
+            modality = (
+                await db.execute(
+                    text("SELECT modality FROM series WHERE id = :sid"),
+                    {"sid": sid},
+                )
+            ).scalar_one_or_none()
+            if not is_embeddable_modality(modality):
+                raise SeriesNotEmbeddable(f"non_image_modality:{modality}")
+
             # Get instances ordered by instance number
             result = await db.execute(
                 text(
-                    "SELECT s3_bucket, s3_key FROM instances WHERE series_id = :sid "
-                    "ORDER BY instance_number ASC NULLS LAST"
+                    "SELECT s3_bucket, s3_key, sop_class_uid FROM instances "
+                    "WHERE series_id = :sid ORDER BY instance_number ASC NULLS LAST"
                 ),
                 {"sid": sid},
             )
@@ -286,10 +307,23 @@ async def embed_series(ctx: dict, series_id: str) -> dict:  # type: ignore[type-
             if not instances:
                 return {"status": "no_instances", "series_id": series_id}
 
+            # Keep only instances that can carry a diagnostic image. An
+            # embeddable-modality series can still co-store non-image SOP
+            # objects (an SR or presentation state); picking the middle of
+            # ALL instances could land on one of those, so filter to image
+            # instances before the slice picker sees them. No image instance
+            # at all is a terminal skip.
+            image_instances = [
+                (bucket, key) for (bucket, key, scu) in instances if is_embeddable_sop_class(scu)
+            ]
+            if not image_instances:
+                raise SeriesNotEmbeddable("no_image_instances")
+
             # Pick the slice(s) to embed: middle slice by default, or N
             # evenly-spaced slices mean-pooled when BVP_EMBED_SLICES > 1.
             picks = [
-                instances[i] for i in _select_slice_indices(len(instances), _embed_slice_count())
+                image_instances[i]
+                for i in _select_slice_indices(len(image_instances), _embed_slice_count())
             ]
 
             # Download DICOM(s), decode, compute + mean-pool embedding (CPU-bound)
@@ -323,6 +357,12 @@ async def embed_series(ctx: dict, series_id: str) -> dict:  # type: ignore[type-
             "model_id": MODEL_ID,
             "dim": len(vector),
         }
+    except SeriesNotEmbeddable as exc:
+        # Terminal skip — NOT a failure. No embedding_errors row and no
+        # re-raise, so arq marks the job done and never retries. Covers
+        # non-image series (SR / PR / SEG), no-pixel objects, and odd pixel
+        # layouts that slipped past the enqueue-time modality filter.
+        return {"status": "skipped", "reason": exc.reason, "series_id": series_id}
     except Exception as exc:
         # Log for the dashboard, then re-raise so arq sees the failure
         # and applies its retry policy.

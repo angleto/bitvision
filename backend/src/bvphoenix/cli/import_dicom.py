@@ -24,7 +24,7 @@ from pathlib import Path
 import click
 import pydicom
 from pydicom.errors import InvalidDicomError
-from sqlalchemy import create_engine, select
+from sqlalchemy import create_engine, select, text
 from sqlalchemy.orm import Session
 
 from bvphoenix.config import get_settings
@@ -447,18 +447,23 @@ def main(
     if dry_run:
         click.echo("(dry-run: no changes written)")
     elif report.series_ids:
-        _enqueue_pack_jobs(settings.redis_url, report.series_ids)
+        _enqueue_pack_jobs(settings, report.series_ids)
 
 
-def _enqueue_pack_jobs(redis_url: str, series_ids: list[str]) -> None:
+def _enqueue_pack_jobs(settings, series_ids: list[str]) -> None:
     """Enqueue volume pre-packing AND image-embedding jobs per series.
 
-    ``pack_volume`` builds the cached volume; ``embed_series`` builds the
-    BiomedCLIP image vector so the study is reachable by similarity
-    search (``/api/similar-to``) right after import. Without the embed
-    enqueue, imported studies have no image vectors and similarity
-    search returns nothing. ``embed_series`` is idempotent (skips when
-    the vector already exists), so re-imports stay cheap.
+    ``pack_volume`` builds the cached volume for every series; ``embed_series``
+    builds the BiomedCLIP image vector so the study is reachable by similarity
+    search (``/api/similar-to``) right after import. Without the embed enqueue,
+    imported studies have no image vectors and similarity search returns
+    nothing. ``embed_series`` is idempotent (skips when the vector already
+    exists), so re-imports stay cheap.
+
+    Embedding is enqueued only for diagnostic-image modalities. Non-image
+    series (SR / PR / SEG) cannot be embedded and would only churn the
+    worker + pollute ``embedding_errors``; their modality is looked up here
+    and skipped. Single source of truth: bvphoenix.services.embeddable.
     """
     try:
         import asyncio
@@ -466,16 +471,28 @@ def _enqueue_pack_jobs(redis_url: str, series_ids: list[str]) -> None:
         from arq import create_pool
 
         from bvphoenix.services.arq_redis import redis_settings
+        from bvphoenix.services.embeddable import is_embeddable_modality
+
+        engine = create_engine(settings.database_url_sync, future=True)
+        with Session(engine) as session:
+            rows = session.execute(
+                text("SELECT id::text, modality FROM series WHERE id::text = ANY(:ids)"),
+                {"ids": list(series_ids)},
+            ).all()
+        embeddable_ids = [rid for (rid, mod) in rows if is_embeddable_modality(mod)]
 
         async def _enqueue() -> None:
-            redis = await create_pool(redis_settings(redis_url))
+            redis = await create_pool(redis_settings(settings.redis_url))
             for sid in series_ids:
                 await redis.enqueue_job("pack_volume", sid)
+            for sid in embeddable_ids:
                 await redis.enqueue_job("embed_series", sid)
             await redis.close()
 
         asyncio.run(_enqueue())
-        click.echo(f"enqueued {len(series_ids)} volume pack + {len(series_ids)} embedding job(s)")
+        click.echo(
+            f"enqueued {len(series_ids)} volume pack + {len(embeddable_ids)} embedding job(s)"
+        )
     except Exception as exc:
         click.echo(f"warning: could not enqueue pack/embed jobs: {exc}", err=True)
 
