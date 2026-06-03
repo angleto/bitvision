@@ -355,16 +355,16 @@ async def find_similar_studies(
         ).scalar_one_or_none()
 
     if source_emb is None:
-        # Distinguish two cases that both leave ``source_emb`` empty:
-        #
-        # * The target series/study EXISTS but has no vector yet (indexing
-        #   is async; SR-only series never get pixels). Return ``[]`` —
-        #   "no similar cases yet" — because the FE renders ``[]`` and a
-        #   404 identically and the 404 spammed the viewer console.
-        # * The target id does not resolve to any series or study at all.
-        #   That is a genuine 404 (a typo'd / deleted id), not "no
-        #   results", and callers — agents especially — need the
-        #   distinction.
+        # Three distinct outcomes, NOT collapsed (the old code returned [] for
+        # both not-indexed and genuine-404 to silence viewer-console 404s, which
+        # made the FE NotIndexedCard branch dead and showed the misleading "no
+        # similar cases / remove the modality filter" hint for the common
+        # not-yet-indexed case):
+        #   * id resolves to nothing -> genuine 404 (typo'd / deleted id).
+        #   * id exists but has no image vector yet (async indexing, or a
+        #     non-pixel SR/SEG series) -> 422 with a structured code so the FE
+        #     renders a "not indexed yet" card and the viewer panel stays quiet.
+        #   * indexed but zero neighbours -> handled below as 200 + [].
         target_exists = (
             await db.execute(
                 select(
@@ -375,7 +375,13 @@ async def find_similar_studies(
         ).scalar()
         if not target_exists:
             raise HTTPException(status_code=404, detail="not found")
-        return []
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "code": "study_not_indexed",
+                "message": "This study is not yet indexed for visual search.",
+            },
+        )
 
     # Check the user can see the source study
     source_series = (
