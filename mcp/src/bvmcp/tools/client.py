@@ -135,6 +135,24 @@ async def api_patch(
         return resp.json(), dict(resp.headers)
 
 
+async def api_patch_bytes(path: str, body: bytes, *, upload_offset: int) -> dict | list:
+    """PATCH raw bytes with an ``Upload-Offset`` header (resumable upload chunk).
+
+    The backend reads the raw request body + Upload-Offset (no multipart). Used
+    by the MCP upload-session chunk tool so an agent can stream a (small)
+    document end-to-end without the GUI. Returns the FileStateOut JSON.
+    """
+    settings = get_settings()
+    url = f"{settings.backend_base_url}{path}"
+    headers = _get_headers()
+    headers["content-type"] = "application/octet-stream"
+    headers["Upload-Offset"] = str(upload_offset)
+    async with httpx.AsyncClient(timeout=60.0) as client:
+        resp = await client.patch(url, headers=headers, content=body)
+        resp.raise_for_status()
+        return resp.json()
+
+
 async def api_post_with_headers(
     path: str,
     json: dict | None = None,

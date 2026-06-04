@@ -14,6 +14,7 @@ from bvworkers.tasks.chunk_and_embed import (
     chunk_and_embed_summary,
 )
 from bvworkers.tasks.cleanup_jobs import cleanup_expired_jobs
+from bvworkers.tasks.cleanup_upload_sessions import cleanup_upload_sessions
 from bvworkers.tasks.deidentify_reindex import deidentify_reindex_study
 from bvworkers.tasks.dispatch_notification import (
     dispatch_notification,
@@ -66,6 +67,7 @@ FUNCTIONS = [
     generate_summary,
     autotag_target,
     cleanup_expired_jobs,
+    cleanup_upload_sessions,
     deidentify_reindex_study,
     segment_auto,
     medsam_predict_2d,
