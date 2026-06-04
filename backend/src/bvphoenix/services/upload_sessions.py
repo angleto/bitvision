@@ -36,7 +36,7 @@ from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from fastapi import HTTPException
-from sqlalchemy import func, select
+from sqlalchemy import delete, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from bvphoenix.db.models import Folder, Job, Patient, Subject, UploadSession, UploadSessionFile
@@ -426,3 +426,42 @@ async def abort_session(
                 pass
     session.status = "aborted"
     await db.commit()
+
+
+# --- GC: stale-session sweep (worker cron, DESIGN.md §11.6) -----------------
+# A non-committed session past STALE_WINDOW on updated_at (or past expires_at)
+# is abandoned. append_chunk mutates the session row (received_total_bytes /
+# status), refreshing updated_at, so an actively-progressing upload never looks
+# stale — only genuinely idle sessions are reaped. 1h is generous (a user may
+# pause mid-upload) vs the jobs reaper's 5 min.
+STALE_WINDOW = timedelta(hours=1)
+
+
+async def stale_sessions(db: AsyncSession, *, batch_size: int = 200) -> list[UploadSession]:
+    """Non-committed sessions that are abandoned (idle past STALE_WINDOW or past
+    their hard expires_at deadline). Thresholds are computed in Python and
+    bound, avoiding SQL interval rendering. ix_upload_sessions_expires covers
+    the scan."""
+    now = datetime.now(UTC)
+    stale_before = now - STALE_WINDOW
+    rows = (
+        await db.execute(
+            select(UploadSession)
+            .where(
+                UploadSession.status.in_(tuple(UPLOAD_SESSION_ACTIVE_STATUSES)),
+                or_(UploadSession.expires_at < now, UploadSession.updated_at < stale_before),
+            )
+            .order_by(UploadSession.expires_at.asc())
+            .limit(batch_size)
+        )
+    ).scalars()
+    return list(rows)
+
+
+async def delete_sessions(db: AsyncSession, session_ids: list[uuid.UUID]) -> int:
+    """Bulk-delete session rows by id (ON DELETE CASCADE drops their files).
+    Call AFTER abort_session has released the S3 multipart uploads."""
+    if not session_ids:
+        return 0
+    res = await db.execute(delete(UploadSession).where(UploadSession.id.in_(session_ids)))
+    return int(res.rowcount or 0)

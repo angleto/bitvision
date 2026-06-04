@@ -879,3 +879,68 @@ operation never moves the user closer to the limit.
   retrofits in 11.9 step 5 are opportunistic; ops that already
   satisfy the contract via their own state may stay as-is, but new
   long ops MUST use this abstraction.
+
+### 11.11 Resumable uploads (chunked session API)
+
+The legacy ``POST /api/upload/bulk`` staged the entire multipart body to
+S3 inside a single request: a disconnect anywhere before the ``202``
+orphaned the staged bytes and lost the upload (the "don't close the
+page" window). Uploads are now a durable, resumable **session** whose
+handle exists from byte zero.
+
+**Lifecycle** (``upload_sessions`` + ``upload_session_files``, migration
+0017):
+
+1. ``POST /api/upload/sessions`` — declare the manifest (per file:
+   filename, relative_path, size, optional sha256) + tier / patient /
+   folder / ISO flags. Creates the row in status ``awaiting_bytes`` and
+   returns the session id, the **server-authoritative** ``chunk_size``
+   (8 MiB), and per-file ``received_offset`` (0 fresh). No bytes yet.
+2. ``PATCH /api/upload/sessions/{sid}/files/{idx}`` — one chunk per call,
+   carrying ``Upload-Offset`` + the raw bytes. Each chunk is one S3
+   multipart upload-part (PartNumber = offset / chunk_size + 1); every
+   chunk except a file's last must be exactly ``chunk_size``. Idempotent
+   on the offset: a re-sent already-acked chunk is a no-op; a gap returns
+   ``409 {code:"offset_mismatch", expected_offset}`` so the client
+   re-syncs. When ``received_offset == declared_size`` the multipart
+   upload is completed and the file flips to ``staged``.
+3. ``POST /api/upload/sessions/{sid}/commit`` — once every file is staged,
+   builds the SAME ``canonical_input`` manifest the legacy endpoint built
+   (pointing at the staged keys) and hands off to the UNCHANGED
+   ``jobs_service.enqueue_or_get`` + ``ingest_bulk_files`` worker (§11).
+   Idempotent: a re-commit returns the already-linked job.
+4. ``GET /api/upload/sessions/{sid}`` — read live per-file offsets (resume).
+   ``DELETE`` — abort (release multipart + delete staged).
+
+**Storage isolation**: all bytes flow THROUGH the backend (no presigned
+PUT); the client / MCP only ever see the session id + offsets, never an
+S3 key or bucket.
+
+**Frontend** (``UniversalUploader`` + ``uploadSessionStorage``): the
+session id + file manifest are persisted to ``localStorage`` BEFORE the
+first chunk. Progress is byte-based (sum of ``received_offset`` /
+declared total), so a resumed upload starts at its true fill. On reopen
+after a crash the File handles are gone, so the user re-selects the same
+files (matched to slots by filename + relative_path + size) and only the
+un-acked tail re-uploads. Post-commit, the existing ``useJob`` polling
+(jobsStorage) takes over unchanged.
+
+**GC** (``cleanup_upload_sessions`` cron, ~hourly): non-committed sessions
+idle past ``STALE_WINDOW`` (1h on ``updated_at`` — ``append_chunk`` bumps
+it, so active uploads never look stale) or past ``expires_at`` are
+swept: each open multipart upload is aborted + staged objects deleted
+(``abort_session``), then the rows dropped (CASCADE). This releases
+incomplete parts in minutes rather than waiting for the bucket's
+``AbortIncompleteMultipartUpload`` lifecycle rule (the belt-and-suspenders
+backstop).
+
+**MCP parity** (GUI-superset rule): ``create_upload_session`` /
+``upload_session_chunk`` (base64 body) / ``get_upload_session`` /
+``commit_upload_session`` / ``abort_upload_session`` under the
+``documents:ingest`` scope. The base64 chunk tool is for small documents;
+multi-GB imaging belongs in the web uploader / ``bvphoenix-import`` CLI.
+
+ISO members are expanded client-side before the manifest is built; ZIP
+server-side unpack-at-commit is a tracked follow-up (Phase 1 stages plain
+files; the legacy ``/api/upload/bulk`` remains for ZIP-heavy uploads
+during the transition).

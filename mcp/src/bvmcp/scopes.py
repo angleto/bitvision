@@ -359,6 +359,13 @@ TOOL_SCOPE: dict[str, str] = {
     "update_report_content": "reports:write",
     # Document operations:
     "ingest_document": "documents:ingest",
+    # Resumable upload sessions (DESIGN.md §11.6) — all under documents:ingest;
+    # get_upload_session is read-only but there is no separate upload-read scope.
+    "create_upload_session": "documents:ingest",
+    "upload_session_chunk": "documents:ingest",
+    "get_upload_session": "documents:ingest",
+    "commit_upload_session": "documents:ingest",
+    "abort_upload_session": "documents:ingest",
     "merge_aliases": "documents:merge",
     "split_alias": "documents:merge",
     "download_source_document": "documents:download",

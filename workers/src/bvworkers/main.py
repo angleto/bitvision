@@ -88,6 +88,18 @@ CRON_JOBS = [
         minute={3, 8, 13, 18, 23, 28, 33, 38, 43, 48, 53, 58},
         run_at_startup=False,
     ),
+    # Resumable-upload Phase 3 GC (DESIGN.md §11.6): reap abandoned
+    # upload_sessions — abort their S3 multipart uploads + delete staged
+    # objects, then drop the rows. Offset by 1 minute from the other crons so
+    # they don't lock the same DB connection at once. The 1-hour STALE_WINDOW
+    # (vs the jobs reaper's 5 min) is deliberate: a user may legitimately pause
+    # mid-upload for minutes; append_chunk bumps updated_at so an actively
+    # progressing upload is never reaped.
+    cron(
+        "bvworkers.tasks.cleanup_upload_sessions.cleanup_upload_sessions",
+        minute={1, 6, 11, 16, 21, 26, 31, 36, 41, 46, 51, 56},
+        run_at_startup=False,
+    ),
 ]
 
 

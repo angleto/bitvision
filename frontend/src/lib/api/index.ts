@@ -2651,6 +2651,99 @@ export const bulkUploadApi = {
   },
 };
 
+// -------- resumable upload sessions (DESIGN.md §11.6) --------
+// The recoverable replacement for bulkUploadApi.upload: a durable session is
+// created BEFORE any bytes, each file is PATCHed in fixed chunks carrying an
+// Upload-Offset, and a disconnect resumes from the server-acked offset. The
+// legacy bulkUploadApi above is kept as a fallback during the transition. All
+// bytes flow through the backend (storage isolation) — the client only ever
+// sees the session id + per-file offsets, never an S3 key.
+
+export interface UploadFileDecl {
+  filename: string;
+  relative_path: string;
+  size: number;
+  sha256?: string;
+}
+
+export interface SessionFileState {
+  file_index: number;
+  filename: string;
+  relative_path: string | null;
+  declared_size: number;
+  received_offset: number;
+  status: string;
+}
+
+export interface UploadSession {
+  id: string;
+  status: string;
+  chunk_size: number;
+  declared_total_bytes: number;
+  received_total_bytes: number;
+  job_id: string | null;
+  files: SessionFileState[];
+}
+
+export interface CreateSessionInput {
+  files: UploadFileDecl[];
+  tier?: ContributionTier;
+  patientId?: string | null;
+  folderId?: string | null;
+  keepIsoArchive?: boolean;
+  wrapIsoInFolder?: boolean;
+  extractIsoContents?: boolean;
+}
+
+export const uploadSessionApi = {
+  create(input: CreateSessionInput): Promise<UploadSession> {
+    return request<UploadSession>("/api/upload/sessions", {
+      method: "POST",
+      json: {
+        files: input.files,
+        tier: input.tier ?? "t1",
+        patient_id: input.patientId ?? null,
+        folder_id: input.folderId ?? null,
+        keep_iso_archive: input.keepIsoArchive ?? true,
+        wrap_iso_in_folder: input.wrapIsoInFolder ?? true,
+        extract_iso_contents: input.extractIsoContents ?? true,
+      },
+    });
+  },
+  get(sessionId: string): Promise<UploadSession> {
+    return request<UploadSession>(`/api/upload/sessions/${sessionId}`);
+  },
+  /**
+   * PATCH one chunk at ``offset``. The raw bytes are the body; the server
+   * reads ``Upload-Offset`` + the raw body (no multipart). On a gap the
+   * server throws ``ApiError(409, {code:"offset_mismatch", expected_offset})``
+   * and the caller re-slices from ``expected_offset``.
+   */
+  putChunk(
+    sessionId: string,
+    fileIndex: number,
+    offset: number,
+    chunk: Blob,
+  ): Promise<SessionFileState> {
+    const headers = new Headers();
+    headers.set("content-type", "application/octet-stream");
+    headers.set("Upload-Offset", String(offset));
+    return request<SessionFileState>(`/api/upload/sessions/${sessionId}/files/${fileIndex}`, {
+      method: "PATCH",
+      body: chunk,
+      headers,
+    });
+  },
+  commit(sessionId: string): Promise<import("../jobs").JobOut> {
+    return request<import("../jobs").JobOut>(`/api/upload/sessions/${sessionId}/commit`, {
+      method: "POST",
+    });
+  },
+  abort(sessionId: string): Promise<void> {
+    return request<void>(`/api/upload/sessions/${sessionId}`, { method: "DELETE" });
+  },
+};
+
 // -------- volume binary parse --------
 
 export interface PackedVolumeHeader {

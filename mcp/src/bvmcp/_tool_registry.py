@@ -31,6 +31,7 @@ from bvmcp.tools import clinical_notes as clinical_notes_tools
 from bvmcp.tools import document_reads as document_reads_tools
 from bvmcp.tools import document_writes as document_writes_tools
 from bvmcp.tools import documents as documents_tools
+from bvmcp.tools import documents_upload as documents_upload_tools
 from bvmcp.tools import entities as entities_tools
 from bvmcp.tools import external_identifiers as external_identifiers_tools
 from bvmcp.tools import folders as folders_tools
@@ -82,6 +83,7 @@ TOOL_MODULES = (
     patient_tasks_tools,
     notifications_tools,
     documents_tools,
+    documents_upload_tools,
     external_identifiers_tools,
     provenance_tools,
     report_contents_tools,

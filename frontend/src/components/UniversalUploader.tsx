@@ -18,13 +18,15 @@ import {
   type Patient,
   type SuggestedRoute,
   type TreeNode,
-  bulkUploadApi,
+  type UploadSession,
   patientTreeApi,
   patientsApi,
   storageQuotaExceeded,
+  uploadSessionApi,
 } from "@/lib/api";
 import { extractIsoFiles, isLikelyIsoFile } from "@/lib/iso9660";
 import { JOB_TERMINAL_STATUSES, jobsApi, jobsStorage } from "@/lib/jobs";
+import { type PersistedUploadSession, uploadSessionStorage } from "@/lib/uploadSessionStorage";
 import { entryLabel, useDocumentCatalog } from "@/lib/useDocumentCatalog";
 import { useJob } from "@/lib/useJob";
 
@@ -269,31 +271,25 @@ interface Entry {
   route: SuggestedRoute;
 }
 
-// Upload lifecycle:
-//   idle       — nothing in flight; user picks files / patient.
-//   uploading  — XHR is streaming bytes to /api/upload/bulk; progress
-//                advances 0→100 via xhr.upload.onprogress.
-//   staging    — XHR upload finished (browser-side bytes are out) but
-//                we have not yet received the ``202 + JobOut``. The
-//                backend is now staging multipart bytes to S3 inside
-//                the request handler — for a multi-GiB ISO this can
-//                hold the connection 5+ minutes. Without this state,
-//                the user stares at "Uploading… 100%" with no signal
-//                that the server is the one busy now and it is
-//                NOT safe to close the tab yet (closing the tab here
-//                aborts the in-flight POST and loses the upload).
-//   polling    — the multipart upload returned a 202 + JobOut; the
-//                server has staged the bytes to S3 and the worker is
-//                running the actual ingest. The ``useJob`` hook
-//                polls /api/jobs/{id} for stage + progress until
-//                terminal. This phase is *resumable*: the job id
-//                lives in localStorage (jobsStorage), so closing the
-//                tab and coming back later still surfaces the job.
-//   done       — worker reported succeeded; render the summary
-//                lifted from ``job.result``.
-//   error      — multipart 4xx/5xx, network drop, worker crash, or
-//                user-requested cancel.
-type Phase = "idle" | "uploading" | "staging" | "polling" | "done" | "error";
+// Upload lifecycle (resumable session API — DESIGN.md §11.6):
+//   idle       — nothing in flight; user picks files / patient. If a
+//                pre-commit session was persisted before a crash, a resume
+//                prompt is shown here (``resumePrompt``); the user re-selects
+//                the same files and only the un-acked tail re-uploads.
+//   uploading  — chunks are being PATCHed to the upload session; progress is
+//                byte-based (sum of server-acked offsets / declared total).
+//                There is NO non-resumable window: ``session_id`` is persisted
+//                to localStorage before the first chunk, so closing the tab /
+//                a network drop / a crash all resume from the last acked byte.
+//   polling    — commit returned a 202 + JobOut; the worker runs the actual
+//                ingest. The ``useJob`` hook polls /api/jobs/{id} until
+//                terminal. Resumable: the job id lives in localStorage
+//                (jobsStorage), so reopening the tab still surfaces the job.
+//   done       — worker reported succeeded; render the summary from job.result.
+//   error      — chunk/commit 4xx/5xx, network exhaustion, worker crash, or
+//                user-requested cancel. The persisted session is kept so the
+//                user can still resume.
+type Phase = "idle" | "uploading" | "polling" | "done" | "error";
 
 const BULK_UPLOAD_JOB_KIND = "bulk_upload";
 
@@ -328,6 +324,12 @@ export default function UniversalUploader({ onComplete, patientId, targetFolderI
   const [entries, setEntries] = useState<Entry[]>([]);
   const [phase, setPhase] = useState<Phase>("idle");
   const [progress, setProgress] = useState(0);
+  // Set on mount when a pre-commit session was persisted before an interrupt;
+  // drives the "re-select files to resume" prompt in the idle phase.
+  const [resumePrompt, setResumePrompt] = useState<{
+    session: UploadSession;
+    persisted: PersistedUploadSession;
+  } | null>(null);
   const [dragOver, setDragOver] = useState(false);
   const [err, setErr] = useState<string | null>(null);
   const [summary, setSummary] = useState<BulkUploadSummary | null>(null);
@@ -530,76 +532,207 @@ export default function UniversalUploader({ onComplete, patientId, targetFolderI
     if (jobId) jobsStorage.remove(jobId);
     setJobId(null);
     setCancelling(false);
+    uploadSessionStorage.clear();
+    setResumePrompt(null);
   };
 
+  // Surface an upload error consistently (storage-quota 413 vs 404 vs generic).
+  const setUploadError = (e: unknown) => {
+    if (e instanceof ApiError) {
+      const quota = storageQuotaExceeded(e);
+      if (quota) {
+        // A 413 here is a STORAGE-QUOTA cap, not an oversized file — the
+        // generic "Payload too large" title misleads. Show used/quota.
+        const gib = (b: number) => (b / 1024 ** 3).toFixed(2);
+        setErr(
+          t("uploadFailedQuota", { used: gib(quota.usedBytes), quota: gib(quota.quotaBytes) }),
+        );
+      } else {
+        setErr(
+          e.status === 404
+            ? t("uploadFailed404")
+            : e.message || t("uploadFailedHttp", { status: e.status }),
+        );
+      }
+    } else {
+      setErr(e instanceof Error ? e.message : t("uploadFailedUnknown"));
+    }
+  };
+
+  // Drive every file of a session to fully ``staged`` by PATCHing fixed
+  // ``chunk_size`` chunks from each file's server-authoritative
+  // ``received_offset``. Resumable + idempotent: a 409 offset_mismatch
+  // re-syncs to the server's expected offset, a network/5xx blip retries the
+  // same offset with exponential backoff, and already-staged files (offset ==
+  // declared_size, or zero-byte) are skipped. Progress is byte-based (sum of
+  // received_offset / declared_total) so a resumed upload starts at its true
+  // fill instead of 0%. Reused by both a fresh upload and a resume.
+  const stageFiles = async (session: UploadSession, indexToFile: Map<number, File>) => {
+    const CHUNK = session.chunk_size;
+    const MAX_RETRIES = 6;
+    const total = Math.max(1, session.declared_total_bytes);
+    const acked = new Map<number, number>();
+    for (const f of session.files) acked.set(f.file_index, f.received_offset);
+    let acknowledged = [...acked.values()].reduce((a, b) => a + b, 0);
+    const refresh = () =>
+      setProgress(Math.min(100, Math.max(0, Math.round((acknowledged / total) * 100))));
+    refresh();
+
+    for (const sf of session.files) {
+      if (sf.declared_size === 0) continue; // zero-byte file: pre-staged server-side
+      const file = indexToFile.get(sf.file_index);
+      if (!file) throw new Error(`missing file for slot ${sf.file_index}`);
+      let offset = acked.get(sf.file_index) ?? 0;
+      while (offset < sf.declared_size) {
+        const end = Math.min(offset + CHUNK, sf.declared_size);
+        const blob = file.slice(offset, end);
+        let attempt = 0;
+        for (;;) {
+          try {
+            const state = await uploadSessionApi.putChunk(session.id, sf.file_index, offset, blob);
+            acknowledged += state.received_offset - (acked.get(sf.file_index) ?? 0);
+            acked.set(sf.file_index, state.received_offset);
+            refresh();
+            offset = state.received_offset;
+            break;
+          } catch (e) {
+            if (e instanceof ApiError && e.status === 409) {
+              // Gap/duplicate: re-sync to the server's authoritative offset
+              // and re-slice from there on the next while-iteration.
+              const expected =
+                (e.detail as { expected_offset?: number })?.expected_offset ?? offset;
+              acknowledged += expected - (acked.get(sf.file_index) ?? 0);
+              acked.set(sf.file_index, expected);
+              refresh();
+              offset = expected;
+              break;
+            }
+            // Fatal 4xx (auth / quota / validation) — give up. Retry only on
+            // network errors, 5xx, 408, 429.
+            const retriable =
+              !(e instanceof ApiError) ||
+              e.status >= 500 ||
+              e.status === 408 ||
+              e.status === 429 ||
+              e.status === 0;
+            if (!retriable) throw e;
+            attempt += 1;
+            if (attempt > MAX_RETRIES) throw e;
+            const backoff = Math.min(1000 * 2 ** (attempt - 1), 15000) + Math.random() * 250;
+            await new Promise((r) => setTimeout(r, backoff));
+          }
+        }
+      }
+    }
+  };
+
+  // Fresh upload: create a durable session (handle before byte 0), persist it
+  // for crash-resume, push every file in chunks, then commit -> the existing
+  // worker job + polling. The persisted session is kept on failure so the user
+  // can resume; it is cleared only on commit or explicit discard.
   const upload = async () => {
     if (entries.length === 0) return;
     setPhase("uploading");
     setErr(null);
     setProgress(0);
     setSummary(null);
-
-    const files = entries.map((e) => e.file);
-    const relativePaths = entries.map((e) => e.relativePath);
-    // Forward every row as an override. We can't cheaply tell "user
-    // touched" from "still the default", and the server treats the field
-    // as advisory.
-    const overrides = entries.map((e) => ({ relative_path: e.relativePath, route: e.route }));
-
     try {
-      const job = await bulkUploadApi.upload({
-        files,
-        relativePaths,
-        patientId: effectivePatientId ?? null,
-        targetFolderId: effectiveFolderId ?? null,
+      const session = await uploadSessionApi.create({
+        files: entries.map((e) => ({
+          filename: e.file.name,
+          relative_path: e.relativePath,
+          size: e.file.size,
+        })),
         tier,
-        overrides,
+        patientId: effectivePatientId ?? null,
+        folderId: effectiveFolderId ?? null,
         keepIsoArchive,
         wrapIsoInFolder,
         extractIsoContents,
-        // Progress callback fires for every byte chunk pushed up. The
-        // multipart upload finishes at 100%; the server then returns
-        // 202+JobOut and we hand off to the polling phase below. For
-        // the staging-phase pivot at 100% see the comment on
-        // ``Phase.staging`` — large ISOs make the gap between 100%
-        // and the 202 several minutes long.
-        onProgress: (p) => {
-          setProgress(p);
-          if (p >= 100) {
-            setPhase((cur) => (cur === "uploading" ? "staging" : cur));
-          }
-        },
       });
-      // Hand off to the worker. Persist the id so a refresh between
-      // here and the first useJob fetch still surfaces the work.
+      // Persist BEFORE the first chunk so a tab close / crash / network drop is
+      // recoverable (no "don't close the page" window anymore).
+      uploadSessionStorage.set({
+        sessionId: session.id,
+        chunkSize: session.chunk_size,
+        declaredTotalBytes: session.declared_total_bytes,
+        patientId: effectivePatientId ?? null,
+        folderId: effectiveFolderId ?? null,
+        tier,
+        files: session.files.map((f) => ({
+          fileIndex: f.file_index,
+          filename: f.filename,
+          relativePath: f.relative_path ?? f.filename,
+          declaredSize: f.declared_size,
+        })),
+        createdAt: new Date().toISOString(),
+      });
+      // create() preserves the entries order, so file_index maps to entries[i].
+      const indexToFile = new Map<number, File>();
+      for (const f of session.files) {
+        const e = entries[f.file_index];
+        if (e) indexToFile.set(f.file_index, e.file);
+      }
+      await stageFiles(session, indexToFile);
+      const job = await uploadSessionApi.commit(session.id);
       jobsStorage.add({ id: job.id, kind: BULK_UPLOAD_JOB_KIND });
+      uploadSessionStorage.clear();
       setJobId(job.id);
       setPhase("polling");
     } catch (e) {
-      if (e instanceof ApiError) {
-        const quota = storageQuotaExceeded(e);
-        if (quota) {
-          // A 413 here is a STORAGE-QUOTA cap, not an oversized file — the
-          // generic "Payload too large" title misleads. Show used/quota +
-          // the real remedy.
-          const gib = (b: number) => (b / 1024 ** 3).toFixed(2);
-          setErr(
-            t("uploadFailedQuota", {
-              used: gib(quota.usedBytes),
-              quota: gib(quota.quotaBytes),
-            }),
-          );
-        } else {
-          setErr(
-            e.status === 404
-              ? t("uploadFailed404")
-              : e.message || t("uploadFailedHttp", { status: e.status }),
-          );
-        }
-      } else {
-        setErr(t("uploadFailedUnknown"));
-      }
+      setUploadError(e);
       setPhase("error");
+    }
+  };
+
+  // Resume an interrupted session after a tab reopen: the File handles were
+  // lost, so the user re-selects the same files; we match them to the
+  // persisted slots by (filename, relativePath, size), re-read live offsets,
+  // and stageFiles uploads only the un-acked tail before committing.
+  const resumeUpload = async () => {
+    const prompt = resumePrompt;
+    if (!prompt) return;
+    setErr(null);
+    const indexToFile = new Map<number, File>();
+    for (const pf of prompt.persisted.files) {
+      if (pf.declaredSize === 0) continue;
+      const match = entries.find(
+        (e) =>
+          e.file.name === pf.filename &&
+          e.relativePath === pf.relativePath &&
+          e.file.size === pf.declaredSize,
+      );
+      if (match) indexToFile.set(pf.fileIndex, match.file);
+    }
+    const needed = prompt.persisted.files.filter((f) => f.declaredSize > 0).length;
+    if (indexToFile.size < needed) {
+      setErr(t("uploadResumeMismatch", { matched: indexToFile.size, total: needed }));
+      return;
+    }
+    setPhase("uploading");
+    setSummary(null);
+    setResumePrompt(null);
+    try {
+      const session = await uploadSessionApi.get(prompt.persisted.sessionId);
+      await stageFiles(session, indexToFile);
+      const job = await uploadSessionApi.commit(session.id);
+      jobsStorage.add({ id: job.id, kind: BULK_UPLOAD_JOB_KIND });
+      uploadSessionStorage.clear();
+      setJobId(job.id);
+      setPhase("polling");
+    } catch (e) {
+      setUploadError(e);
+      setPhase("error");
+    }
+  };
+
+  // Discard an interrupted session (abort multipart + drop staged bytes).
+  const discardResume = () => {
+    const p = resumePrompt;
+    setResumePrompt(null);
+    if (p) {
+      uploadSessionApi.abort(p.persisted.sessionId).catch(() => {});
+      uploadSessionStorage.clear();
     }
   };
 
@@ -630,15 +763,40 @@ export default function UniversalUploader({ onComplete, patientId, targetFolderI
     }
   }, [job, onComplete, t]);
 
-  // On mount, resume polling if a bulk_upload Job is still tracked in
-  // localStorage from a previous session/tab.
-  // biome-ignore lint/correctness/useExhaustiveDependencies: mount-only resume; ``jobId`` is checked once and only used to skip when already polling.
+  // On mount, resume in priority order: (1) a committed bulk_upload Job still
+  // tracked (worker running) -> poll it; (2) else a pre-commit upload session
+  // persisted before a crash -> verify it server-side and offer a resume
+  // prompt (the File handles were lost on reload, so the user must re-select).
+  // biome-ignore lint/correctness/useExhaustiveDependencies: mount-only resume; state setters are stable and the snapshot is read once.
   useEffect(() => {
     if (jobId !== null) return;
     const tracked = jobsStorage.list().filter((j) => j.kind === BULK_UPLOAD_JOB_KIND);
-    if (tracked.length === 0) return;
-    setJobId(tracked[0].id);
-    setPhase("polling");
+    if (tracked.length > 0) {
+      setJobId(tracked[0].id);
+      setPhase("polling");
+      return;
+    }
+    const rec = uploadSessionStorage.get();
+    if (!rec) return;
+    let cancelled = false;
+    uploadSessionApi
+      .get(rec.sessionId)
+      .then((session) => {
+        if (cancelled) return;
+        if (["committed", "aborted", "expired"].includes(session.status)) {
+          // Already finished or reaped — nothing to resume.
+          uploadSessionStorage.clear();
+          return;
+        }
+        setResumePrompt({ session, persisted: rec });
+      })
+      .catch(() => {
+        // Session GET failed (gone / network) — leave no prompt; the user can
+        // just start a fresh upload. Keep the record for a later retry.
+      });
+    return () => {
+      cancelled = true;
+    };
   }, []);
 
   const cancelUpload = useCallback(async () => {
@@ -737,12 +895,37 @@ export default function UniversalUploader({ onComplete, patientId, targetFolderI
   const canUpload =
     entries.length > 0 &&
     phase !== "uploading" &&
-    phase !== "staging" &&
     phase !== "polling" &&
     Boolean(effectivePatientId);
 
   return (
     <div className="dicom-uploader">
+      {resumePrompt && phase === "idle" && (
+        <div
+          style={{
+            marginBottom: "0.75rem",
+            padding: "0.6rem 0.75rem",
+            background: "#eff6ff",
+            border: "1px solid #bcd9f7",
+            borderRadius: 6,
+          }}
+        >
+          <p style={{ margin: 0, fontWeight: 500 }}>
+            {t("resumeTitle", { n: resumePrompt.persisted.files.length })}
+          </p>
+          <p className="meta" style={{ margin: "0.3rem 0 0.5rem", fontSize: "0.8rem" }}>
+            {t("resumeBody")}
+          </p>
+          <div style={{ display: "flex", gap: "0.5rem" }}>
+            <button type="button" onClick={resumeUpload} disabled={entries.length === 0}>
+              {t("resumeButton")}
+            </button>
+            <button type="button" className="ghost" onClick={discardResume}>
+              {t("resumeDiscard")}
+            </button>
+          </div>
+        </div>
+      )}
       {!patientId && (
         <PatientFolderPicker
           patient={pickedPatient}
@@ -975,7 +1158,7 @@ export default function UniversalUploader({ onComplete, patientId, targetFolderI
                   <EntryRow
                     key={entry.id}
                     entry={entry}
-                    disabled={phase === "uploading" || phase === "staging" || phase === "polling"}
+                    disabled={phase === "uploading" || phase === "polling"}
                     onChangeRoute={(route) => updateRoute(entry.id, route)}
                     onRemove={() => removeEntry(entry.id)}
                   />
@@ -1014,7 +1197,7 @@ export default function UniversalUploader({ onComplete, patientId, targetFolderI
               <select
                 value={tier}
                 onChange={(e) => setTier(e.target.value as ContributionTier)}
-                disabled={phase === "uploading" || phase === "staging"}
+                disabled={phase === "uploading"}
                 style={{ padding: "0.25rem 0.5rem" }}
               >
                 <option value="t1">{t("tierT1")}</option>
@@ -1050,7 +1233,7 @@ export default function UniversalUploader({ onComplete, patientId, targetFolderI
                     type="checkbox"
                     checked={keepIsoArchive}
                     onChange={(e) => setKeepIsoArchive(e.target.checked)}
-                    disabled={phase === "uploading" || phase === "staging"}
+                    disabled={phase === "uploading"}
                   />
                   <span>{t("isoKeepArchive")}</span>
                 </label>
@@ -1059,7 +1242,7 @@ export default function UniversalUploader({ onComplete, patientId, targetFolderI
                     type="checkbox"
                     checked={wrapIsoInFolder}
                     onChange={(e) => setWrapIsoInFolder(e.target.checked)}
-                    disabled={phase === "uploading" || phase === "staging" || !extractIsoContents}
+                    disabled={phase === "uploading" || !extractIsoContents}
                   />
                   <span>{t("isoWrapInFolder")}</span>
                 </label>
@@ -1068,7 +1251,7 @@ export default function UniversalUploader({ onComplete, patientId, targetFolderI
                     type="checkbox"
                     checked={extractIsoContents}
                     onChange={(e) => setExtractIsoContents(e.target.checked)}
-                    disabled={phase === "uploading" || phase === "staging"}
+                    disabled={phase === "uploading"}
                   />
                   <span>{t("isoExtractContents")}</span>
                 </label>
@@ -1089,11 +1272,9 @@ export default function UniversalUploader({ onComplete, patientId, targetFolderI
             <button type="button" onClick={upload} disabled={!canUpload}>
               {phase === "uploading"
                 ? t("uploadingButton", { progress })
-                : phase === "staging"
-                  ? t("processingButton")
-                  : phase === "polling"
-                    ? t("pollingButton")
-                    : t("uploadButton", { n: entries.length, tier: tier.toUpperCase() })}
+                : phase === "polling"
+                  ? t("pollingButton")
+                  : t("uploadButton", { n: entries.length, tier: tier.toUpperCase() })}
             </button>
             {!effectivePatientId && (
               <p
@@ -1125,51 +1306,16 @@ export default function UniversalUploader({ onComplete, patientId, targetFolderI
                 role="progressbar"
                 tabIndex={-1}
               />
-            </div>
-          )}
-          {phase === "staging" && (
-            // Distinct from "polling": no Job exists yet, the multipart
-            // POST is still open. We use a warmer styling than polling
-            // to make clear this is the *one* phase the user must NOT
-            // interrupt — closing the tab here aborts the upload and
-            // throws away the bytes already sent.
-            <div
-              style={{
-                marginTop: "0.5rem",
-                padding: "0.6rem 0.75rem",
-                background: "#fff7ed",
-                border: "1px solid #fdba74",
-                borderRadius: 6,
-                display: "flex",
-                flexDirection: "column",
-                gap: "0.5rem",
-              }}
-              // biome-ignore lint/a11y/useSemanticElements: aria-live status region; <output> would change form-related semantics.
-
-              role="status"
-              aria-live="polite"
-            >
-              <div style={{ display: "flex", alignItems: "center", gap: "0.6rem" }}>
-                <span
-                  aria-hidden
-                  style={{
-                    width: 14,
-                    height: 14,
-                    borderRadius: "50%",
-                    border: "2px solid #fdba74",
-                    borderTopColor: "#c2410c",
-                    animation: "bv-spin 0.8s linear infinite",
-                    display: "inline-block",
-                    flex: "0 0 auto",
-                  }}
-                />
-                <span style={{ fontSize: "0.9rem", fontWeight: 500 }}>{t("processingButton")}</span>
-              </div>
-              <p className="meta" style={{ fontSize: "0.78rem", margin: 0 }}>
-                {t("processingHint")}
+              <p className="meta" style={{ fontSize: "0.78rem", margin: "0.35rem 0 0" }}>
+                {t("uploadSafeToClose")}
               </p>
             </div>
           )}
+          {/* The non-resumable "staging" / "don't close the page" phase is
+              gone: bytes are chunked and the session id is persisted before the
+              first chunk, so an interrupted upload resumes from the last acked
+              byte. The reassuring "safe to interrupt" copy lives under the
+              progress bar above. */}
           {phase === "polling" && (
             <div
               style={{
