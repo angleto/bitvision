@@ -747,6 +747,13 @@ async def get_series_volume(
         )
     ).scalar_one_or_none()
     if derivative is not None:
+        # Revalidated cache: the ETag is the derivative row id, recreated on
+        # every re-pack, so a stale client copy is invalidated automatically
+        # (the mDIXON backfill foot-gun where stack 0 reuses volume.f32).
+        etag = _derivative_etag(derivative.id)
+        not_modified = _not_modified_response(request, etag)
+        if not_modified is not None:
+            return not_modified
         cached = await asyncio.to_thread(
             storage.get_object_bytes,
             bucket=derivative.s3_bucket,
@@ -756,6 +763,7 @@ async def get_series_volume(
             cached,
             accept_gzip=_client_accepts_gzip(request),
             geometry=derivative.geometry,
+            etag=etag,
         )
 
     # Pre-check: avoid an S3 round-trip for series that are obviously
@@ -818,27 +826,30 @@ async def get_series_volume(
         bucket=settings.s3_bucket_derivatives,
         key=cache_key,
     )
-    db.add(
-        Derivative(
-            series_id=series.id,
-            kind=DERIVATIVE_KIND,
-            format=target_format,
-            stack_index=want_stack,
-            s3_bucket=settings.s3_bucket_derivatives,
-            s3_key=cache_key,
-            size_bytes=packed.size,
-            generator_version=(
-                "pack_series-v1" if earl_fwhm_mm <= 0 else f"pack_series-v1+earl-{earl_fwhm_mm:.1f}"
-            ),
-            geometry=packed.geometry,
-        )
+    deriv = Derivative(
+        series_id=series.id,
+        kind=DERIVATIVE_KIND,
+        format=target_format,
+        stack_index=want_stack,
+        s3_bucket=settings.s3_bucket_derivatives,
+        s3_key=cache_key,
+        size_bytes=packed.size,
+        generator_version=(
+            "pack_series-v1" if earl_fwhm_mm <= 0 else f"pack_series-v1+earl-{earl_fwhm_mm:.1f}"
+        ),
+        geometry=packed.geometry,
     )
+    db.add(deriv)
     await db.commit()
+    # ``id`` is server-generated (gen_random_uuid); refresh to read it back
+    # for the ETag so the freshly-packed blob is a revalidated cache entry.
+    await db.refresh(deriv)
 
     return _volume_response(
         packed.bytes_,
         accept_gzip=_client_accepts_gzip(request),
         geometry=packed.geometry,
+        etag=_derivative_etag(deriv.id),
     )
 
 
@@ -889,12 +900,16 @@ async def get_series_volume_preview(
         )
     ).scalar_one_or_none()
     if preview_deriv is not None:
+        etag = _derivative_etag(preview_deriv.id)
+        not_modified = _not_modified_response(request, etag)
+        if not_modified is not None:
+            return not_modified
         cached = await asyncio.to_thread(
             storage.get_object_bytes,
             bucket=preview_deriv.s3_bucket,
             key=preview_deriv.s3_key,
         )
-        return _volume_response(cached, accept_gzip=_client_accepts_gzip(request))
+        return _volume_response(cached, accept_gzip=_client_accepts_gzip(request), etag=etag)
 
     # Cheap precheck: skip non-volumetric SOP classes before paying for
     # any packing work. Same shortcut as the full-res endpoint.
@@ -987,20 +1002,25 @@ async def get_series_volume_preview(
         bucket=settings.s3_bucket_derivatives,
         key=cache_key,
     )
-    db.add(
-        Derivative(
-            series_id=series.id,
-            kind=DERIVATIVE_KIND_PREVIEW,
-            format=DERIVATIVE_FORMAT,
-            s3_bucket=settings.s3_bucket_derivatives,
-            s3_key=cache_key,
-            size_bytes=preview.size,
-            generator_version="pack_low_res-v1",
-        )
+    preview_deriv = Derivative(
+        series_id=series.id,
+        kind=DERIVATIVE_KIND_PREVIEW,
+        format=DERIVATIVE_FORMAT,
+        stack_index=0,  # preview is of the primary stack
+        s3_bucket=settings.s3_bucket_derivatives,
+        s3_key=cache_key,
+        size_bytes=preview.size,
+        generator_version="pack_low_res-v1",
     )
+    db.add(preview_deriv)
     await db.commit()
+    await db.refresh(preview_deriv)
 
-    return _volume_response(preview.bytes_, accept_gzip=_client_accepts_gzip(request))
+    return _volume_response(
+        preview.bytes_,
+        accept_gzip=_client_accepts_gzip(request),
+        etag=_derivative_etag(preview_deriv.id),
+    )
 
 
 @router.post("/series/{series_id}/pack-volume", status_code=202)
