@@ -129,18 +129,23 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         tesseract-ocr-glg \
     && rm -rf /var/lib/apt/lists/*
 
+# Create the runtime user BEFORE the COPY so ownership is set during the
+# copy, in a single layer. A post-copy ``chown -R /app`` rewrites every
+# file's metadata and overlayfs copies-up the WHOLE ~5GB /app tree into a
+# second layer — measured, it doubled the compressed image to ~10.2GB
+# (two identical ~5.0GB layers). ``COPY --chown`` avoids the duplicate.
+# Uid/gid 1000 are baked into the image and pinned in the k8s
+# securityContext (runAsNonRoot: true) to keep filesystem ownership
+# aligned; a missing USER directive would fail admission.
+RUN groupadd --system --gid 1000 bvp && \
+    useradd --system --uid 1000 --gid bvp --home-dir /app --shell /usr/sbin/nologin bvp
+
 WORKDIR /app/backend
 # Bring the whole workspace (venv + backend + mcp source) so the
 # entrypoint can resolve both bvphoenix and bvmcp imports.
-COPY --from=builder /app /app
+COPY --from=builder --chown=bvp:bvp /app /app
 
-# Drop root before runtime. The pod spec enforces ``runAsNonRoot:
-# true`` so a missing USER directive would make the container fail
-# admission. Uid/gid 1000 are baked into the image and pinned in the
-# k8s securityContext to keep filesystem ownership aligned.
-RUN groupadd --system --gid 1000 bvp && \
-    useradd --system --uid 1000 --gid bvp --home-dir /app --shell /usr/sbin/nologin bvp && \
-    chown -R bvp:bvp /app
+# Drop root before runtime.
 USER 1000:1000
 
 EXPOSE 8000

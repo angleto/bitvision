@@ -141,16 +141,21 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         tesseract-ocr-glg \
     && rm -rf /var/lib/apt/lists/*
 
+# Create the runtime user BEFORE the COPY so ownership is set during the
+# copy, in a single layer. A post-copy ``chown -R /app`` rewrites every
+# file's metadata and overlayfs copies-up the WHOLE ~5GB /app tree into a
+# second layer — measured, it doubled the compressed image to ~10.5GB
+# (two identical ~5.2GB layers). ``COPY --chown`` avoids the duplicate.
+RUN groupadd --system --gid 1000 bvp && \
+    useradd --system --uid 1000 --gid bvp --home-dir /app --shell /usr/sbin/nologin bvp
+
 WORKDIR /app/workers
 # Copy the entire /app tree from the builder so the workspace venv
 # (/app/.venv) AND the bvphoenix sibling source (/app/backend/src,
 # referenced by the venv's pth) AND the workers code come along.
-COPY --from=builder /app /app
+COPY --from=builder --chown=bvp:bvp /app /app
 
 # Drop root before runtime (matches backend.Dockerfile).
-RUN groupadd --system --gid 1000 bvp && \
-    useradd --system --uid 1000 --gid bvp --home-dir /app --shell /usr/sbin/nologin bvp && \
-    chown -R bvp:bvp /app
 USER 1000:1000
 
 CMD ["arq", "bvworkers.main.WorkerSettings"]

@@ -41,13 +41,15 @@ ENV BVP_APP_VERSION=$VERSION \
     BVP_APP_GIT_SHA=$GIT_SHA \
     BVP_APP_BUILD_DATE=$BUILD_DATE
 
+# Create the runtime user before the COPY so ``--chown`` sets ownership in
+# one layer; a post-copy ``chown -R /app`` duplicates the whole tree.
+RUN groupadd --system --gid 1000 bvp && \
+    useradd --system --uid 1000 --gid bvp --home-dir /app --shell /usr/sbin/nologin bvp
+
 WORKDIR /app/mcp
-COPY --from=builder /app/mcp /app/mcp
+COPY --from=builder --chown=bvp:bvp /app/mcp /app/mcp
 
 # Drop root before runtime.
-RUN groupadd --system --gid 1000 bvp && \
-    useradd --system --uid 1000 --gid bvp --home-dir /app --shell /usr/sbin/nologin bvp && \
-    chown -R bvp:bvp /app
 USER 1000:1000
 
 EXPOSE 8080

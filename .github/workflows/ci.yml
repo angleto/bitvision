@@ -201,6 +201,16 @@ jobs:
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
+          # Layer cache stored as a sidecar ``:buildcache`` tag in the same
+          # GHCR repo (per service). type=registry (not type=gha) because the
+          # ML images are multi-GB and would blow GHA's 10GB repo-wide cache;
+          # mode=max also caches the multi-stage *builder* layers, so an
+          # unchanged-prefix build reuses the torch install + the baked HF
+          # model layer instead of re-downloading ~2.8GB from HuggingFace
+          # (the recurring 429 flake). A code change below the model-bake
+          # layer still reuses everything above it.
+          cache-from: type=registry,ref=${{ env.REGISTRY }}/${{ env.IMAGE_PREFIX }}/${{ matrix.service }}:buildcache
+          cache-to: type=registry,ref=${{ env.REGISTRY }}/${{ env.IMAGE_PREFIX }}/${{ matrix.service }}:buildcache,mode=max
           # Build identity baked into the image; surfaced by GET
           # /api/version and the /settings build-info card.
           build-args: |

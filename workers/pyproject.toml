@@ -41,9 +41,14 @@ bvphoenix = { workspace = true }
 # doing ingestion. Enable with `uv sync --extra ai`.
 ai = [
     "torch>=2.5.0",
+    # torchvision is required transitively by open-clip-torch (image
+    # transforms); pinned here to keep the resolver explicit.
     "torchvision>=0.20.0",
-    "monai>=1.4.0",
-    "torchio>=0.20.0",
+    # NOTE: monai + torchio were removed (2026-06-04) — they are imported
+    # by NO registered task or backend/mcp source (verified monorepo-wide)
+    # and were dead weight from the future MONAI-Deploy MAP roadmap. When
+    # that roadmap lands, add them in a dedicated ``monai`` extra so they
+    # never re-enter the default ML image.
     "open-clip-torch>=2.28.0",
     # sentence-transformers serves MiniLM AND BGE-M3 dense.
     "sentence-transformers>=2.7.0",
