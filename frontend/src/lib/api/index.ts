@@ -313,6 +313,24 @@ export interface DisplayMetadata {
   /** Number of instances in the series. Single-slice series open in
    *  the 2D viewer; ``>= 2`` is the MPR threshold. */
   instance_count: number;
+  /** Co-located sub-stacks packed under one SeriesInstanceUID (Philips
+   *  mDIXON Water/Fat/In-phase/Out-of-phase, multi-echo, DWI). One entry
+   *  for the common single-stack series; multiple entries drive the
+   *  viewer's contrast picker. Each is fetched via
+   *  ``volume.raw?stack=<stack_index>``. */
+  sub_stacks: SubStackInfo[];
+  /** stack_index the viewer should open by default (the primary; for
+   *  mDIXON the Water contrast). */
+  default_stack_index: number;
+}
+
+export interface SubStackInfo {
+  stack_index: number;
+  /** Human-readable: 'Water', 'Fat', 'In-phase', 'b=1000', 'TE=2.3ms', 'main', ... */
+  label: string;
+  /** ImageType[2] token when present (W / F / IP / OP). */
+  image_type: string | null;
+  instance_count: number;
 }
 
 export const studiesApi = {
@@ -328,13 +346,17 @@ export const studiesApi = {
    *  Gaussian harmonisation server-side (Addendum C §7); the
    *  filtered volume is cached separately under a derivative
    *  format keyed by the FWHM, so subsequent fetches at the same
-   *  level hit the cache. */
-  volumeUrl: (seriesId: string, opts?: { earlFwhmMm?: number }) => {
+   *  level hit the cache. ``stackIndex`` selects a sub-stack of a
+   *  multi-stack series (mDIXON W/F/IP/OP, multi-echo, DWI); omit or
+   *  0 for the primary stack. */
+  volumeUrl: (seriesId: string, opts?: { earlFwhmMm?: number; stackIndex?: number }) => {
     const earl = opts?.earlFwhmMm ?? 0;
-    if (earl > 0) {
-      return `${API_BASE_URL}/api/series/${seriesId}/volume.raw?earl_fwhm_mm=${earl}`;
-    }
-    return `${API_BASE_URL}/api/series/${seriesId}/volume.raw`;
+    const stack = opts?.stackIndex ?? 0;
+    const params = new URLSearchParams();
+    if (earl > 0) params.set("earl_fwhm_mm", String(earl));
+    if (stack > 0) params.set("stack", String(stack));
+    const query = params.toString();
+    return `${API_BASE_URL}/api/series/${seriesId}/volume.raw${query ? `?${query}` : ""}`;
   },
   instanceFileUrl: (instanceId: string) => `${API_BASE_URL}/api/instances/${instanceId}/file`,
   packVolume: (seriesId: string) =>

@@ -379,6 +379,44 @@ Planned customizations:
   valid until Z" to make the chain of permissions visible (cf.
   authorization.md §7)
 
+### 6.1 Sub-stack separation (mDIXON / multi-echo / DWI)
+
+One DICOM `SeriesInstanceUID` can carry several co-located volumes: a
+Philips mDIXON series interleaves Water / Fat / In-phase / Out-of-phase
+stacks that share the same z-positions and `ImageOrientationPatient`.
+Packed naively (sort all instances by z, stack), the contrasts interleave
+at near-identical z, the slice spacing collapses to ~0 and the MPR
+geometry is garbage.
+
+`services.volumes.partition_substacks` de-interleaves them at volume-build
+time, BEFORE the sort, in two layers:
+1. **Tag compound key** (`series_splitter.substack_tag_key`): orientation,
+   FrameOfReferenceUID, `ImageType[2]` (W/F/IP/OP), `EchoNumbers` +
+   `EchoTime`, `DiffusionBValue`, Philips `StackID`, temporal position,
+   acquisition number.
+2. **Geometric duplicate-z fallback**: within a tag group, if a
+   through-plane position (projected onto the slice normal) repeats K>1
+   times, the i-th occurrence of each position is assigned to sub-stack i
+   — so every emitted stack is monotonic-unique in z, the precondition the
+   spacing/geometry math needs.
+
+A single coherent series returns one stack (`main`, byte-identical pack —
+no regression). The fix lives in the one place that builds the blob
+(`pack_series`), so the prepack worker, the on-demand `volume.raw`
+endpoint, EARL, segmentation/ROI and MCP are all corrected at once. The
+DICOM series stays one DB `Series` (the DICOM invariant is preserved; no
+re-ingest, saved `/viewer/series/<id>` links keep working).
+
+Storage: `derivatives` gains a `stack_index` dimension (unique on
+`series_id, kind, format, stack_index`); stack 0 is the primary
+(largest; ties prefer Water) and aliases the canonical `volume.f32` key,
+extra contrasts get `volume.stack-<N>.f32`. `volume.raw?stack=<N>` serves
+a specific contrast; `display-metadata.sub_stacks[]` lists the available
+stacks + labels so the viewer renders a contrast picker. Follow-up: persist
+the discriminators at ingest (so display-metadata is a DB read, not a
+header scan) and optionally promote sub-stacks to first-class taggable
+series.
+
 ---
 
 ## 7. LLM layer

@@ -32,8 +32,8 @@ import boto3
 import numpy as np
 import pydicom
 from botocore.client import Config
-from bvphoenix.services.derivative_keys import volume_key
-from bvphoenix.services.volumes import compute_volume_geometry
+from bvphoenix.services.derivative_keys import volume_stack_key
+from bvphoenix.services.volumes import compute_volume_geometry, partition_substacks
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
 
@@ -91,23 +91,12 @@ class _Unpackable(Exception):
     still works; the user just doesn't get the volume cache."""
 
 
-def _pack(s3_client, bucket: str, instance_rows: list[dict]) -> tuple[bytes, dict | None]:
-    """Download DICOMs from S3, decode, stack, return ``(packed_bytes,
-    geometry)``.
-
-    ``geometry`` is the real patient-space frame computed from the same
-    sorted datasets (origin / direction cosines / FrameOfReferenceUID;
-    see ``compute_volume_geometry``), served back to the viewer so it
-    builds the Cornerstone volume in true LPS space. ``None`` for legacy
-    series without orientation tags.
-
-    Frees each pydicom Dataset immediately after copying its pixel
-    data into the output volume so peak RAM stays close to the
-    output size, not 2x. Raises :class:`_VolumeTooLarge` *before*
-    allocating the volume if the projected size would exceed the
-    safety cap, so a 5 GiB CT total-body scan doesn't OOM-kill the
-    worker on every retry.
-    """
+def _load_datasets(s3_client, bucket: str, instance_rows: list[dict]) -> list[pydicom.Dataset]:
+    """Download every instance from S3, decode the header+pixels, and
+    return the datasets that carry pixel data. Raises :class:`_Unpackable`
+    for series the packer can't handle as a 3-D stack (no pixels, multi-
+    frame, colour) so the caller surfaces a benign skipped status instead
+    of an Arq retry storm."""
     datasets: list[pydicom.Dataset] = []
     for row in instance_rows:
         resp = s3_client.get_object(Bucket=bucket, Key=row["s3_key"])
@@ -125,10 +114,7 @@ def _pack(s3_client, bucket: str, instance_rows: list[dict]) -> tuple[bytes, dic
     # instance and would broadcast-fail. Skip the whole series with a
     # non-fatal status instead of crashing the Arq job and triggering
     # a retry storm. The 2D viewer path still serves the frames.
-    multi_frame = [
-        ds for ds in datasets
-        if int(getattr(ds, "NumberOfFrames", 1) or 1) > 1
-    ]
+    multi_frame = [ds for ds in datasets if int(getattr(ds, "NumberOfFrames", 1) or 1) > 1]
     if multi_frame:
         n_frames = int(getattr(multi_frame[0], "NumberOfFrames", 0) or 0)
         raise _Unpackable(
@@ -140,10 +126,7 @@ def _pack(s3_client, bucket: str, instance_rows: list[dict]) -> tuple[bytes, dic
     # (rows, cols, channels) pixel_array that won't broadcast into
     # the float32 (rows, cols) slot. Common for US, photo
     # documentation, secondary capture viewer screenshots.
-    rgb = [
-        ds for ds in datasets
-        if int(getattr(ds, "SamplesPerPixel", 1) or 1) > 1
-    ]
+    rgb = [ds for ds in datasets if int(getattr(ds, "SamplesPerPixel", 1) or 1) > 1]
     if rgb:
         spp = int(getattr(rgb[0], "SamplesPerPixel", 0) or 0)
         raise _Unpackable(
@@ -151,15 +134,29 @@ def _pack(s3_client, bucket: str, instance_rows: list[dict]) -> tuple[bytes, dic
             f"(SamplesPerPixel={spp}, instances={len(rgb)})"
         )
 
-    datasets.sort(key=_sort_key)
-    # Geometry MUST be computed here, before the fill loop frees each
-    # dataset (datasets[i] = None below), and from the sorted order so it
-    # matches the on-wire scalar layout.
-    geometry = compute_volume_geometry(datasets)
-    first = datasets[0]
+    return datasets
+
+
+def _pack_datasets(members: list[pydicom.Dataset]) -> tuple[bytes, dict | None]:
+    """Stack ONE coherent sub-stack (already de-interleaved) into
+    ``(packed_bytes, geometry)``.
+
+    ``geometry`` is the real patient-space frame computed from the same
+    sorted datasets (see ``compute_volume_geometry``). Frees each pydicom
+    Dataset (``members[i] = None``) immediately after copying its pixel
+    data so peak RAM stays close to the output size, not 2x — the caller
+    must hold no other reference to these datasets. Raises
+    :class:`_VolumeTooLarge` *before* allocating when the projected size
+    exceeds the cap, so a 5 GiB total-body scan doesn't OOM-kill the
+    worker on every retry."""
+    members.sort(key=_sort_key)
+    # Geometry MUST be computed before the fill loop frees each dataset,
+    # and from the sorted order so it matches the on-wire scalar layout.
+    geometry = compute_volume_geometry(members)
+    first = members[0]
     rows = int(first.Rows)
     cols = int(first.Columns)
-    nz = len(datasets)
+    nz = len(members)
     # Safety cap: header is fixed size, payload is nz*rows*cols*4 bytes.
     # boto3 PUTs the whole packed buffer in one go so the in-process
     # working set effectively doubles at upload time. Reject upfront.
@@ -173,15 +170,15 @@ def _pack(s3_client, bucket: str, instance_rows: list[dict]) -> tuple[bytes, dic
     pixel_spacing = getattr(first, "PixelSpacing", [1.0, 1.0])
     sx, sy = float(pixel_spacing[1]), float(pixel_spacing[0])
     slice_thickness = float(getattr(first, "SliceThickness", 1.0) or 1.0)
-    if len(datasets) >= 2:
-        p0 = getattr(datasets[0], "ImagePositionPatient", None)
-        p1 = getattr(datasets[1], "ImagePositionPatient", None)
+    if len(members) >= 2:
+        p0 = getattr(members[0], "ImagePositionPatient", None)
+        p1 = getattr(members[1], "ImagePositionPatient", None)
         if p0 and p1:
             slice_thickness = abs(float(p1[2]) - float(p0[2])) or slice_thickness
 
     volume = np.empty((nz, rows, cols), dtype=np.float32)
     for i in range(nz):
-        ds = datasets[i]
+        ds = members[i]
         slope = float(getattr(ds, "RescaleSlope", 1.0) or 1.0)
         intercept = float(getattr(ds, "RescaleIntercept", 0.0) or 0.0)
         if slope != 1.0 or intercept != 0.0:
@@ -192,7 +189,7 @@ def _pack(s3_client, bucket: str, instance_rows: list[dict]) -> tuple[bytes, dic
         # bytes + the Dataset's other tag arrays. Without this every
         # slice stays alive until the whole loop finishes — peak RAM
         # ends up ~2x the output volume size.
-        datasets[i] = None  # type: ignore[call-overload]
+        members[i] = None  # type: ignore[call-overload]
 
     vmin, vmax = float(volume.min()), float(volume.max())
     header = HEADER_STRUCT.pack(cols, rows, nz, sx, sy, slice_thickness, vmin, vmax)
@@ -262,88 +259,132 @@ async def pack_volume(ctx: dict, series_id: str) -> dict:  # type: ignore[type-a
 
         bucket = instances[0]["s3_bucket"]
 
-        # Pack (sync, CPU-bound). ``_VolumeTooLarge`` and ``MemoryError``
-        # are caught explicitly so a single oversize series can't
-        # OOM-kill the worker. The derivative is just *not* created
-        # — the viewer's slice-by-slice 2D path keeps working.
-        # Other exceptions still propagate so arq retries them and
-        # ``with_safety_net`` flips the row to failed.
+        # Load every instance once, then de-interleave co-located sub-stacks
+        # (Philips mDIXON W/F/IP/OP, multi-echo, DWI b-values) so each
+        # contrast is packed into its OWN correct volume instead of one
+        # interleaved blob with collapsed slice spacing. A single coherent
+        # series yields exactly one stack (index 0) → byte-identical pack.
+        # ``_Unpackable`` / ``MemoryError`` on load are caught so a bad
+        # series can't OOM-kill the worker or trigger an Arq retry storm.
         import asyncio
 
         try:
-            packed_bytes, geometry = await asyncio.to_thread(_pack, s3, bucket, instances)
-        except _VolumeTooLarge as exc:
-            log.warning("pack_volume: skipping series %s — %s", series_id, exc)
-            await engine.dispose()
-            return {
-                "status": "too_large",
-                "series_id": series_id,
-                "reason": str(exc),
-            }
+            datasets = await asyncio.to_thread(_load_datasets, s3, bucket, instances)
         except _Unpackable as exc:
-            # Series we can load but can't pack as a 3-D volume —
-            # SR/structured reports, multi-frame, etc. Surface as a
-            # benign skipped status; the 2D viewer path still works.
-            # Stops the Arq retry storm previously caused by the
-            # bare ``ValueError`` propagating out of ``_pack``.
             log.info("pack_volume: skipping series %s — %s", series_id, exc)
             await engine.dispose()
-            return {
-                "status": "unpackable",
-                "series_id": series_id,
-                "reason": str(exc),
-            }
+            return {"status": "unpackable", "series_id": series_id, "reason": str(exc)}
         except MemoryError as exc:
-            # Reached even after the pre-check (e.g. a multi-frame
-            # PET expanded mid-decode). Mark and bail; do not retry.
-            log.exception("pack_volume: MemoryError on series %s — %s", series_id, exc)
+            log.exception("pack_volume: MemoryError loading series %s — %s", series_id, exc)
             await engine.dispose()
-            return {
-                "status": "out_of_memory",
-                "series_id": series_id,
-                "reason": str(exc),
-            }
+            return {"status": "out_of_memory", "series_id": series_id, "reason": str(exc)}
 
-        # Upload to derivatives bucket. Key uses the BitVision Series
-        # UUID (``sid``) inside a per-patient prefix — DICOM
-        # ``series_instance_uid`` is intentionally NOT in the path
-        # because that field is not authoritative across tenants.
-        cache_key = volume_key(patient_id=patient_id, series_id=sid)
-        s3.put_object(
-            Bucket=settings.s3_bucket_derivatives,
-            Key=cache_key,
-            Body=packed_bytes,
-            **settings.put_extra_args(),
-        )
+        stacks = partition_substacks(datasets)
+        # The SubStacks now hold the only references to the datasets, so the
+        # per-slice freeing inside ``_pack_datasets`` actually releases RAM.
+        del datasets
 
-        # Record derivative. ``geometry`` carries the real patient-space
-        # frame so the viewer's volume.raw fetch (which may be a cache
-        # hit on this row) gets X-Volume-* headers instead of falling
-        # back to an identity frame. Cast to jsonb explicitly: asyncpg
-        # binds the dumped string, Postgres parses it.
-        await db.execute(
-            text(
-                "INSERT INTO derivatives "
-                "(series_id, kind, format, s3_bucket, s3_key, size_bytes, generator_version, geometry) "
-                "VALUES (:sid, :kind, :fmt, :bucket, :key, :size, :ver, CAST(:geom AS jsonb))"
-            ),
-            {
-                "sid": sid,
-                "kind": DERIVATIVE_KIND,
-                "fmt": DERIVATIVE_FORMAT,
-                "bucket": settings.s3_bucket_derivatives,
-                "key": cache_key,
-                "size": len(packed_bytes),
-                "ver": "worker-pack-v1",
-                "geom": json.dumps(geometry) if geometry else None,
-            },
-        )
+        packed_stacks: list[dict] = []
+        skipped: list[dict] = []
+        for substack in stacks:
+            members = substack.datasets
+            try:
+                # Pack one stack (sync, CPU-bound). Per-stack so one oversize
+                # / unpackable contrast doesn't block the others.
+                packed_bytes, geometry = await asyncio.to_thread(_pack_datasets, members)
+            except _VolumeTooLarge as exc:
+                log.warning(
+                    "pack_volume: skipping stack %d of %s — %s",
+                    substack.stack_index,
+                    series_id,
+                    exc,
+                )
+                skipped.append({"stack_index": substack.stack_index, "reason": str(exc)})
+                continue
+            except _Unpackable as exc:
+                log.info(
+                    "pack_volume: skipping stack %d of %s — %s",
+                    substack.stack_index,
+                    series_id,
+                    exc,
+                )
+                skipped.append({"stack_index": substack.stack_index, "reason": str(exc)})
+                continue
+            except MemoryError as exc:
+                log.exception(
+                    "pack_volume: MemoryError on stack %d of %s — %s",
+                    substack.stack_index,
+                    series_id,
+                    exc,
+                )
+                skipped.append({"stack_index": substack.stack_index, "reason": "out_of_memory"})
+                continue
+
+            # Upload to the derivatives bucket. Stack 0 aliases the canonical
+            # ``volume.f32`` key (legacy readers untouched); extra contrasts
+            # get a ``volume.stack-<N>.f32`` key. The BitVision Series UUID
+            # keys the path — DICOM SeriesInstanceUID is not authoritative
+            # across tenants.
+            cache_key = volume_stack_key(
+                patient_id=patient_id, series_id=sid, stack_index=substack.stack_index
+            )
+            s3.put_object(
+                Bucket=settings.s3_bucket_derivatives,
+                Key=cache_key,
+                Body=packed_bytes,
+                **settings.put_extra_args(),
+            )
+
+            # Record one derivative per stack. ``geometry`` carries the real
+            # patient-space frame (X-Volume-* headers on the viewer fetch).
+            # ON CONFLICT keeps re-packs idempotent against the
+            # (series, kind, format, stack_index) uniqueness key.
+            await db.execute(
+                text(
+                    "INSERT INTO derivatives "
+                    "(series_id, kind, format, stack_index, s3_bucket, s3_key, "
+                    "size_bytes, generator_version, geometry) "
+                    "VALUES (:sid, :kind, :fmt, :stack, :bucket, :key, :size, :ver, "
+                    "CAST(:geom AS jsonb)) "
+                    "ON CONFLICT (series_id, kind, format, stack_index) DO NOTHING"
+                ),
+                {
+                    "sid": sid,
+                    "kind": DERIVATIVE_KIND,
+                    "fmt": DERIVATIVE_FORMAT,
+                    "stack": substack.stack_index,
+                    "bucket": settings.s3_bucket_derivatives,
+                    "key": cache_key,
+                    "size": len(packed_bytes),
+                    "ver": "worker-pack-v1",
+                    "geom": json.dumps(geometry) if geometry else None,
+                },
+            )
+            packed_stacks.append(
+                {
+                    "stack_index": substack.stack_index,
+                    "label": substack.label,
+                    "size_bytes": len(packed_bytes),
+                    "cache_key": cache_key,
+                }
+            )
+            # Free the packed bytes before the next (potentially large) stack.
+            del packed_bytes
+
         await db.commit()
 
     await engine.dispose()
+    if not packed_stacks:
+        # Every stack skipped (too large / unpackable). Non-fatal — the 2D
+        # viewer path still works.
+        return {
+            "status": "unpackable" if skipped else "no_stacks",
+            "series_id": series_id,
+            "skipped": skipped,
+        }
     return {
         "status": "packed",
         "series_id": series_id,
-        "size_bytes": len(packed_bytes),
-        "cache_key": cache_key,
+        "stacks": packed_stacks,
+        "skipped": skipped,
     }

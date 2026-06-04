@@ -153,6 +153,12 @@ interface ExtendedProps extends MPRLayoutProps {
    *  and at every ``setCsFusionSeriesId(null)`` clear so the flag
    *  doesn't carry stale failure state across navigations. */
   fusionFailed?: boolean;
+  /** Sub-stack index of a multi-stack series (mDIXON W/F/IP/OP, multi-
+   *  echo, DWI). Folded into the Cornerstone volume cache key so each
+   *  contrast of the same series gets its OWN cache entry and switching
+   *  stacks rebuilds the panes instead of re-showing the stale volume.
+   *  0 (default) for the common single-stack series. */
+  stackIndex?: number;
   /** SUV body-weight factor for the active series, when modality is
    *  PT and the SUV factor is computable from the DICOM header.
    *  When set, the layout post-processes annotation labels so ROI
@@ -355,6 +361,7 @@ const CornerstoneMPRLayout = forwardRef<MPRLayoutHandle, ExtendedProps>(
       onActiveToolChange,
       seriesDescription,
       seriesId,
+      stackIndex = 0,
       volumeViewerRef,
       modality,
       customOpacityStops,
@@ -467,7 +474,16 @@ const CornerstoneMPRLayout = forwardRef<MPRLayoutHandle, ExtendedProps>(
       [vpAxial, vpSag, vpCor],
     );
 
-    const volumeId = useMemo(() => `${VOLUME_PRIMARY_PREFIX}${seriesId ?? "anon"}`, [seriesId]);
+    // Fold the sub-stack index into the cache key so each contrast of a
+    // multi-stack series (mDIXON W/F/IP/OP) gets its own Cornerstone
+    // volume; switching rebuilds the panes instead of re-showing the
+    // stale stack. Stack 0 keeps the legacy key verbatim (no regression
+    // for the common single-stack series).
+    const volumeId = useMemo(
+      () =>
+        `${VOLUME_PRIMARY_PREFIX}${seriesId ?? "anon"}${stackIndex > 0 ? `:s${stackIndex}` : ""}`,
+      [seriesId, stackIndex],
+    );
     const fusionVolumeId = useMemo(
       () => (fusionVolume && fusionSeriesId ? `${VOLUME_FUSION_PREFIX}${fusionSeriesId}` : null),
       [fusionVolume, fusionSeriesId],

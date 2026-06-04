@@ -60,6 +60,8 @@ __all__ = [
     "volume_earl_key",
     "volume_key",
     "volume_preview_key",
+    "volume_stack_earl_key",
+    "volume_stack_key",
 ]
 
 
@@ -98,6 +100,41 @@ def volume_earl_key(
     """
     tag = round(earl_fwhm_mm * 10)
     return f"{_series_prefix(patient_id, series_id)}/volume.earl-{tag}.f32"
+
+
+def volume_stack_key(
+    *,
+    patient_id: uuid.UUID | None,
+    series_id: uuid.UUID | str,
+    stack_index: int,
+) -> str:
+    """S3 key for one sub-stack of a multi-stack series (mDIXON W/F/IP/OP,
+    multi-echo, DWI b-values; see ``services.volumes.partition_substacks``).
+
+    Stack 0 (the primary/default stack) ALIASES the canonical
+    ``volume.f32`` key so single-stack series and legacy readers are
+    unaffected; only the extra contrasts (index >= 1) get a suffixed key.
+    """
+    if stack_index == 0:
+        return volume_key(patient_id=patient_id, series_id=series_id)
+    return f"{_series_prefix(patient_id, series_id)}/volume.stack-{stack_index}.f32"
+
+
+def volume_stack_earl_key(
+    *,
+    patient_id: uuid.UUID | None,
+    series_id: uuid.UUID | str,
+    stack_index: int,
+    earl_fwhm_mm: float,
+) -> str:
+    """S3 key for an EARL-harmonized sub-stack volume. Stack 0 aliases the
+    canonical ``volume.earl-<N>.f32`` key."""
+    if stack_index == 0:
+        return volume_earl_key(
+            patient_id=patient_id, series_id=series_id, earl_fwhm_mm=earl_fwhm_mm
+        )
+    tag = round(earl_fwhm_mm * 10)
+    return f"{_series_prefix(patient_id, series_id)}/volume.stack-{stack_index}.earl-{tag}.f32"
 
 
 def volume_preview_key(*, patient_id: uuid.UUID | None, series_id: uuid.UUID | str) -> str:

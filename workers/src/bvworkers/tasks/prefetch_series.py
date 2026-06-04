@@ -28,11 +28,17 @@ import boto3
 import numpy as np
 from botocore.client import Config
 from bvphoenix.services.derivative_keys import volume_key, volume_preview_key
+from bvphoenix.services.volumes import partition_substacks
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
 
 from bvworkers.config import get_settings
-from bvworkers.tasks.pack_volume import _pack as _pack_full
+from bvworkers.tasks.pack_volume import (
+    _load_datasets,
+    _pack_datasets,
+    _Unpackable,
+    _VolumeTooLarge,
+)
 
 DERIVATIVE_KIND_PREVIEW = "volume_f32_preview"
 DERIVATIVE_FORMAT = "raw"
@@ -98,10 +104,14 @@ async def prefetch_series(ctx: dict, series_id: str) -> dict:  # type: ignore[ty
 
         # Do we already have the full-res blob? If so, download it so we
         # can build the preview from the cached copy without re-packing.
+        # Only the PRIMARY sub-stack (index 0) is warmed here for a fast
+        # first viewer open; the extra mDIXON / multi-echo contrasts pack
+        # on demand (volume.raw?stack=N) or via pack_volume.
         existing_full = await db.execute(
             text(
                 "SELECT s3_bucket, s3_key FROM derivatives "
-                "WHERE series_id = :sid AND kind = 'volume_f32' AND format = 'raw'"
+                "WHERE series_id = :sid AND kind = 'volume_f32' "
+                "AND format = 'raw' AND stack_index = 0"
             ),
             {"sid": sid},
         )
@@ -123,7 +133,18 @@ async def prefetch_series(ctx: dict, series_id: str) -> dict:  # type: ignore[ty
                 await engine.dispose()
                 return {**result, "status": "no_instances"}
             bucket = instances[0]["s3_bucket"]
-            packed_bytes, geometry = await asyncio.to_thread(_pack_full, s3, bucket, instances)
+            # De-interleave co-located sub-stacks and warm only the primary
+            # (stack 0), so a multi-stack mDIXON series never caches the
+            # broken interleaved blob. Skip gracefully on unpackable /
+            # oversize series — the 2D viewer path still works.
+            try:
+                datasets = await asyncio.to_thread(_load_datasets, s3, bucket, instances)
+                stacks = partition_substacks(datasets)
+                del datasets
+                packed_bytes, geometry = await asyncio.to_thread(_pack_datasets, stacks[0].datasets)
+            except (_Unpackable, _VolumeTooLarge, MemoryError) as exc:
+                await engine.dispose()
+                return {**result, "status": "skipped", "reason": str(exc)}
 
             cache_key = volume_key(patient_id=patient_id, series_id=sid)
             s3.put_object(
@@ -134,8 +155,11 @@ async def prefetch_series(ctx: dict, series_id: str) -> dict:  # type: ignore[ty
             await db.execute(
                 text(
                     "INSERT INTO derivatives "
-                    "(series_id, kind, format, s3_bucket, s3_key, size_bytes, generator_version, geometry) "
-                    "VALUES (:sid, 'volume_f32', 'raw', :bucket, :key, :size, :ver, CAST(:geom AS jsonb))"
+                    "(series_id, kind, format, stack_index, s3_bucket, s3_key, "
+                    "size_bytes, generator_version, geometry) "
+                    "VALUES (:sid, 'volume_f32', 'raw', 0, :bucket, :key, :size, :ver, "
+                    "CAST(:geom AS jsonb)) "
+                    "ON CONFLICT (series_id, kind, format, stack_index) DO NOTHING"
                 ),
                 {
                     "sid": sid,

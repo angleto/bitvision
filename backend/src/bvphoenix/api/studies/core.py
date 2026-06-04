@@ -685,6 +685,16 @@ async def get_series_volume(
             "0 disables; 7 mm = EARL1, 5 mm = EARL2."
         ),
     ),
+    stack: int | None = Query(
+        None,
+        ge=0,
+        description=(
+            "Sub-stack index for a multi-stack series (Philips mDIXON "
+            "Water/Fat/In-phase/Out-of-phase, multi-echo, DWI). None / 0 = "
+            "the primary stack; 1.. select the extra contrasts. The "
+            "available stacks + labels are listed in display-metadata."
+        ),
+    ),
     _scope: None = _AGENT_PATIENT_IMAGES,
 ) -> Response:
     """Return the packed Float32 volume for a series.
@@ -720,6 +730,7 @@ async def get_series_volume(
 
     settings = get_settings()
     storage = get_s3_storage()
+    want_stack = stack or 0
     target_format = (
         DERIVATIVE_FORMAT
         if earl_fwhm_mm <= 0
@@ -731,6 +742,7 @@ async def get_series_volume(
                 Derivative.series_id == series.id,
                 Derivative.kind == DERIVATIVE_KIND,
                 Derivative.format == target_format,
+                Derivative.stack_index == want_stack,
             )
         )
     ).scalar_one_or_none()
@@ -775,6 +787,7 @@ async def get_series_volume(
             pack_series,
             storage=storage,
             instance_entries=[(b, k) for b, k in instances],
+            stack_index=want_stack,
         )
     except NonVolumetricSeriesError as exc:
         # The packer detected something the SOP-class precheck missed,
@@ -782,15 +795,20 @@ async def get_series_volume(
         # instances (CT scout AP + LAT). Translate to 404 so the
         # frontend uses ``<Series2DViewer>``.
         raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        # stack_index out of range (client asked for a sub-stack this
+        # series doesn't have). 404 is the right "no such resource".
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
     if earl_fwhm_mm > 0:
         packed = await asyncio.to_thread(apply_earl_harmonization, packed, earl_fwhm_mm, 0.0)
 
     cache_key = (
-        volume_key(patient_id=study.patient_id, series_id=series.id)
+        volume_stack_key(patient_id=study.patient_id, series_id=series.id, stack_index=want_stack)
         if earl_fwhm_mm <= 0
-        else volume_earl_key(
+        else volume_stack_earl_key(
             patient_id=study.patient_id,
             series_id=series.id,
+            stack_index=want_stack,
             earl_fwhm_mm=earl_fwhm_mm,
         )
     )
@@ -805,6 +823,7 @@ async def get_series_volume(
             series_id=series.id,
             kind=DERIVATIVE_KIND,
             format=target_format,
+            stack_index=want_stack,
             s3_bucket=settings.s3_bucket_derivatives,
             s3_key=cache_key,
             size_bytes=packed.size,
@@ -865,6 +884,7 @@ async def get_series_volume_preview(
                 Derivative.series_id == series.id,
                 Derivative.kind == DERIVATIVE_KIND_PREVIEW,
                 Derivative.format == DERIVATIVE_FORMAT,
+                Derivative.stack_index == 0,  # preview is of the primary stack
             )
         )
     ).scalar_one_or_none()
@@ -895,6 +915,7 @@ async def get_series_volume_preview(
                 Derivative.series_id == series.id,
                 Derivative.kind == DERIVATIVE_KIND,
                 Derivative.format == DERIVATIVE_FORMAT,
+                Derivative.stack_index == 0,  # preview downsamples the primary stack
             )
         )
     ).scalar_one_or_none()
@@ -948,6 +969,7 @@ async def get_series_volume_preview(
                 series_id=series.id,
                 kind=DERIVATIVE_KIND,
                 format=DERIVATIVE_FORMAT,
+                stack_index=0,  # primary stack
                 s3_bucket=settings.s3_bucket_derivatives,
                 s3_key=full_key,
                 size_bytes=packed.size,

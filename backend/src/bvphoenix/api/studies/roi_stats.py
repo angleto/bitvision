@@ -87,6 +87,7 @@ async def compute_series_roi_stats(
                 Derivative.series_id == series.id,
                 Derivative.kind == DERIVATIVE_KIND,
                 Derivative.format == DERIVATIVE_FORMAT,
+                Derivative.stack_index == 0,  # primary sub-stack
             )
         )
     ).scalar_one_or_none()
