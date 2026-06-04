@@ -160,7 +160,13 @@ def _geometry_headers(geometry: dict | None) -> dict[str, str]:
     return headers
 
 
-def _volume_response(data: bytes, *, accept_gzip: bool, geometry: dict | None = None) -> Response:
+def _volume_response(
+    data: bytes,
+    *,
+    accept_gzip: bool,
+    geometry: dict | None = None,
+    etag: str | None = None,
+) -> Response:
     """Serve a volume blob with optional gzip + chunked streaming.
 
     - If the client accepts gzip, compress with level 1 (fast; typical
@@ -171,8 +177,19 @@ def _volume_response(data: bytes, *, accept_gzip: bool, geometry: dict | None = 
       second buffer inside Starlette.
     - ``geometry`` (when present) is attached as ``X-Volume-*`` headers so
       the viewer builds its volume in true patient space.
+    - ``etag`` (when present) makes the blob a *revalidated* cache entry:
+      the browser may store it but MUST revalidate with ``If-None-Match``
+      before reuse. Because the ETag is derived from the derivative row
+      id (which is recreated on every re-pack), a re-packed volume gets a
+      new ETag and the stale client copy is invalidated automatically.
+      Without an ETag we fall back to a 1 h opaque cache, which would
+      keep serving a stale blob across a re-pack (the mDIXON backfill
+      foot-gun: stack 0 reuses the canonical ``volume.f32`` URL).
     """
-    headers = {"cache-control": "private, max-age=3600"}
+    if etag is not None:
+        headers = {"cache-control": "private, max-age=0, must-revalidate", "etag": etag}
+    else:
+        headers = {"cache-control": "private, max-age=3600"}
     headers.update(_geometry_headers(geometry))
     if accept_gzip:
         data = gzip.compress(data, compresslevel=1)
@@ -186,6 +203,29 @@ def _volume_response(data: bytes, *, accept_gzip: bool, geometry: dict | None = 
             headers=headers,
         )
     return Response(content=data, media_type="application/octet-stream", headers=headers)
+
+
+def _derivative_etag(derivative_id: uuid.UUID | str) -> str:
+    """Strong ETag for a cached derivative blob, keyed on the row id.
+
+    The id is recreated whenever the derivative is re-packed (the row is
+    deleted + re-inserted), so the ETag changes exactly when the bytes
+    change — which is what lets a re-pack invalidate a stale client copy.
+    """
+    return f'"{derivative_id}"'
+
+
+def _not_modified_response(request: Request, etag: str) -> Response | None:
+    """Return a 304 response when the client's ``If-None-Match`` already
+    matches ``etag`` (so we skip the S3 fetch + body entirely), else None.
+    The browser reuses its cached body + ``X-Volume-*`` headers on a 304."""
+    inm = request.headers.get("if-none-match")
+    if inm and any(tok.strip() == etag for tok in inm.split(",")):
+        return Response(
+            status_code=304,
+            headers={"etag": etag, "cache-control": "private, max-age=0, must-revalidate"},
+        )
+    return None
 
 
 class TierChangeIn(BaseModel):
@@ -753,8 +793,10 @@ __all__ = [
     "_chunked_iter",
     "_client_accepts_gzip",
     "_content_disposition",
+    "_derivative_etag",
     "_enqueue_tier_reindex",
     "_meta_for_series",
+    "_not_modified_response",
     "_registration_to_out",
     "_suggested_wl_from_middle_instance",
     "_volume_response",
