@@ -18,6 +18,42 @@ import {
 const MODALITIES = ["CT", "MR", "XR", "US", "other"] as const;
 type ModalityFilter = (typeof MODALITIES)[number] | "";
 
+// Mirror of backend ``services.embeddable.NON_EMBEDDABLE_MODALITIES``:
+// these DICOM modalities never carry a diagnostic raster image, so
+// BiomedCLIP cannot embed them and ``/similar-to`` answers
+// ``study_not_indexed``. Hide such series from the reference picker so a
+// user can't pick a dead-end exemplar (the canonical cause of the
+// "not indexed" card was selecting a Structured Report / dose record).
+const NON_EMBEDDABLE_MODALITIES = new Set([
+  "SR",
+  "PR",
+  "KO",
+  "SEG",
+  "REG",
+  "RTSTRUCT",
+  "RTPLAN",
+  "RTDOSE",
+  "RTRECORD",
+  "DOC",
+  "AU",
+  "ECG",
+  "EPS",
+  "HD",
+  "RESP",
+  "FID",
+  "PLAN",
+  "RWV",
+  "STAIN",
+  "M3D",
+]);
+
+function isEmbeddableModality(modality: string | null | undefined): boolean {
+  // Blocklist semantics, matching the backend: null / unknown is let
+  // through (a real image with an odd modality must not be hidden).
+  if (!modality) return true;
+  return !NON_EMBEDDABLE_MODALITIES.has(modality.trim().toUpperCase());
+}
+
 /**
  * Visual-search reference: the user's chosen exemplar. Either a whole
  * study (the embedding worker picks the first embedded series under
@@ -45,6 +81,7 @@ export default function VisualSearchPage() {
           modality={modality}
           onModalityChange={setModality}
           onReset={() => setReference(null)}
+          onUseStudy={() => setReference({ kind: "study", study: reference.study })}
         />
       ) : (
         <ReferencePicker onPick={setReference} />
@@ -188,6 +225,12 @@ function ReferenceRow({
     };
   }, [expanded, seriesList, study.id]);
 
+  // Only image series can anchor a visual search; non-image series (SR,
+  // dose reports, segmentations) dead-end on /similar-to, so keep them out
+  // of the picker and tell the user how many were hidden.
+  const embeddableSeries = seriesList?.filter((s) => isEmbeddableModality(s.modality)) ?? null;
+  const hiddenCount = seriesList ? seriesList.length - (embeddableSeries?.length ?? 0) : 0;
+
   return (
     <div className="card" style={{ padding: "0.75rem 1rem", marginBottom: "0.5rem" }}>
       <div
@@ -242,9 +285,9 @@ function ReferenceRow({
           {seriesList && seriesList.length === 0 && (
             <p className="meta">No series in this study.</p>
           )}
-          {seriesList && seriesList.length > 0 && (
+          {embeddableSeries && embeddableSeries.length > 0 && (
             <div className="series-grid">
-              {seriesList.map((s) => (
+              {embeddableSeries.map((s) => (
                 <SeriesPickCard
                   key={s.id}
                   series={s}
@@ -252,6 +295,21 @@ function ReferenceRow({
                 />
               ))}
             </div>
+          )}
+          {embeddableSeries &&
+            embeddableSeries.length === 0 &&
+            seriesList &&
+            seriesList.length > 0 && (
+              <p className="meta">
+                This study has no image series to anchor a visual search (only reports /
+                segmentations). Use &ldquo;Use this study&rdquo;, or pick another reference.
+              </p>
+            )}
+          {hiddenCount > 0 && embeddableSeries && embeddableSeries.length > 0 && (
+            <p className="meta" style={{ fontSize: "0.78rem", marginTop: "0.4rem" }}>
+              {hiddenCount} non-image series (reports, segmentations) hidden &mdash; they
+              can&rsquo;t be visually searched.
+            </p>
           )}
         </div>
       )}
@@ -298,11 +356,13 @@ function NeighborsView({
   modality,
   onModalityChange,
   onReset,
+  onUseStudy,
 }: {
   reference: Reference;
   modality: ModalityFilter;
   onModalityChange: (m: ModalityFilter) => void;
   onReset: () => void;
+  onUseStudy: () => void;
 }) {
   const [results, setResults] = useState<SimilarStudy[] | null>(null);
   const [err, setErr] = useState<string | null>(null);
@@ -395,7 +455,13 @@ function NeighborsView({
       </div>
 
       {errCode === "study_not_indexed" ? (
-        <NotIndexedCard onReset={onReset} />
+        <NotIndexedCard
+          onReset={onReset}
+          // A single non-image series was picked as the exemplar; the
+          // study itself may still have an embeddable series, so offer a
+          // one-click retry against the whole study.
+          onUseStudy={reference.kind === "series" ? onUseStudy : undefined}
+        />
       ) : (
         err && <p className="error">{err}</p>
       )}
@@ -415,7 +481,15 @@ function NeighborsView({
   );
 }
 
-function NotIndexedCard({ onReset }: { onReset: () => void }) {
+function NotIndexedCard({
+  onReset,
+  onUseStudy,
+}: {
+  onReset: () => void;
+  // Present only when the dead-end exemplar was a single non-image series:
+  // offers a one-click retry against the whole study.
+  onUseStudy?: () => void;
+}) {
   return (
     <div
       className="card"
@@ -425,13 +499,22 @@ function NotIndexedCard({ onReset }: { onReset: () => void }) {
         padding: "1rem 1.25rem",
       }}
     >
-      <strong>This study isn&rsquo;t indexed for visual search yet.</strong>
+      <strong>
+        {onUseStudy
+          ? "This series has no image data for visual search."
+          : "This study isn’t indexed for visual search yet."}
+      </strong>
       <p className="meta" style={{ marginTop: "0.4rem", marginBottom: "0.4rem" }}>
-        Visual search runs on image embeddings produced by a background worker after upload.
-        Indexing usually takes a few minutes. If the study is older than that, it may not contain
-        pixel data a model can embed (for example, Structured Report-only series).
+        {onUseStudy
+          ? "Visual search compares image pixels, and this series (a Structured Report, dose record, or segmentation) carries none. Search the whole study instead — it anchors on the first image series automatically."
+          : "Visual search runs on image embeddings produced by a background worker after upload. Indexing usually takes a few minutes. If the study is older than that, it may not contain pixel data a model can embed (for example, Structured Report-only series)."}
       </p>
       <div style={{ display: "flex", gap: "0.5rem", marginTop: "0.5rem" }}>
+        {onUseStudy && (
+          <button type="button" onClick={onUseStudy}>
+            Search the whole study
+          </button>
+        )}
         <button type="button" className="ghost" onClick={onReset}>
           Pick a different reference
         </button>
