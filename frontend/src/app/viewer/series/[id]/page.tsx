@@ -602,6 +602,11 @@ export default function SeriesViewerPage() {
   // 0 = off (default), 7 = EANM EARL1, 5 = EARL2. Re-fetches the
   // volume at the new FWHM via the cached derivative path.
   const [earlFwhmMm, setEarlFwhmMm] = useState<number>(0);
+  // Selected sub-stack of a multi-stack series (Philips mDIXON
+  // Water/Fat/In-phase/Out-of-phase, multi-echo, DWI). 0 = primary.
+  // The available stacks + labels come from ``displayMeta.sub_stacks``;
+  // switching re-fetches the volume at ``volume.raw?stack=<idx>``.
+  const [selectedStackIndex, setSelectedStackIndex] = useState<number>(0);
   // Fusion display metadata (SUV factors / units / tracer / EARL
   // input) — needed when the PRIMARY is a CT but the fusion overlay
   // is a PET, otherwise the SUV / tracer / EARL controls would be
@@ -750,7 +755,16 @@ export default function SeriesViewerPage() {
         studiesApi
           .displayMetadata(s.id)
           .then((dm) => {
-            if (!cancelled) setDisplayMeta(dm);
+            if (!cancelled) {
+              setDisplayMeta(dm);
+              // Open on the primary contrast (Water for mDIXON). The
+              // volume fetch is already in flight for stack 0; only
+              // re-fetch if the default isn't the primary.
+              if (typeof dm.default_stack_index === "number" && dm.default_stack_index !== 0) {
+                setSelectedStackIndex(dm.default_stack_index);
+                setVolume(null);
+              }
+            }
           })
           .catch(() => {
             /* PET HUD just stays hidden if we can't resolve. */
@@ -1048,6 +1062,7 @@ export default function SeriesViewerPage() {
         const resp = await fetch(
           studiesApi.volumeUrl(params.id, {
             earlFwhmMm: earlFwhmMm > 0 ? earlFwhmMm : undefined,
+            stackIndex: selectedStackIndex > 0 ? selectedStackIndex : undefined,
           }),
           { credentials: "include", headers },
         );
@@ -1121,11 +1136,23 @@ export default function SeriesViewerPage() {
         setVolumeLoading(false);
       }
     })();
-  }, [volume, params.id, tv, earlFwhmMm]);
+  }, [volume, params.id, tv, earlFwhmMm, selectedStackIndex]);
 
   useEffect(() => {
     loadVolume();
   }, [loadVolume]);
+
+  // Switch the displayed sub-stack (mDIXON contrast / echo / b-value).
+  // Drop the current volume so ``loadVolume`` re-fetches at the new
+  // ``?stack=`` index; the Cornerstone cache is keyed per stack so the
+  // panes rebuild cleanly.
+  const selectStack = useCallback((idx: number) => {
+    setSelectedStackIndex((cur) => {
+      if (cur === idx) return cur;
+      setVolume(null);
+      return idx;
+    });
+  }, []);
 
   // ``?fusion=<series-id>`` URL flow: fetch the fusion volume once
   // and push it into both the legacy vtk fusion path (so the 3D
@@ -2121,6 +2148,7 @@ export default function SeriesViewerPage() {
                 onActiveToolChange={(t) => setActiveTool(t as Tool | null)}
                 seriesDescription={series?.series_description ?? undefined}
                 seriesId={params.id}
+                stackIndex={selectedStackIndex}
                 volumeViewerRef={volumeViewerRef}
                 onMeasurementsChange={setAllMeasurements}
                 measurements={allMeasurements}
@@ -3460,6 +3488,52 @@ export default function SeriesViewerPage() {
                           />
                         </label>
                       </SidebarSection>
+
+                      {displayMeta?.sub_stacks && displayMeta.sub_stacks.length > 1 && (
+                        <SidebarSection
+                          sectionId="substacks"
+                          title="Contrast / sub-stack"
+                          defaultOpen={true}
+                          hint={`${displayMeta.sub_stacks.length} co-located volumes`}
+                        >
+                          <p
+                            className="meta"
+                            style={{ marginTop: "-0.2rem", fontSize: "0.7rem" }}
+                          >
+                            This series packs several co-located volumes (mDIXON /
+                            multi-echo / diffusion) under one acquisition. Pick which
+                            one to view — each reconstructs independently.
+                          </p>
+                          <div
+                            style={{
+                              display: "flex",
+                              gap: 4,
+                              flexWrap: "wrap",
+                              marginTop: 4,
+                            }}
+                          >
+                            {displayMeta.sub_stacks.map((s) => (
+                              <button
+                                key={s.stack_index}
+                                type="button"
+                                className={
+                                  selectedStackIndex === s.stack_index
+                                    ? "viewer-btn viewer-btn--active"
+                                    : "viewer-btn"
+                                }
+                                style={{ fontSize: "0.7rem", padding: "0.15rem 0.5rem" }}
+                                onClick={() => selectStack(s.stack_index)}
+                                title={`${s.label} · ${s.instance_count} slices`}
+                                disabled={
+                                  volumeLoading && selectedStackIndex === s.stack_index
+                                }
+                              >
+                                {s.label}
+                              </button>
+                            ))}
+                          </div>
+                        </SidebarSection>
+                      )}
 
                       <SidebarSection
                         sectionId="wl"

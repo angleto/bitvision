@@ -245,6 +245,7 @@ async def segment_auto(
                         "FROM series s "
                         "LEFT JOIN derivatives d "
                         "  ON d.series_id = s.id AND d.kind = 'volume_f32' "
+                        "  AND d.stack_index = 0 "
                         "WHERE s.id = :sid"
                     ),
                     {"sid": sid},

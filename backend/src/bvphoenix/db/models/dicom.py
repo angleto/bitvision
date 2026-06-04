@@ -30,6 +30,7 @@ from sqlalchemy import (
     ForeignKey,
     Index,
     Integer,
+    SmallInteger,
     String,
     Text,
     UniqueConstraint,
@@ -244,6 +245,14 @@ class Derivative(TimestampMixin, Base):
     )
     kind: Mapped[str] = mapped_column(String(32), nullable=False)
     format: Mapped[str] = mapped_column(String(32), nullable=False)
+    # Which co-located sub-stack of the series this derivative is, for
+    # volumes packed from a multi-stack DICOM series (Philips mDIXON
+    # Water/Fat/In-phase/Out-of-phase, multi-echo, DWI b-values; see
+    # ``services.volumes.partition_substacks``). 0 = the primary/default
+    # stack (and the only stack for the overwhelmingly common single-stack
+    # series), 1.. = the extra contrasts. Part of the uniqueness key so a
+    # series can hold one derivative per (kind, format, stack).
+    stack_index: Mapped[int] = mapped_column(SmallInteger, nullable=False, server_default="0")
     s3_bucket: Mapped[str] = mapped_column(String(128), nullable=False)
     s3_key: Mapped[str] = mapped_column(String(1024), nullable=False)
     size_bytes: Mapped[int | None] = mapped_column(BigInteger)
@@ -259,6 +268,12 @@ class Derivative(TimestampMixin, Base):
     geometry: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
 
     __table_args__ = (
-        UniqueConstraint("series_id", "kind", "format", name="uq_derivatives_series_kind_format"),
+        UniqueConstraint(
+            "series_id",
+            "kind",
+            "format",
+            "stack_index",
+            name="uq_derivatives_series_kind_format_stack",
+        ),
         CheckConstraint("kind <> ''", name="ck_derivatives_kind_nonempty"),
     )

@@ -57,12 +57,8 @@ def _ensure_model() -> Any:
             SAM2ImagePredictor,
         )
 
-        ckpt = os.environ.get(
-            "BVP_MEDSAM_CKPT", "facebook/sam2-hiera-tiny"
-        )
-        cfg = os.environ.get(
-            "BVP_MEDSAM_CFG", "sam2_hiera_t.yaml"
-        )
+        ckpt = os.environ.get("BVP_MEDSAM_CKPT", "facebook/sam2-hiera-tiny")
+        cfg = os.environ.get("BVP_MEDSAM_CFG", "sam2_hiera_t.yaml")
         sam2 = build_sam2(cfg, ckpt, device="cpu")
         _MODEL = SAM2ImagePredictor(sam2)
     except ImportError as exc:  # pragma: no cover — extra not installed
@@ -95,9 +91,9 @@ def _fetch_volume_header_and_slice(
     derive offsets, then issue a Range request for just the slice's
     voxels. Saves bandwidth on large CTs (~10× faster than pulling
     the whole 500 MiB volume for a 256 KiB slice)."""
-    head = s3.get_object(
-        Bucket=bucket, Key=key, Range=f"bytes=0-{HEADER_STRUCT.size - 1}"
-    )["Body"].read()
+    head = s3.get_object(Bucket=bucket, Key=key, Range=f"bytes=0-{HEADER_STRUCT.size - 1}")[
+        "Body"
+    ].read()
     nx, ny, nz, _sx, _sy, _sz, _vmin, _vmax = HEADER_STRUCT.unpack_from(head, 0)
     if axis == 2:
         # Axial: slice spans nx*ny voxels at fixed Z. F32 = 4 bytes.
@@ -111,21 +107,19 @@ def _fetch_volume_header_and_slice(
         # cross-task.
         body = s3.get_object(Bucket=bucket, Key=key)["Body"].read()
         n = nx * ny * nz
-        full = np.frombuffer(
-            body, dtype=np.float32, count=n, offset=HEADER_STRUCT.size
-        ).reshape(nz, ny, nx)
+        full = np.frombuffer(body, dtype=np.float32, count=n, offset=HEADER_STRUCT.size).reshape(
+            nz, ny, nx
+        )
         return full[:, slice_idx, :].astype(np.float32, copy=True), (nx, ny, nz)
     else:
         body = s3.get_object(Bucket=bucket, Key=key)["Body"].read()
         n = nx * ny * nz
-        full = np.frombuffer(
-            body, dtype=np.float32, count=n, offset=HEADER_STRUCT.size
-        ).reshape(nz, ny, nx)
+        full = np.frombuffer(body, dtype=np.float32, count=n, offset=HEADER_STRUCT.size).reshape(
+            nz, ny, nx
+        )
         return full[:, :, slice_idx].astype(np.float32, copy=True), (nx, ny, nz)
     end = offset + per_slice - 1
-    body = s3.get_object(Bucket=bucket, Key=key, Range=f"bytes={offset}-{end}")[
-        "Body"
-    ].read()
+    body = s3.get_object(Bucket=bucket, Key=key, Range=f"bytes={offset}-{end}")["Body"].read()
     arr = np.frombuffer(body, dtype=np.float32, count=nx * ny).reshape(ny, nx)
     return arr, (int(nx), int(ny), int(nz))
 
@@ -213,7 +207,8 @@ async def medsam_predict_2d(
                     text(
                         "SELECT d.s3_bucket, d.s3_key "
                         "FROM derivatives d "
-                        "WHERE d.series_id = :sid AND d.kind = 'volume_f32'"
+                        "WHERE d.series_id = :sid AND d.kind = 'volume_f32' "
+                        "AND d.stack_index = 0"
                     ),
                     {"sid": sid},
                 )
@@ -237,9 +232,7 @@ async def medsam_predict_2d(
     )
     rgb = _normalise_for_sam(slice_arr)
     try:
-        mask = await asyncio.to_thread(
-            _run_predictor, rgb, point_coords, point_labels
-        )
+        mask = await asyncio.to_thread(_run_predictor, rgb, point_coords, point_labels)
     except Exception as exc:
         logger.exception("MedSAM prediction failed for series %s", series_id)
         return {

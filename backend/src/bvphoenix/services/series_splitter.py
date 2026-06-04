@@ -69,10 +69,27 @@ class InstanceInfo:
     slice_location: float | None
     image_position_z: float | None
 
+    # Multi-contrast / multi-echo / diffusion discriminators. These are
+    # the tags that separate co-located sub-stacks packed under one
+    # SeriesInstanceUID (the classic case: a Philips mDIXON series whose
+    # Water / Fat / In-phase / Out-of-phase volumes all share the same
+    # z-positions and ImageOrientationPatient and are told apart only by
+    # ``ImageType[2]`` + ``EchoTime``). Defaulted so legacy callers that
+    # build InstanceInfo without them keep working.
+    image_type_key: str | None = None  # ImageType[2:] joined (W / F / IP / OP, M / P, SUB, ...)
+    echo_time: float | None = None  # EchoTime rounded to 2 dp
+    diffusion_b_value: int | None = None  # DiffusionBValue (DWI)
+    stack_id: str | None = None  # Philips StackID
+
     @property
     def compound_key(self) -> tuple:
         """All-in-one grouping key. Instances with the same key belong
-        to the same logical sub-series."""
+        to the same logical sub-series.
+
+        Indices 0..5 are frozen (orientation/echo/temporal/acq/FoR) so
+        the positional reason mapping in ``split_series`` stays valid;
+        the multi-contrast discriminators are appended at 6..9.
+        """
         return (
             self.series_instance_uid,
             self.orientation_key,
@@ -80,6 +97,10 @@ class InstanceInfo:
             self.temporal_position or 0,
             self.acquisition_number or 0,
             self.frame_of_reference_uid or "",
+            self.image_type_key or "",
+            self.echo_time or 0.0,
+            self.diffusion_b_value or 0,
+            self.stack_id or "",
         )
 
 
@@ -114,6 +135,67 @@ def _round_orientation(ds: pydicom.Dataset) -> str:
     return ",".join(f"{float(v):.2f}" for v in iop[:6])
 
 
+def image_type_token(ds: pydicom.Dataset) -> str | None:
+    """The contrast/processing token from ``ImageType`` (0008,0008).
+
+    ``ImageType`` value 0 (ORIGINAL/DERIVED) and value 1
+    (PRIMARY/SECONDARY) are not discriminating; value 2 onward carries
+    the meaningful label — ``W`` / ``F`` / ``IP`` / ``OP`` for a Philips
+    mDIXON, ``M`` / ``P`` magnitude vs phase, ``SUB`` for a subtraction.
+    Returns the value-2 token uppercased, or ``None`` when absent.
+    """
+    it = getattr(ds, "ImageType", None)
+    if not it:
+        return None
+    try:
+        vals = [str(v).upper().strip() for v in it]
+    except TypeError:
+        return None
+    return vals[2] if len(vals) > 2 and vals[2] else None
+
+
+def _image_type_key(ds: pydicom.Dataset) -> str | None:
+    """Full ImageType discriminator (value 2 onward, joined) — keeps
+    ``W`` distinct from ``W\\DERIVED`` so genuinely different processings
+    don't collapse into one stack."""
+    it = getattr(ds, "ImageType", None)
+    if not it:
+        return None
+    try:
+        vals = [str(v).upper().strip() for v in it]
+    except TypeError:
+        return None
+    disc = [v for v in vals[2:] if v]
+    return "\\".join(disc) if disc else None
+
+
+def _echo_time_key(ds: pydicom.Dataset) -> float | None:
+    te = getattr(ds, "EchoTime", None)
+    if te is None or te == "":
+        return None
+    try:
+        return round(float(te), 2)
+    except (TypeError, ValueError):
+        return None
+
+
+def _diffusion_b_value(ds: pydicom.Dataset) -> int | None:
+    b = getattr(ds, "DiffusionBValue", None)
+    if b is None or b == "":
+        return None
+    try:
+        return round(float(b))
+    except (TypeError, ValueError):
+        return None
+
+
+def _stack_id(ds: pydicom.Dataset) -> str | None:
+    s = getattr(ds, "StackID", None)
+    if s is None or s == "":
+        return None
+    return str(s)
+
+
 def extract_instance_info(ds: pydicom.Dataset, *, path_or_key: str = "") -> InstanceInfo:
     """Extract grouping-relevant metadata from a parsed DICOM dataset."""
     pos = getattr(ds, "ImagePositionPatient", None)
@@ -132,7 +214,25 @@ def extract_instance_info(ds: pydicom.Dataset, *, path_or_key: str = "") -> Inst
         frame_of_reference_uid=str(getattr(ds, "FrameOfReferenceUID", "") or ""),
         slice_location=_as_float(getattr(ds, "SliceLocation", None)),
         image_position_z=float(pos[2]) if pos and len(pos) >= 3 else None,
+        image_type_key=_image_type_key(ds),
+        echo_time=_echo_time_key(ds),
+        diffusion_b_value=_diffusion_b_value(ds),
+        stack_id=_stack_id(ds),
     )
+
+
+def substack_tag_key(ds: pydicom.Dataset) -> tuple:
+    """Tag-based sub-stack discriminator for instances *within one
+    series* (the SeriesInstanceUID is dropped — all instances share it
+    at pack time). Two instances with the same key are candidates for
+    the same coherent volume; a different key means a distinct co-located
+    sub-stack (different contrast / echo / b-value / orientation / FoR).
+
+    Reuses ``extract_instance_info`` so the keying logic lives in exactly
+    one place (this module), shared by the import-time splitter and the
+    volume-build de-interleaver.
+    """
+    return extract_instance_info(ds).compound_key[1:]
 
 
 def extract_from_bytes(data: bytes, *, path_or_key: str = "") -> InstanceInfo | None:
@@ -199,6 +299,14 @@ def split_series(instances: list[InstanceInfo]) -> list[SubSeries]:
             reasons.append(f"acquisition {key[4]}")
         if key[5] != reference_key[5]:
             reasons.append("different frame of reference")
+        if key[6] != reference_key[6]:
+            reasons.append(f"image type {key[6]}")
+        if key[7] != reference_key[7]:
+            reasons.append(f"echo time {key[7]}")
+        if key[8] != reference_key[8]:
+            reasons.append(f"b-value {key[8]}")
+        if key[9] != reference_key[9]:
+            reasons.append(f"stack {key[9]}")
 
         result.append(
             SubSeries(

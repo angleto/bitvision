@@ -62,6 +62,8 @@ from bvphoenix.services.derivative_keys import (
     volume_earl_key,
     volume_key,
     volume_preview_key,
+    volume_stack_earl_key,
+    volume_stack_key,
 )
 from bvphoenix.services.dicom_documents import (
     UnsupportedDocumentError,
@@ -796,4 +798,6 @@ __all__ = [
     "volume_earl_key",
     "volume_key",
     "volume_preview_key",
+    "volume_stack_earl_key",
+    "volume_stack_key",
 ]

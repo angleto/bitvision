@@ -32,11 +32,13 @@ from __future__ import annotations
 import io
 import struct
 from dataclasses import dataclass
+from itertools import pairwise
 from typing import TypedDict
 
 import numpy as np
 import pydicom
 
+from bvphoenix.services.series_splitter import image_type_token, substack_tag_key
 from bvphoenix.storage import S3Storage
 
 DERIVATIVE_KIND = "volume_f32"
@@ -362,10 +364,264 @@ def _all_non_volumetric(datasets: list[pydicom.Dataset]) -> bool:
     return True
 
 
+# ---------------------------------------------------------------------------
+# Sub-stack separation (mDIXON / multi-echo / DWI / dynamic in one series)
+# ---------------------------------------------------------------------------
+#
+# A single DICOM SeriesInstanceUID can carry several co-located volumes:
+# a Philips mDIXON series interleaves Water / Fat / In-phase / Out-of-phase
+# stacks that share the same z-positions and ImageOrientationPatient. Packed
+# naively (sort all instances by z, stack) the contrasts interleave at near-
+# identical z, the slice spacing collapses to ~0 and the MPR geometry turns
+# to garbage. ``partition_substacks`` de-interleaves them BEFORE the sort so
+# each contrast becomes its own monotonic-unique stack that ``pack_series``'s
+# existing spacing/geometry math handles correctly.
+
+
+# Friendly labels for the common ImageType (0008,0008) value-2 tokens.
+_IMAGE_TYPE_LABELS: dict[str, str] = {
+    "W": "Water",
+    "WATER": "Water",
+    "F": "Fat",
+    "FAT": "Fat",
+    "IP": "In-phase",
+    "IN": "In-phase",
+    "IN_PHASE": "In-phase",
+    "INPHASE": "In-phase",
+    "OP": "Out-of-phase",
+    "OUT": "Out-of-phase",
+    "OUT_PHASE": "Out-of-phase",
+    "OUTPHASE": "Out-of-phase",
+    "OPP": "Out-of-phase",
+    "M": "Magnitude",
+    "P": "Phase",
+    "R": "Real",
+    "I": "Imaginary",
+    "SUB": "Subtraction",
+}
+# Canonical ordering so the same series always yields the same stack_index
+# across re-packs, and the diagnostically-primary contrast (Water) lands at
+# index 0. Lower = earlier; unknown tokens sort after the known ones.
+_IMAGE_TYPE_PRIORITY: dict[str, int] = {
+    "W": 0,
+    "WATER": 0,
+    "F": 1,
+    "FAT": 1,
+    "IP": 2,
+    "IN": 2,
+    "IN_PHASE": 2,
+    "INPHASE": 2,
+    "OP": 3,
+    "OUT": 3,
+    "OUT_PHASE": 3,
+    "OUTPHASE": 3,
+    "OPP": 3,
+    "M": 0,
+    "P": 1,
+    "R": 2,
+    "I": 3,
+}
+
+
+@dataclass(frozen=True, slots=True)
+class SubStack:
+    """One coherent volume extracted from a (possibly multi-stack) series."""
+
+    stack_index: int  # 0-based, deterministic; 0 = primary/default
+    label: str  # human-readable: 'Water', 'b=1000', 'TE=2.3ms', 'main', ...
+    image_type: str | None  # ImageType[2] token when present (W / F / IP / OP)
+    datasets: list[pydicom.Dataset]  # the instances of this stack (unsorted)
+
+
+def _slice_normal(datasets: list[pydicom.Dataset]) -> np.ndarray | None:
+    """Unit slice normal (row × column cosine) from the first dataset that
+    carries a valid ImageOrientationPatient — used to project positions
+    onto the through-plane axis so oblique acquisitions de-interleave
+    correctly (not just by IPP[2])."""
+    for ds in datasets:
+        iop = getattr(ds, "ImageOrientationPatient", None)
+        if not iop or len(iop) < 6:
+            continue
+        try:
+            row = np.array([float(iop[0]), float(iop[1]), float(iop[2])], dtype=np.float64)
+            col = np.array([float(iop[3]), float(iop[4]), float(iop[5])], dtype=np.float64)
+        except (TypeError, ValueError):
+            continue
+        normal = np.cross(row, col)
+        n = float(np.linalg.norm(normal))
+        if n > 1e-9:
+            return normal / n
+    return None
+
+
+def _position_along(ds: pydicom.Dataset, normal: np.ndarray | None) -> float:
+    """Project ImagePositionPatient onto the slice normal (through-plane
+    coordinate). Falls back to IPP[2] when the orientation is unknown."""
+    ipp = getattr(ds, "ImagePositionPatient", None)
+    if not ipp or len(ipp) < 3:
+        return 0.0
+    try:
+        p = np.array([float(ipp[0]), float(ipp[1]), float(ipp[2])], dtype=np.float64)
+    except (TypeError, ValueError):
+        return 0.0
+    if normal is not None:
+        return float(np.dot(p, normal))
+    return float(p[2])
+
+
+def _instance_number(ds: pydicom.Dataset) -> int:
+    return int(getattr(ds, "InstanceNumber", 0) or 0)
+
+
+def _deinterleave_duplicate_positions(
+    datasets: list[pydicom.Dataset],
+) -> list[list[pydicom.Dataset]]:
+    """Geometric de-interleave fallback (Layer 2): split a group whose tags
+    did NOT separate the contrasts but whose through-plane positions repeat.
+
+    If a position appears K>1 times (within a tolerance of 0.1× the median
+    slice spacing) the group still holds K interleaved stacks. The i-th
+    occurrence (ordered by InstanceNumber) of each distinct position is
+    assigned to sub-stack i, so every returned stack is monotonic-unique in
+    position. Returns the input as a single stack when it is already
+    monotonic-unique (the common case)."""
+    if len(datasets) < 2:
+        return [datasets]
+    normal = _slice_normal(datasets)
+    positions = sorted(_position_along(ds, normal) for ds in datasets)
+    diffs = sorted(b - a for a, b in pairwise(positions) if (b - a) > 1e-3)
+    if not diffs:
+        # Every instance at the same position: a degenerate single-plane
+        # group (e.g. one localizer plane). Treat as one stack.
+        return [datasets]
+    median_spacing = diffs[len(diffs) // 2]
+    tol = max(0.1 * median_spacing, 1e-3)
+
+    ordered = sorted(datasets, key=lambda ds: (_position_along(ds, normal), _instance_number(ds)))
+    clusters: list[list[pydicom.Dataset]] = []
+    ref = 0.0
+    for ds in ordered:
+        p = _position_along(ds, normal)
+        if clusters and abs(p - ref) <= tol:
+            clusters[-1].append(ds)
+        else:
+            clusters.append([ds])
+            ref = p
+    k = max(len(c) for c in clusters)
+    if k <= 1:
+        return [datasets]  # already monotonic-unique
+    stacks: list[list[pydicom.Dataset]] = [[] for _ in range(k)]
+    for cluster in clusters:
+        for ordinal, ds in enumerate(sorted(cluster, key=_instance_number)):
+            stacks[ordinal].append(ds)
+    return [s for s in stacks if s]
+
+
+def _describe_stack(
+    members: list[pydicom.Dataset], ordinal: int
+) -> tuple[str, str | None, int, tuple]:
+    """Return ``(label, image_type_token, priority, tiebreak)`` for a stack,
+    deriving a human-readable label from the most specific discriminator
+    present."""
+    ds = members[0]
+    token = image_type_token(ds)
+    if token:
+        label = _IMAGE_TYPE_LABELS.get(token, token)
+        priority = _IMAGE_TYPE_PRIORITY.get(token, 50)
+        return label, token, priority, (token,)
+
+    b = getattr(ds, "DiffusionBValue", None)
+    try:
+        bval = round(float(b)) if b not in (None, "") else None
+    except (TypeError, ValueError):
+        bval = None
+    if bval is not None:
+        return f"b={bval}", None, 100 + min(bval, 9000), (bval,)
+
+    te = getattr(ds, "EchoTime", None)
+    try:
+        teval = round(float(te), 2) if te not in (None, "") else None
+    except (TypeError, ValueError):
+        teval = None
+    if teval is not None:
+        return f"TE={teval:g}ms", None, 20000 + int(teval * 100), (teval,)
+
+    temporal = getattr(ds, "TemporalPositionIdentifier", None) or getattr(
+        ds, "TemporalPositionIndex", None
+    )
+    try:
+        tval = int(temporal) if temporal not in (None, "") else None
+    except (TypeError, ValueError):
+        tval = None
+    if tval is not None:
+        return f"phase {tval}", None, 30000 + tval, (tval,)
+
+    sid = getattr(ds, "StackID", None)
+    if sid not in (None, ""):
+        return f"stack {sid}", None, 40000, (str(sid),)
+
+    # Pure geometric duplicate-z split: nothing in the tags told them apart.
+    return f"stack {ordinal + 1}", None, 50000 + ordinal, (ordinal,)
+
+
+def partition_substacks(datasets: list[pydicom.Dataset]) -> list[SubStack]:
+    """Split a single-frame series into coherent sub-stacks.
+
+    Two layers: (1) group by the tag discriminator
+    (``series_splitter.substack_tag_key`` — orientation, FoR, ImageType[2],
+    echo, EchoTime, b-value, StackID, temporal, acquisition); (2) within
+    each group, geometric de-interleave of repeated through-plane positions.
+
+    A coherent single-stack series returns exactly one ``SubStack`` holding
+    ALL datasets (stack_index 0, label 'main') so the downstream pack is
+    byte-identical to the pre-substack behaviour. Multi-stack series return
+    one ``SubStack`` per contrast, deterministically ordered so the primary
+    (largest; ties prefer Water) is stack_index 0.
+    """
+    if not datasets:
+        return []
+
+    groups: dict[tuple, list[pydicom.Dataset]] = {}
+    for ds in datasets:
+        groups.setdefault(substack_tag_key(ds), []).append(ds)
+
+    raw: list[tuple[list[pydicom.Dataset], int]] = []
+    for members in groups.values():
+        for ordinal, sub in enumerate(_deinterleave_duplicate_positions(members)):
+            raw.append((sub, ordinal))
+
+    # Fast path: one coherent stack — keep ALL datasets, label 'main'.
+    if len(raw) == 1:
+        return [SubStack(0, "main", image_type_token(datasets[0]), list(datasets))]
+
+    described = [(members, *_describe_stack(members, ordinal)) for (members, ordinal) in raw]
+    # Order: largest first, then canonical priority (Water before Fat ...),
+    # then a stable tiebreak. Enumerate to assign stack_index.
+    order = sorted(
+        range(len(described)),
+        key=lambda i: (-len(described[i][0]), described[i][3], described[i][4]),
+    )
+    result: list[SubStack] = []
+    for new_index, i in enumerate(order):
+        members, label, token, _prio, _tb = described[i]
+        result.append(SubStack(new_index, label, token, members))
+    return result
+
+
+def list_substacks(datasets: list[pydicom.Dataset]) -> list[tuple[int, str, str | None, int]]:
+    """Lightweight ``(stack_index, label, image_type, instance_count)`` list
+    for the display-metadata endpoint, so the viewer can render a picker."""
+    return [
+        (s.stack_index, s.label, s.image_type, len(s.datasets))
+        for s in partition_substacks(datasets)
+    ]
+
+
 def pack_series(
     *,
     storage: S3Storage,
     instance_entries: list[tuple[str, str]],  # [(bucket, key), ...] in DB order
+    stack_index: int | None = None,
 ) -> PackedVolume:
     """Fetch every instance from S3, decode its pixel data, stack into
     a single Float32 volume.
@@ -376,6 +632,13 @@ def pack_series(
     ``NumberOfFrames > 1`` we treat that file as a multi-frame
     container and pull rescale + position from
     ``PerFrameFunctionalGroupsSequence``.
+
+    ``stack_index`` selects one coherent sub-stack when the series holds
+    several co-located volumes under one SeriesInstanceUID (Philips
+    mDIXON Water/Fat/In-phase/Out-of-phase, multi-echo, DWI b-values).
+    ``None`` / ``0`` selects the primary stack (largest; ties prefer
+    Water). A genuinely single-stack series ignores it and packs
+    byte-identically to before. See ``partition_substacks``.
     """
     if not instance_entries:
         raise ValueError("series has no instances")
@@ -428,6 +691,20 @@ def pack_series(
         # Heterogeneous Enhanced PETs in the same series — pick the
         # first as a best-effort.
         return _pack_enhanced_multiframe(multi_datasets[0])
+
+    # De-interleave co-located sub-stacks (mDIXON W/F/IP/OP, multi-echo,
+    # DWI b-values) before sorting, then keep only the requested stack.
+    # A single coherent series returns one stack with every dataset, so
+    # ``want == 0`` short-circuits to the unchanged (byte-identical) path.
+    want = 0 if stack_index is None else stack_index
+    stacks = partition_substacks(datasets)
+    if want != 0 or len(stacks) > 1:
+        chosen = next((s for s in stacks if s.stack_index == want), None)
+        if chosen is None:
+            raise ValueError(
+                f"stack_index {want} out of range: series has {len(stacks)} sub-stack(s)"
+            )
+        datasets = list(chosen.datasets)
 
     datasets.sort(key=_sort_key)
 

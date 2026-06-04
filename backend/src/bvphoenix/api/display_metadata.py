@@ -33,11 +33,29 @@ from bvphoenix.services.suv import compute_suv_factors
 from bvphoenix.services.volumes import (
     NON_VOLUMETRIC_SOP_CLASSES,
     _detect_4d,
+    list_substacks,
     read_display_metadata,
 )
 from bvphoenix.storage import get_s3_storage
 
 router = APIRouter(tags=["display-metadata"])
+
+# Bound the fan-out when reading per-instance headers for sub-stack
+# detection — a few hundred small ranged GETs for a big series, kept off
+# the event loop via to_thread.
+_SUBSTACK_SCAN_CONCURRENCY = 16
+
+
+class SubStackInfo(BaseModel):
+    """One coherent volume inside a multi-stack series (Philips mDIXON
+    Water/Fat/In-phase/Out-of-phase, multi-echo, DWI b-values). The viewer
+    renders a picker when more than one is present and fetches each via
+    ``GET /series/{id}/volume.raw?stack=<stack_index>``."""
+
+    stack_index: int
+    label: str  # 'Water', 'Fat', 'b=1000', 'TE=2.3ms', 'main', ...
+    image_type: str | None = None  # ImageType[2] token (W / F / IP / OP) when present
+    instance_count: int
 
 
 class DisplayMetadata(BaseModel):
@@ -105,6 +123,12 @@ class DisplayMetadata(BaseModel):
     # additional dynamic data the viewer is not yet exposing.
     is_dynamic_4d: bool = False
     n_time_frames: int = 1
+    # Co-located sub-stacks packed under one SeriesInstanceUID (mDIXON
+    # W/F/IP/OP, multi-echo, DWI). One entry for the common single-stack
+    # series; multiple entries drive the viewer's contrast picker. Each
+    # is fetched via ``volume.raw?stack=<stack_index>``.
+    sub_stacks: list[SubStackInfo] = []
+    default_stack_index: int = 0
 
 
 @router.get("/series/{series_id}/display-metadata", response_model=DisplayMetadata)
@@ -127,36 +151,70 @@ async def get_display_metadata(
     if not await can(db, user=user, action=READ_PIXELS, study=study):
         raise HTTPException(status_code=404, detail="series not found")
 
-    # First instance suffices — photometric / pixel spacing are
-    # series-wide invariants for the modalities we support.
-    instance = (
-        await db.execute(
-            select(Instance)
-            .where(Instance.series_id == series.id)
-            .order_by(Instance.instance_number.asc().nullslast())
-            .limit(1)
+    # Read EVERY instance header (header-only, so cheap) so we can detect
+    # co-located sub-stacks (mDIXON Water/Fat/In-phase/Out-of-phase, multi-
+    # echo, DWI b-values), not just inspect the first instance. The base
+    # display hints (photometric / spacing / SUV) still come from the first
+    # instance — those are series-wide invariants. The fan-out is bounded
+    # and runs off the event loop; the 24 h response cache amortises it.
+    rows_inst = list(
+        (
+            await db.execute(
+                select(Instance)
+                .where(Instance.series_id == series.id)
+                .order_by(Instance.instance_number.asc().nullslast())
+            )
         )
-    ).scalar_one_or_none()
-    if instance is None:
+        .scalars()
+        .all()
+    )
+    if not rows_inst:
         raise HTTPException(status_code=409, detail="series has no instances yet")
 
     storage = get_s3_storage()
-    dcm_bytes = await asyncio.to_thread(
-        storage.get_object_bytes, bucket=instance.s3_bucket, key=instance.s3_key
-    )
-    # stop_before_pixels keeps this fast: we only read the header tags.
-    ds = await asyncio.to_thread(pydicom.dcmread, io.BytesIO(dcm_bytes), stop_before_pixels=True)
+    sem = asyncio.Semaphore(_SUBSTACK_SCAN_CONCURRENCY)
+
+    async def _read_header(inst: Instance) -> pydicom.Dataset | None:
+        async with sem:
+            try:
+                data = await asyncio.to_thread(
+                    storage.get_object_bytes, bucket=inst.s3_bucket, key=inst.s3_key
+                )
+                # stop_before_pixels keeps this fast: header tags only.
+                return await asyncio.to_thread(
+                    pydicom.dcmread, io.BytesIO(data), stop_before_pixels=True, force=True
+                )
+            except Exception:
+                return None
+
+    headers = [
+        h for h in await asyncio.gather(*[_read_header(i) for i in rows_inst]) if h is not None
+    ]
+    if not headers:
+        raise HTTPException(status_code=409, detail="series instances are unreadable")
+
+    ds = headers[0]  # instance-number-ordered; first carries the base hints
     meta = read_display_metadata(ds)
     frame_of_reference_uid = getattr(ds, "FrameOfReferenceUID", None)
     if frame_of_reference_uid is not None:
         frame_of_reference_uid = str(frame_of_reference_uid)
     is_dynamic_4d, n_time_frames = _detect_4d(ds)
+
+    # Sub-stack manifest for the viewer's contrast picker. One entry for the
+    # common single-stack series, several for an mDIXON / multi-echo / DWI.
+    sub_stacks = [
+        SubStackInfo(stack_index=si, label=label, image_type=it, instance_count=cnt)
+        for (si, label, it, cnt) in list_substacks(headers)
+    ]
+    default_stack_index = sub_stacks[0].stack_index if sub_stacks else 0
+
     # Single-slice / non-volumetric series routing hint: when every
     # instance is a SOP class with no z-axis (SC, PR, SR, ...), force
     # the primary plane to "unknown" so the frontend skips MPR setup
     # and goes straight to ``<Series2DViewer>``. The volume endpoint
     # already 404s on this case, so this is purely a UX nudge.
-    if instance.sop_class_uid is not None and instance.sop_class_uid in NON_VOLUMETRIC_SOP_CLASSES:
+    sop_class_uid = str(getattr(ds, "SOPClassUID", "") or "")
+    if sop_class_uid and sop_class_uid in NON_VOLUMETRIC_SOP_CLASSES:
         meta["primary_plane"] = "unknown"
 
     # PET-specific enrichment. SUV factors come straight from the
@@ -218,5 +276,7 @@ async def get_display_metadata(
         frame_of_reference_uid=frame_of_reference_uid,
         is_dynamic_4d=is_dynamic_4d,
         n_time_frames=n_time_frames,
+        sub_stacks=sub_stacks,
+        default_stack_index=default_stack_index,
         **meta,
     )
