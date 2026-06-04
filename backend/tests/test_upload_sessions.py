@@ -10,12 +10,14 @@ stub DB/S3 so the test stays fast and DB-free.
 from __future__ import annotations
 
 import uuid
+from unittest.mock import MagicMock
 
 import pytest
 from fastapi import HTTPException
 
 from bvphoenix.db.models import UploadSession, UploadSessionFile
 from bvphoenix.services import upload_sessions as svc
+from bvphoenix.storage.s3 import S3Storage
 
 CHUNK = svc.CHUNK_SIZE
 
@@ -30,6 +32,29 @@ def test_chunk_size_is_a_legal_s3_part() -> None:
     # needs an exact power-of-two divisor.
     assert CHUNK >= 5 * 1024 * 1024
     assert CHUNK & (CHUNK - 1) == 0
+
+
+def test_complete_multipart_projects_to_s3_keys_only() -> None:
+    """Regression: append_chunk persists ``{PartNumber, ETag, size}`` per part,
+    but S3's complete_multipart_upload rejects any key other than PartNumber /
+    ETag (``ParamValidationError: Unknown parameter ... "size"``). The storage
+    layer must project to exactly those two keys (and sort by PartNumber)
+    before calling boto3 — the prod 500 that this guards against."""
+    storage = object.__new__(S3Storage)
+    storage._client = MagicMock()
+    storage.complete_multipart(
+        bucket="b",
+        key="k",
+        upload_id="u",
+        # Out of order + carrying the bookkeeping ``size`` key.
+        parts=[
+            {"PartNumber": 2, "ETag": '"e2"', "size": 100},
+            {"PartNumber": 1, "ETag": '"e1"', "size": CHUNK},
+        ],
+    )
+    sent = storage._client.complete_multipart_upload.call_args.kwargs["MultipartUpload"]["Parts"]
+    assert sent == [{"PartNumber": 1, "ETag": '"e1"'}, {"PartNumber": 2, "ETag": '"e2"'}]
+    assert all(set(p) == {"PartNumber", "ETag"} for p in sent)
 
 
 def test_staged_key_layout() -> None:
