@@ -298,16 +298,21 @@ class S3Storage:
     ) -> None:
         """Finalize the object from its uploaded parts.
 
-        ``parts`` is ``[{"PartNumber": int, "ETag": str}, ...]``; we sort by
-        PartNumber (S3 requires ascending order) so the caller can persist
-        them in receipt order.
+        ``parts`` carries at least ``PartNumber`` + ``ETag``; callers may
+        persist extra bookkeeping keys (e.g. ``size``) alongside them. We sort
+        by PartNumber (S3 requires ascending order) and project to EXACTLY the
+        two keys S3 accepts — passing any other key (``size``) makes botocore
+        raise ``ParamValidationError: Unknown parameter in MultipartUpload``.
         """
-        parts_sorted = sorted(parts, key=lambda p: int(p["PartNumber"]))
+        s3_parts = [
+            {"PartNumber": int(p["PartNumber"]), "ETag": p["ETag"]}
+            for p in sorted(parts, key=lambda p: int(p["PartNumber"]))
+        ]
         self._client.complete_multipart_upload(
             Bucket=bucket,
             Key=key,
             UploadId=upload_id,
-            MultipartUpload={"Parts": parts_sorted},
+            MultipartUpload={"Parts": s3_parts},
         )
 
     def abort_multipart(self, *, bucket: str, key: str, upload_id: str) -> None:
