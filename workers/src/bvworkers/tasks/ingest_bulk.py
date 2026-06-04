@@ -31,7 +31,7 @@ import logging
 import uuid
 from typing import Any
 
-from sqlalchemy import update
+from sqlalchemy import text, update
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
 
 from bvworkers.config import get_settings
@@ -260,33 +260,46 @@ async def ingest_bulk_files(
                         "iso staging cleanup failed for %s", iso["s3_key"]
                     )
 
-            # Enqueue pack_volume per touched series so the viewer
-            # doesn't have to pack on first open. Mirrors what the
-            # legacy ``api/dicom_upload`` endpoint does after a
-            # /studies POST. Best-effort: a Redis blip here just means
-            # the viewer pays the pack cost on cold open.
+            # Enqueue the post-ingest jobs per touched series so the viewer
+            # doesn't have to pack on first open AND visual search can find
+            # the study. Mirrors what the ``api/dicom_upload`` endpoints and
+            # the ``bvphoenix-import`` CLI do, through the same shared helper
+            # so the job set never drifts between upload paths. Best-effort:
+            # a Redis blip just means the viewer packs on cold open and the
+            # embedding can be backfilled via the admin embed-missing endpoint.
             if summary.series_ids:
                 try:
                     from arq import create_pool
                     from bvphoenix.config import get_settings as _get_bvp_settings
                     from bvphoenix.services.arq_redis import redis_settings
+                    from bvphoenix.services.ingest_jobs import enqueue_postprocess_jobs
+
+                    # The summary carries ids only; look up modality so the
+                    # helper can gate embed_series on embeddable series.
+                    mod_rows = (
+                        await db.execute(
+                            text(
+                                "SELECT id::text, modality FROM series WHERE id::text = ANY(:ids)"
+                            ),
+                            {"ids": list(summary.series_ids)},
+                        )
+                    ).all()
+                    series_for_jobs = [(r[0], r[1]) for r in mod_rows]
 
                     bvp_settings = _get_bvp_settings()
                     pool = await create_pool(redis_settings(bvp_settings.redis_url))
                     try:
-                        for sid in summary.series_ids:
-                            await pool.enqueue_job("pack_volume", sid)
+                        packed, embedded = await enqueue_postprocess_jobs(pool, series_for_jobs)
                     finally:
                         await pool.close()
                     log.info(
-                        "bulk ingest job %s: enqueued pack_volume for %d series",
+                        "bulk ingest job %s: enqueued %d pack_volume + %d embed_series",
                         jid,
-                        len(summary.series_ids),
+                        packed,
+                        embedded,
                     )
                 except Exception:
-                    log.exception(
-                        "bulk ingest job %s: pack_volume enqueue failed", jid
-                    )
+                    log.exception("bulk ingest job %s: postprocess enqueue failed", jid)
 
             log.info(
                 "bulk ingest job %s done: %d studies, %d documents, %d skipped",

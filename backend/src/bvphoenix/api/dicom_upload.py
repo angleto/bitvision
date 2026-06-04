@@ -11,8 +11,10 @@ Two endpoints share the same ingestion pipeline (``services.dicom_ingest``):
 
 Both require an authenticated user; studies are owned by the caller and
 default to private / tier-1 unless explicit form fields are provided.
-After a successful ingest the endpoint fires volume pre-pack jobs so the
-viewer doesn't have to wait on first open.
+After a successful ingest the endpoint fires post-ingest jobs (volume
+pre-pack so the viewer doesn't wait on first open, plus a BiomedCLIP
+embedding so the study is reachable by visual search) via the shared
+:mod:`bvphoenix.services.ingest_jobs` helper.
 """
 
 from __future__ import annotations
@@ -40,6 +42,7 @@ from bvphoenix.services.dicom_ingest import (
     iter_stow_rs_parts,
     parse_related_boundary,
 )
+from bvphoenix.services.ingest_jobs import enqueue_postprocess_jobs
 from bvphoenix.services.quota import check_quota_or_raise
 from bvphoenix.services.rate_limit import STOW_LIMIT, UPLOAD_LIMIT, limiter
 from bvphoenix.services.storage_quota import check_storage_quota
@@ -92,9 +95,11 @@ async def _run_ingest(
     blobs: list[tuple[str, bytes]],
     tier: str,
     is_public: bool,
-) -> tuple[UploadSummaryOut, list[str]]:
+) -> tuple[UploadSummaryOut, list[tuple[str, str | None]]]:
     """Feed ``blobs`` (filename, bytes) into :class:`DicomIngestor` and
-    build the response payload. Returns ``(summary, series_ids_for_jobs)``.
+    build the response payload. Returns ``(summary, series_for_jobs)`` where
+    each job entry is a ``(series_id, modality)`` pair — the modality lets the
+    post-ingest enqueue emit ``embed_series`` only for embeddable series.
     """
     settings = get_settings()
     storage = get_s3_storage()
@@ -139,6 +144,9 @@ async def _run_ingest(
     # No extra queries needed — the ingestor already loaded the rows.
     study_ids = [str(s.id) for s in ingestor.touched_studies.values()]
     series_ids = [str(s.id) for s in ingestor.touched_series.values()]
+    # Carry modality alongside the id so the post-ingest enqueue can gate
+    # embed_series on embeddable (image) series without a second query.
+    series_for_jobs = [(str(s.id), s.modality) for s in ingestor.touched_series.values()]
 
     await ingestor.finalize()
     # F6.1: materialise the tier's implied consent rows inside the same
@@ -163,24 +171,30 @@ async def _run_ingest(
             study_ids=study_ids,
             series_ids=series_ids,
         ),
-        series_ids,
+        series_for_jobs,
     )
 
 
-async def _enqueue_pack_jobs(series_ids: list[str]) -> None:
-    """Fire-and-forget volume pre-pack jobs for every new series. Failure
-    here is not fatal — the ``/volume.raw`` endpoint can pack on demand.
+async def _enqueue_postprocess(series: list[tuple[str, str | None]]) -> None:
+    """Fire-and-forget post-ingest jobs for every new series: a volume
+    pre-pack plus a BiomedCLIP embedding for embeddable series (so visual
+    search finds them). Failure here is not fatal — the ``/volume.raw``
+    endpoint packs on demand, and a missed embedding can be backfilled via
+    the admin ``embed-missing`` endpoint. Job selection lives in one place:
+    :func:`bvphoenix.services.ingest_jobs.enqueue_postprocess_jobs`.
     """
-    if not series_ids:
+    if not series:
         return
     try:
         settings = get_settings()
         redis = await create_pool(redis_settings(settings.redis_url))
-        for sid in series_ids:
-            await redis.enqueue_job("pack_volume", sid)
-        await redis.close()
+        try:
+            await enqueue_postprocess_jobs(redis, series)
+        finally:
+            await redis.close()
     except Exception:
-        # Non-fatal: viewer will pack on first open if the worker didn't.
+        # Non-fatal: viewer packs on first open and embeddings can be
+        # backfilled if the worker didn't pick the job up.
         pass
 
 
@@ -227,10 +241,10 @@ async def upload_studies(
     # to the F11.3 OpenData tier cap above.
     await check_storage_quota(db, subject_id=owner.id, additional_bytes=incoming)
 
-    summary, series_ids = await _run_ingest(
+    summary, series_for_jobs = await _run_ingest(
         db=db, owner=owner, blobs=blobs, tier=tier, is_public=is_public
     )
-    await _enqueue_pack_jobs(series_ids)
+    await _enqueue_postprocess(series_for_jobs)
     return summary
 
 
@@ -276,8 +290,8 @@ async def stow_rs(
     # framing overhead rounds in the user's favour.
     await check_quota_or_raise(db, user_subject_id=owner.id, tier="t1", incoming_bytes=len(body))
     await check_storage_quota(db, subject_id=owner.id, additional_bytes=len(body))
-    summary, series_ids = await _run_ingest(
+    summary, series_for_jobs = await _run_ingest(
         db=db, owner=owner, blobs=blobs, tier="t1", is_public=False
     )
-    await _enqueue_pack_jobs(series_ids)
+    await _enqueue_postprocess(series_for_jobs)
     return summary
