@@ -471,7 +471,7 @@ def _enqueue_pack_jobs(settings, series_ids: list[str]) -> None:
         from arq import create_pool
 
         from bvphoenix.services.arq_redis import redis_settings
-        from bvphoenix.services.embeddable import is_embeddable_modality
+        from bvphoenix.services.ingest_jobs import enqueue_postprocess_jobs
 
         engine = create_engine(settings.database_url_sync, future=True)
         with Session(engine) as session:
@@ -479,20 +479,17 @@ def _enqueue_pack_jobs(settings, series_ids: list[str]) -> None:
                 text("SELECT id::text, modality FROM series WHERE id::text = ANY(:ids)"),
                 {"ids": list(series_ids)},
             ).all()
-        embeddable_ids = [rid for (rid, mod) in rows if is_embeddable_modality(mod)]
+        series_for_jobs = [(rid, mod) for (rid, mod) in rows]
 
-        async def _enqueue() -> None:
+        async def _enqueue() -> tuple[int, int]:
             redis = await create_pool(redis_settings(settings.redis_url))
-            for sid in series_ids:
-                await redis.enqueue_job("pack_volume", sid)
-            for sid in embeddable_ids:
-                await redis.enqueue_job("embed_series", sid)
-            await redis.close()
+            try:
+                return await enqueue_postprocess_jobs(redis, series_for_jobs)
+            finally:
+                await redis.close()
 
-        asyncio.run(_enqueue())
-        click.echo(
-            f"enqueued {len(series_ids)} volume pack + {len(embeddable_ids)} embedding job(s)"
-        )
+        packed, embedded = asyncio.run(_enqueue())
+        click.echo(f"enqueued {packed} volume pack + {embedded} embedding job(s)")
     except Exception as exc:
         click.echo(f"warning: could not enqueue pack/embed jobs: {exc}", err=True)
 
