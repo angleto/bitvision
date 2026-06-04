@@ -49,6 +49,14 @@ const STATIC_DIRECTIVES = [
   "connect-src 'self'",
   "worker-src 'self' blob:",
   "media-src 'self' blob:",
+  // PDF / document preview renders the bearer-fetched bytes through a
+  // ``blob:`` URL inside an <iframe> (see DocumentPreview + PDFViewer).
+  // Without ``frame-src``, framing falls back to ``default-src 'self'``,
+  // which excludes ``blob:`` and makes Chrome show "This content is
+  // blocked. Contact the site owner to fix the issue." ``child-src`` is
+  // the deprecated alias older Safari still consults for frames.
+  "frame-src 'self' blob:",
+  "child-src 'self' blob:",
   "frame-ancestors 'none'",
   "base-uri 'self'",
   "form-action 'self'",
