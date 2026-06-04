@@ -35,6 +35,7 @@ from bvphoenix.db.models import (
 )
 from bvphoenix.services.consent_auto import ensure_tier_consents
 from bvphoenix.services.dicom_ingest import DicomIngestor, has_dicm_preamble
+from bvphoenix.services.folders import get_or_create_root_folder
 from bvphoenix.storage import get_s3_storage
 
 log = logging.getLogger(__name__)
@@ -529,17 +530,29 @@ async def process_bulk_ingest(
     # ---- Stage 5: folder linking + tier consents + commit ----
     if progress_cb:
         await progress_cb(0, 1, STAGE_FINALIZE)
-    if folder is not None:
+    # Anchor every uploaded STUDY in a folder so it is always visible + movable
+    # in Drive: the user-chosen folder, or the patient's root folder when none
+    # was picked. Without this a study gets no folder_items row and is reachable
+    # only from search / its direct URL — it never appears in Drive and can't be
+    # moved into a folder (the reported bug). Documents already auto-root via
+    # the no-orphan trigger; studies have no such trigger.
+    study_folder = folder
+    if study_folder is None and patient is not None:
+        study_folder = await get_or_create_root_folder(db, patient)
+    if study_folder is not None:
         for s in summary.studies_created:
             db.add(
                 FolderItem(
-                    folder_id=folder.id,
+                    folder_id=study_folder.id,
                     resource_kind="study",
                     resource_id=uuid.UUID(s.id),
                 )
             )
-        # Without an entry the Document shows up in the fascicolo root,
-        # not in the folder the user dropped the file onto.
+    # Documents: only a user-CHOSEN folder needs an explicit link — without an
+    # entry the Document shows up in the fascicolo root (the no-orphan trigger
+    # materialises it there), not in the folder the user dropped the file onto.
+    # Re-adding it to root would collide on the folder_items PK, so skip it.
+    if folder is not None:
         for d in summary.documents_created:
             db.add(
                 FolderItem(
