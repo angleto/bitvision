@@ -27,6 +27,7 @@ tools are P3.
 
 from __future__ import annotations
 
+import logging
 import uuid
 from datetime import UTC, datetime, timedelta
 from typing import Annotated, Any, Literal
@@ -43,7 +44,7 @@ from fastapi import (
 )
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field, model_validator
-from sqlalchemy import func, select
+from sqlalchemy import Select, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from bvphoenix.api.markers import (
@@ -59,6 +60,7 @@ from bvphoenix.db.models import (
     FindingGeometry,
     FindingRevision,
     FindingType,
+    ImagingStudy,
     Marker,
     MorphologyTerm,
     Segmentation,
@@ -68,6 +70,7 @@ from bvphoenix.db.session import get_db
 from bvphoenix.middleware.audit_dependency import AuditDep
 from bvphoenix.middleware.idempotency import IdempotencyContext, idempotent
 from bvphoenix.services.etag import enforce_optional_if_match, format_etag
+from bvphoenix.services.permissions import apply_scope_filter, visible_studies_filter
 
 router = APIRouter(tags=["findings"])
 
@@ -495,6 +498,66 @@ async def _link_geometry(
         )
 
 
+def _finding_embed_text(
+    *,
+    type_display: str,
+    anatomy_display: str | None,
+    laterality: str | None,
+    morphology: list[str],
+    description: str | None,
+) -> str:
+    """Compose the natural-language string embedded for semantic search."""
+    parts = [type_display]
+    if anatomy_display:
+        parts.append(anatomy_display + (f" {laterality}" if laterality else ""))
+    if morphology:
+        parts.append(", ".join(morphology))
+    text = "; ".join(p for p in parts if p)
+    if description:
+        text = f"{text}. {description}" if text else description
+    return text.strip()
+
+
+async def _enqueue_finding_embed(db: AsyncSession, finding: Finding) -> None:
+    """Best-effort: embed the finding's text under target_kind='finding'
+    (active MiniLM model) so it joins /search/semantic. Mirrors the
+    document OCR enqueue: a failure here must never break the write."""
+    try:
+        type_display = (
+            await db.execute(
+                select(FindingType.display).where(FindingType.id == finding.finding_type_id)
+            )
+        ).scalar_one_or_none() or ""
+        anatomy_display: str | None = None
+        if finding.anatomy_site_id is not None:
+            anatomy_display = (
+                await db.execute(
+                    select(AnatomySite.display).where(AnatomySite.id == finding.anatomy_site_id)
+                )
+            ).scalar_one_or_none()
+        text_value = _finding_embed_text(
+            type_display=type_display,
+            anatomy_display=anatomy_display,
+            laterality=finding.laterality,
+            morphology=list(finding.morphology_keys or []),
+            description=finding.description,
+        )
+        if not text_value:
+            return
+        from arq import create_pool
+
+        from bvphoenix.config import get_settings
+        from bvphoenix.services.arq_redis import redis_settings
+
+        redis = await create_pool(redis_settings(get_settings().redis_url))
+        try:
+            await redis.enqueue_job("embed_text_ml", "finding", str(finding.id), text_value)
+        finally:
+            await redis.close()
+    except Exception:  # pragma: no cover — best-effort, never break the write
+        logging.getLogger(__name__).exception("finding embed enqueue failed for %s", finding.id)
+
+
 # ---------------------------------------------------------------------------
 # Vocabulary endpoint
 # ---------------------------------------------------------------------------
@@ -546,6 +609,102 @@ async def get_vocab(
             for m in morphs
         ],
     )
+
+
+# ---------------------------------------------------------------------------
+# Structured query (shared filter helper + corpus-wide search)
+# ---------------------------------------------------------------------------
+
+
+def _apply_structured_filters(
+    stmt: Select,
+    *,
+    type: str | None,
+    anatomy: str | None,
+    laterality: str | None,
+    morphology: list[str] | None,
+    status_filter: str | None,
+    min_diameter_mm: float | None,
+    max_diameter_mm: float | None,
+    min_volume_ml: float | None,
+    min_suv_max: float | None,
+) -> Select:
+    """Apply the shared structured-query predicates. ``stmt`` must already
+    join FindingType (+ outerjoin AnatomySite) so the key filters resolve.
+    Used by both the patient-scoped list and the corpus search."""
+    if type:
+        stmt = stmt.where(FindingType.key == type)
+    if anatomy:
+        stmt = stmt.where(AnatomySite.key == anatomy)
+    if laterality:
+        stmt = stmt.where(Finding.laterality == laterality)
+    if morphology:
+        # ARRAY contains: the finding must carry every requested slug.
+        stmt = stmt.where(Finding.morphology_keys.contains(morphology))
+    if status_filter:
+        stmt = stmt.where(Finding.status == status_filter)
+    if min_diameter_mm is not None:
+        stmt = stmt.where(Finding.longest_diameter_mm >= min_diameter_mm)
+    if max_diameter_mm is not None:
+        stmt = stmt.where(Finding.longest_diameter_mm <= max_diameter_mm)
+    if min_volume_ml is not None:
+        stmt = stmt.where(Finding.volume_ml >= min_volume_ml)
+    if min_suv_max is not None:
+        stmt = stmt.where(Finding.suv_max >= min_suv_max)
+    return stmt
+
+
+@router.get("/findings/search", response_model=list[FindingOut])
+async def search_findings(
+    db: Annotated[AsyncSession, Depends(get_db)],
+    user: Annotated[User, Depends(require_user)],
+    type: str | None = Query(None, max_length=64, description="finding type key"),
+    anatomy: str | None = Query(None, max_length=64, description="anatomy site key"),
+    laterality: str | None = Query(None, max_length=8),
+    morphology: list[str] | None = Query(None, description="require ALL of these morphology keys"),
+    status_filter: str | None = Query(None, alias="status"),
+    min_diameter_mm: float | None = Query(None, ge=0),
+    max_diameter_mm: float | None = Query(None, ge=0),
+    min_volume_ml: float | None = Query(None, ge=0),
+    min_suv_max: float | None = Query(None, ge=0),
+    scope: Literal["all", "mine", "public"] = Query("all"),
+    limit: int = Query(200, ge=1, le=1000),
+) -> list[FindingOut]:
+    """Corpus-wide structured query over every finding on a study the
+    caller may read (visibility-scoped via ``visible_studies_filter``; no
+    cross-patient leak). The payoff of the typed/coded columns: "all my
+    exams with a spiculated nodule > 1 cm in the RUL". Live findings only.
+    """
+    visible = apply_scope_filter(await visible_studies_filter(db, user), scope, user)
+    visible_ids = visible.with_only_columns(ImagingStudy.id).subquery()
+    stmt = (
+        select(Finding, FindingType.key, AnatomySite.key)
+        .join(FindingType, FindingType.id == Finding.finding_type_id)
+        .outerjoin(AnatomySite, AnatomySite.id == Finding.anatomy_site_id)
+        .where(
+            Finding.study_id.in_(select(visible_ids.c.id)),
+            Finding.deleted_at.is_(None),
+        )
+        .order_by(Finding.created_at.desc())
+        .limit(limit)
+    )
+    stmt = _apply_structured_filters(
+        stmt,
+        type=type,
+        anatomy=anatomy,
+        laterality=laterality,
+        morphology=morphology,
+        status_filter=status_filter,
+        min_diameter_mm=min_diameter_mm,
+        max_diameter_mm=max_diameter_mm,
+        min_volume_ml=min_volume_ml,
+        min_suv_max=min_suv_max,
+    )
+    rows = (await db.execute(stmt)).all()
+    geom = await _geometry_for(db, [r[0].id for r in rows])
+    return [
+        _out(f, type_key=tk, anatomy_key=ak, geometry=geom.get(f.id, [])) for (f, tk, ak) in rows
+    ]
 
 
 # ---------------------------------------------------------------------------
@@ -646,6 +805,7 @@ async def create_finding(
         resource_id=f.id,
         metadata={"patient_id": str(patient_id), "type": ftype.key, "status": f.status},
     )
+    await _enqueue_finding_embed(db, f)
     out = await _serialize_one(db, f)
     return idem.capture(
         out.model_dump(),
@@ -688,25 +848,18 @@ async def list_findings(
         stmt = stmt.where(Finding.deleted_at.is_(None))
     if study_id:
         stmt = stmt.where(Finding.study_id == study_id)
-    if type:
-        stmt = stmt.where(FindingType.key == type)
-    if anatomy:
-        stmt = stmt.where(AnatomySite.key == anatomy)
-    if laterality:
-        stmt = stmt.where(Finding.laterality == laterality)
-    if morphology:
-        # ARRAY contains: the finding must carry every requested slug.
-        stmt = stmt.where(Finding.morphology_keys.contains(morphology))
-    if status_filter:
-        stmt = stmt.where(Finding.status == status_filter)
-    if min_diameter_mm is not None:
-        stmt = stmt.where(Finding.longest_diameter_mm >= min_diameter_mm)
-    if max_diameter_mm is not None:
-        stmt = stmt.where(Finding.longest_diameter_mm <= max_diameter_mm)
-    if min_volume_ml is not None:
-        stmt = stmt.where(Finding.volume_ml >= min_volume_ml)
-    if min_suv_max is not None:
-        stmt = stmt.where(Finding.suv_max >= min_suv_max)
+    stmt = _apply_structured_filters(
+        stmt,
+        type=type,
+        anatomy=anatomy,
+        laterality=laterality,
+        morphology=morphology,
+        status_filter=status_filter,
+        min_diameter_mm=min_diameter_mm,
+        max_diameter_mm=max_diameter_mm,
+        min_volume_ml=min_volume_ml,
+        min_suv_max=min_suv_max,
+    )
 
     rows = (await db.execute(stmt)).all()
     findings = [r[0] for r in rows]
@@ -792,6 +945,7 @@ async def update_finding(
             resource_id=f.id,
             metadata={"changed": sorted(set(changed))},
         )
+        await _enqueue_finding_embed(db, f)
     response.headers["ETag"] = format_etag(str(f.etag))
     return await _serialize_one(db, f)
 

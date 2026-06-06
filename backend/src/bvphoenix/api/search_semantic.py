@@ -44,6 +44,8 @@ from bvphoenix.auth import optional_user
 from bvphoenix.db.models import (
     Document,
     Embedding,
+    Finding,
+    FindingType,
     ImagingStudy,
     Patient,
     Series,
@@ -450,6 +452,63 @@ async def _candidates_document(
     return results[:k]
 
 
+async def _candidates_finding(
+    db: AsyncSession,
+    user: User | None,
+    vector: list[float],
+    model_id: str,
+    k: int,
+    dim: int,
+) -> list[SemanticHit]:
+    """Finding — study-scoped visibility; indexed under the MiniLM text
+    store only (a finding's short text is embedded via embed_text_ml on
+    write). Deleted findings are filtered out even if a stale vector
+    lingers."""
+    if dim != _MINILM_DIM:
+        return []
+    dist_map = await _fetch_nearest(
+        db,
+        table="text_embeddings",
+        target_kind="finding",
+        model_id=model_id,
+        vector=vector,
+        limit=k * 4,
+    )
+    if not dist_map:
+        return []
+
+    visible_studies = await visible_studies_filter(db, user)
+    visible_study_ids = visible_studies.with_only_columns(ImagingStudy.id).subquery()
+
+    rows = (
+        await db.execute(
+            select(Finding.id, Finding.description, FindingType.key)
+            .join(FindingType, FindingType.id == Finding.finding_type_id)
+            .where(
+                Finding.id.in_(list(dist_map.keys())),
+                Finding.study_id.in_(select(visible_study_ids.c.id)),
+                Finding.deleted_at.is_(None),
+            )
+        )
+    ).all()
+
+    results: list[SemanticHit] = []
+    for fid, description, type_key in rows:
+        dist = dist_map.get(fid, 999.0)
+        preview = ((description or type_key) or "")[:240] or None
+        results.append(
+            SemanticHit(
+                target_kind="finding",
+                target_id=str(fid),
+                score=round(max(0.0, 1.0 - dist), 4),
+                preview_text=preview,
+                link=f"/api/findings/{fid}",
+            )
+        )
+    results.sort(key=lambda h: h.score, reverse=True)
+    return results[:k]
+
+
 async def _candidates_patient(
     db: AsyncSession,
     user: User | None,
@@ -509,7 +568,7 @@ async def search_semantic(
     db: Annotated[AsyncSession, Depends(get_db)],
     user: Annotated[User | None, Depends(optional_user)],
     q: str = Query(..., min_length=1, max_length=512, description="Natural-language query"),
-    target: Literal["series", "report", "consultation", "document", "patient"] = Query(
+    target: Literal["series", "report", "consultation", "document", "patient", "finding"] = Query(
         ..., description="Kind of artefact to search."
     ),
     model: Literal["biomedclip", "minilm"] = Query(
@@ -561,6 +620,8 @@ async def search_semantic(
         items = await _candidates_document(db, user, vector, model_id, k, dim)
     elif target == "patient":
         items = await _candidates_patient(db, user, vector, model_id, k, dim)
+    elif target == "finding":
+        items = await _candidates_finding(db, user, vector, model_id, k, dim)
     else:  # pragma: no cover — validated above
         items = []
 

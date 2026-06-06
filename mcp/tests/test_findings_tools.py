@@ -181,6 +181,28 @@ async def test_search_findings_forwards_structured_filters() -> None:
     assert json.loads(result) == []
 
 
+async def test_search_findings_corpus_mode_omits_patient() -> None:
+    """No patient_id -> corpus-wide visibility-scoped search at
+    /api/findings/search, forwarding scope + structured filters."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.method == "GET"
+        assert request.url.path == "/api/findings/search"
+        p = request.url.params
+        assert p["type"] == "mass"
+        assert p["scope"] == "mine"
+        assert p["min_volume_ml"] == "5"
+        _assert_auth(request)
+        return _json_response([])
+
+    with mock_backend(handler):
+        result = await findings_tools.handle(
+            "search_findings",
+            {"type": "mass", "scope": "mine", "min_volume_ml": 5},
+        )
+    assert json.loads(result) == []
+
+
 async def test_add_finding_geometry_posts_link() -> None:
     fid = "f-5"
 
