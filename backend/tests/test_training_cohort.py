@@ -11,7 +11,11 @@ from __future__ import annotations
 import json
 import uuid
 
-from bvphoenix.services.training_cohort import FindingExportRow, build_labels_manifest
+from bvphoenix.services.training_cohort import (
+    FindingExportRow,
+    build_labels_manifest,
+    synthetic_study_map,
+)
 
 
 def _row(study_id: uuid.UUID, finding_id: uuid.UUID, author: str = "agent") -> FindingExportRow:
@@ -77,3 +81,16 @@ def test_empty_manifest_is_well_formed() -> None:
     assert m["finding_count"] == 0
     assert m["study_count"] == 0
     assert m["items"] == []
+
+
+def test_synthetic_study_map_is_shared_with_manifest() -> None:
+    """The byte bundle's image/mask paths key off synthetic_study_map; the
+    manifest MUST use the identical mapping or labels.json won't line up
+    with the images/ trees. Lock that invariant."""
+    s1, s2 = uuid.uuid4(), uuid.uuid4()
+    rows = [_row(s1, uuid.uuid4()), _row(s2, uuid.uuid4()), _row(s1, uuid.uuid4())]
+    smap = synthetic_study_map(rows)
+    assert smap[s1] == "study-0001"
+    assert smap[s2] == "study-0002"
+    m = build_labels_manifest(rows, dataset_id="d", generated_at="t", study_syn=smap)
+    assert {it["study_id"] for it in m["items"]} == set(smap.values())

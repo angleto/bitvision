@@ -148,6 +148,7 @@ SCOPE_CATALOG: tuple[ScopeDef, ...] = (
     ScopeDef("findings:read", "Read + search structured findings + their vocabulary"),
     ScopeDef("findings:write", "Create / update / delete / restore structured findings"),
     ScopeDef("datasets:read", "Build a de-identified training-cohort labels manifest"),
+    ScopeDef("datasets:export", "Enqueue a training-cohort byte bundle (ZIP) export job"),
     # --- Imaging --------------------------------------------------------------
     ScopeDef("imaging:read", "Read DICOM series metadata, slices, thumbnails"),
     ScopeDef(
@@ -293,6 +294,7 @@ TOOL_SCOPE: dict[str, str] = {
     "restore_finding": "findings:write",
     "add_finding_geometry": "findings:write",
     "export_training_manifest": "datasets:read",
+    "export_training_cohort_bundle": "datasets:export",
     "write_clinical_note": "annotations:write",
     "update_clinical_note": "annotations:write",
     "delete_clinical_note": "annotations:write",

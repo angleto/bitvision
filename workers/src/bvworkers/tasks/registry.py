@@ -40,6 +40,7 @@ from bvworkers.tasks.registration import register_series
 from bvworkers.tasks.reindex_batch import reindex_batch
 from bvworkers.tasks.segment_auto import segment_auto
 from bvworkers.tasks.segment_interactive import medsam_predict_2d
+from bvworkers.tasks.training_cohort_export import training_cohort_export_zip
 
 FUNCTIONS = [
     ping,
@@ -71,6 +72,7 @@ FUNCTIONS = [
     deidentify_reindex_study,
     segment_auto,
     medsam_predict_2d,
+    training_cohort_export_zip,
     ingest_bulk_files,
     register_series,
     dispatch_notification,

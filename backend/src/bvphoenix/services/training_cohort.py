@@ -45,7 +45,9 @@ from bvphoenix.db.models import (
     FindingGeometry,
     FindingType,
     ImagingStudy,
+    Instance,
     Segmentation,
+    Series,
     TrainingConsent,
     User,
 )
@@ -95,12 +97,25 @@ class FindingExportRow:
     geometry: list[dict[str, Any]] = field(default_factory=list)
 
 
+def synthetic_study_map(rows: list[FindingExportRow]) -> dict[uuid.UUID, str]:
+    """Map each real study_id to a stable synthetic id (``study-0001``) in
+    first-seen order. The single source of truth for re-keying, shared by
+    the labels manifest AND the byte bundle so the ``images/``/``masks/``
+    trees line up with ``labels.json`` (no drift)."""
+    study_syn: dict[uuid.UUID, str] = {}
+    for r in rows:
+        if r.study_id not in study_syn:
+            study_syn[r.study_id] = f"study-{len(study_syn) + 1:04d}"
+    return study_syn
+
+
 def build_labels_manifest(
     rows: list[FindingExportRow],
     *,
     dataset_id: str,
     generated_at: str,
     kanon: dict[str, int] | None = None,
+    study_syn: dict[uuid.UUID, str] | None = None,
 ) -> dict[str, Any]:
     """Assemble the de-identified, coded labels manifest. PURE.
 
@@ -109,13 +124,13 @@ def build_labels_manifest(
     study, finding, or author UUID — only synthetic ids, coded vocabulary
     slugs/codes, measurements, and geometry roles. ``author_kind`` is kept
     (human / agent / system) so the provenance class is trainable-on
-    without identifying the author.
+    without identifying the author. Pass ``study_syn`` (from
+    :func:`synthetic_study_map`) to share the re-keying with the bundle.
     """
-    study_syn: dict[uuid.UUID, str] = {}
+    if study_syn is None:
+        study_syn = synthetic_study_map(rows)
     items: list[dict[str, Any]] = []
     for i, r in enumerate(rows, start=1):
-        if r.study_id not in study_syn:
-            study_syn[r.study_id] = f"study-{len(study_syn) + 1:04d}"
         items.append(
             {
                 "finding_id": f"finding-{i:04d}",
@@ -296,3 +311,68 @@ async def _geometry_refs(
             ref["kind"] = "marker"
         out.setdefault(fid, []).append(ref)
     return out
+
+
+async def cohort_blob_plan(
+    db: AsyncSession, study_syn: dict[uuid.UUID, str]
+) -> list[dict[str, Any]]:
+    """Enumerate the cohort's image + mask blobs, named by SYNTHETIC ids.
+
+    Returns work items ``{kind, name, bucket, key}`` where ``name`` is a
+    synthetic, de-identified path (``study-0001/series-01/img-0001.dcm`` /
+    ``.../masks/<label>.bin``) — never a real study / series / instance
+    UUID. ``kind`` drives the worker's per-blob de-id (DICOM scrubbed;
+    masks are headerless raw uint8, no PHI). The byte fetch happens in the
+    worker; this is the (DB-only) plan.
+    """
+    work: list[dict[str, Any]] = []
+    for study_id, syn in study_syn.items():
+        series_rows = (
+            (
+                await db.execute(
+                    select(Series)
+                    .where(Series.study_id == study_id)
+                    .order_by(Series.series_number.asc().nullslast())
+                )
+            )
+            .scalars()
+            .all()
+        )
+        for k, series in enumerate(series_rows, start=1):
+            instances = (
+                (
+                    await db.execute(
+                        select(Instance)
+                        .where(Instance.series_id == series.id)
+                        .order_by(Instance.instance_number.asc().nullslast())
+                    )
+                )
+                .scalars()
+                .all()
+            )
+            for j, inst in enumerate(instances, start=1):
+                if inst.s3_bucket and inst.s3_key:
+                    work.append(
+                        {
+                            "kind": "dicom",
+                            "name": f"{syn}/series-{k:02d}/img-{j:04d}.dcm",
+                            "bucket": inst.s3_bucket,
+                            "key": inst.s3_key,
+                        }
+                    )
+            seg_rows = (
+                (await db.execute(select(Segmentation).where(Segmentation.series_id == series.id)))
+                .scalars()
+                .all()
+            )
+            for seg in seg_rows:
+                if seg.s3_bucket and seg.s3_key:
+                    work.append(
+                        {
+                            "kind": "mask",
+                            "name": f"{syn}/series-{k:02d}/masks/{seg.label}.bin",
+                            "bucket": seg.s3_bucket,
+                            "key": seg.s3_key,
+                        }
+                    )
+    return work

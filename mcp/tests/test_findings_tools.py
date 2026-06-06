@@ -243,3 +243,25 @@ async def test_export_training_manifest_posts_query() -> None:
             {"type": "nodule", "k_min": 5},
         )
     assert json.loads(result) == payload
+
+
+async def test_export_training_cohort_bundle_enqueues_job() -> None:
+    """P5-rest: the bundle tool POSTs the query to the async endpoint and
+    returns the Job descriptor to poll."""
+    job = {"id": "job-1", "kind": "training_cohort_export", "status": "queued"}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.method == "POST"
+        assert request.url.path == "/api/training-exports"
+        body = json.loads(request.content)
+        assert body["type"] == "mass"
+        assert body["min_diameter_mm"] == 20
+        _assert_auth(request)
+        return _json_response(job)
+
+    with mock_backend(handler):
+        result = await training_tools.handle(
+            "export_training_cohort_bundle",
+            {"type": "mass", "min_diameter_mm": 20},
+        )
+    assert json.loads(result)["status"] == "queued"
