@@ -609,6 +609,16 @@ EXPECTED_TOOL_NAMES = {
     "delete_annotation",
     "restore_annotation",
     "get_annotation_revisions",
+    # --- Findings — structured, coded clinical reperti (P3) ---
+    "get_finding_vocab",
+    "search_findings",
+    "get_finding",
+    "get_finding_revisions",
+    "create_finding",
+    "update_finding",
+    "delete_finding",
+    "restore_finding",
+    "add_finding_geometry",
     # --- Sprint 3.5 — agent-driven tag + metadata writes ---
     "add_tag_to_study",
     "remove_tag_from_study",

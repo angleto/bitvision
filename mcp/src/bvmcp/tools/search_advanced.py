@@ -20,7 +20,11 @@ from mcp.types import Tool
 
 from bvmcp.tools.client import api_get
 
-_SEMANTIC_TARGETS = ("series", "report", "annotation", "consultation", "document", "patient")
+# NB: ``annotation`` is intentionally absent — the backend
+# /search/semantic endpoint does not embed markers/findings (the
+# structured query path is search_findings); advertising it here would
+# only yield a 422. Findings join semantic search in a later phase.
+_SEMANTIC_TARGETS = ("series", "report", "consultation", "document", "patient")
 _SEMANTIC_MODELS = ("biomedclip", "minilm")
 
 
@@ -30,7 +34,7 @@ TOOLS = [
         description=(
             "Semantic search over the bitvision phoenix vector store. The query "
             "is encoded with the selected embedding model and matched against "
-            "vectors for the chosen target kind (series, report, annotation, "
+            "vectors for the chosen target kind (series, report, "
             "consultation, document, patient). Use 'biomedclip' for image-aware "
             "clinical content and 'minilm' for fast general-purpose text. "
             "Returns top-k matches with similarity scores and target metadata."

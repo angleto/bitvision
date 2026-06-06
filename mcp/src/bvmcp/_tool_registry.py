@@ -34,6 +34,7 @@ from bvmcp.tools import documents as documents_tools
 from bvmcp.tools import documents_upload as documents_upload_tools
 from bvmcp.tools import entities as entities_tools
 from bvmcp.tools import external_identifiers as external_identifiers_tools
+from bvmcp.tools import findings as findings_tools
 from bvmcp.tools import folders as folders_tools
 from bvmcp.tools import help as help_tools
 from bvmcp.tools import images as images_tools
@@ -74,6 +75,7 @@ TOOL_MODULES = (
     folders_tools,
     labs_tools,
     imaging_tools,
+    findings_tools,
     segmentations_tools,
     sharing_tools,
     calendar_subscriptions_tools,
