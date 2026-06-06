@@ -61,6 +61,248 @@ sources:
       - MIDRC-RICORD-1C-419639-000025
       - MIDRC-RICORD-1C-419639-001863
 
+  # ---- TCIA/UPENN-GBM (20 subjects) --------------------------
+  # Brain mpMRI, de novo glioblastoma (UPENN-GBM). Multiparametric MR.
+  - collection: TCIA/UPENN-GBM
+    adapter: tcia
+    license_spdx: CC-BY-4.0
+    license_url: https://creativecommons.org/licenses/by/4.0/
+    citation_required: true
+    citation_text: >-
+      Bakas S, Sako C, Akbari H, et al. The University of Pennsylvania
+      glioblastoma (UPenn-GBM) cohort: advanced MRI, clinical, genomics, &
+      radiomics. Sci Data. 2022;9(1). doi:10.1038/s41597-022-01560-7. Data:
+      The Cancer Imaging Archive, doi:10.7937/TCIA.709X-DN49
+    subjects:
+      - UPENN-GBM-00001
+      - UPENN-GBM-00002
+      - UPENN-GBM-00003
+      - UPENN-GBM-00004
+      - UPENN-GBM-00005
+      - UPENN-GBM-00006
+      - UPENN-GBM-00007
+      - UPENN-GBM-00008
+      - UPENN-GBM-00009
+      - UPENN-GBM-00010
+      - UPENN-GBM-00011
+      - UPENN-GBM-00012
+      - UPENN-GBM-00013
+      - UPENN-GBM-00014
+      - UPENN-GBM-00015
+      - UPENN-GBM-00016
+      - UPENN-GBM-00017
+      - UPENN-GBM-00018
+      - UPENN-GBM-00019
+      - UPENN-GBM-00020
+
+  # ---- TCIA/ReMIND (20 subjects) -----------------------------
+  # Brain tumour resection: pre-op MR, intra-op ultrasound (US) and SEG (ReMIND).
+  - collection: TCIA/ReMIND
+    adapter: tcia
+    license_spdx: CC-BY-4.0
+    license_url: https://creativecommons.org/licenses/by/4.0/
+    citation_required: true
+    citation_text: >-
+      Juvekar P, Dorent R, Kogl F, et al. ReMIND: The Brain Resection
+      Multimodal Imaging Database. Sci Data. 2024;11(1).
+      doi:10.1038/s41597-024-03295-z. Data: The Cancer Imaging Archive,
+      doi:10.7937/3RAG-D070
+    subjects:
+      - ReMIND-001
+      - ReMIND-002
+      - ReMIND-003
+      - ReMIND-004
+      - ReMIND-005
+      - ReMIND-006
+      - ReMIND-007
+      - ReMIND-008
+      - ReMIND-009
+      - ReMIND-010
+      - ReMIND-011
+      - ReMIND-012
+      - ReMIND-013
+      - ReMIND-014
+      - ReMIND-015
+      - ReMIND-016
+      - ReMIND-017
+      - ReMIND-018
+      - ReMIND-019
+      - ReMIND-020
+
+  # ---- TCIA/PROSTATEx (20 subjects) --------------------------
+  # Prostate MR (T2/DWI/DCE) from the SPIE-AAPM-NCI PROSTATEx challenge.
+  - collection: TCIA/PROSTATEx
+    adapter: tcia
+    license_spdx: CC-BY-3.0
+    license_url: https://creativecommons.org/licenses/by/3.0/
+    citation_required: true
+    citation_text: >-
+      Litjens G, Debats O, Barentsz J, Karssemeijer N, Huisman H. Computer-
+      Aided Detection of Prostate Cancer in MRI. IEEE Trans Med Imaging.
+      2014;33(5):1083-1092. doi:10.1109/tmi.2014.2303821. Data: SPIE-AAPM
+      PROSTATEx Challenge, The Cancer Imaging Archive,
+      doi:10.7937/K9TCIA.2017.MURS5CL
+    subjects:
+      - ProstateX-0000
+      - ProstateX-0001
+      - ProstateX-0002
+      - ProstateX-0003
+      - ProstateX-0004
+      - ProstateX-0005
+      - ProstateX-0006
+      - ProstateX-0007
+      - ProstateX-0008
+      - ProstateX-0009
+      - ProstateX-0010
+      - ProstateX-0011
+      - ProstateX-0012
+      - ProstateX-0013
+      - ProstateX-0014
+      - ProstateX-0015
+      - ProstateX-0016
+      - ProstateX-0017
+      - ProstateX-0018
+      - ProstateX-0019
+
+  # ---- TCIA/Pancreas-CT (20 subjects) ------------------------
+  # Contrast-enhanced abdominal CT, pancreas (NIH Pancreas-CT).
+  - collection: TCIA/Pancreas-CT
+    adapter: tcia
+    license_spdx: CC-BY-3.0
+    license_url: https://creativecommons.org/licenses/by/3.0/
+    citation_required: true
+    citation_text: >-
+      Roth HR, Lu L, Farag A, et al. DeepOrgan: Multi-level Deep
+      Convolutional Networks for Automated Pancreas Segmentation. MICCAI
+      2015, LNCS 9349:556-564. doi:10.1007/978-3-319-24553-9_68. Data: The
+      Cancer Imaging Archive, doi:10.7937/K9/TCIA.2016.tNB1kqBU
+    subjects:
+      - PANCREAS_0001
+      - PANCREAS_0002
+      - PANCREAS_0003
+      - PANCREAS_0004
+      - PANCREAS_0005
+      - PANCREAS_0006
+      - PANCREAS_0007
+      - PANCREAS_0008
+      - PANCREAS_0009
+      - PANCREAS_0010
+      - PANCREAS_0011
+      - PANCREAS_0012
+      - PANCREAS_0013
+      - PANCREAS_0014
+      - PANCREAS_0015
+      - PANCREAS_0016
+      - PANCREAS_0017
+      - PANCREAS_0018
+      - PANCREAS_0019
+      - PANCREAS_0020
+
+  # ---- TCIA/C4KC-KiTS (20 subjects) --------------------------
+  # Kidney tumour contrast CT with segmentations (KiTS19 / C4KC-KiTS).
+  - collection: TCIA/C4KC-KiTS
+    adapter: tcia
+    license_spdx: CC-BY-3.0
+    license_url: https://creativecommons.org/licenses/by/3.0/
+    citation_required: true
+    citation_text: >-
+      Heller N, Isensee F, Maier-Hein KH, et al. The state of the art in
+      kidney and kidney tumor segmentation in contrast-enhanced CT imaging:
+      Results of the KiTS19 challenge. Med Image Anal. 2021;67:101821.
+      doi:10.1016/j.media.2020.101821. Data: C4KC-KiTS, The Cancer Imaging
+      Archive, doi:10.7937/TCIA.2019.IX49E8NX
+    subjects:
+      - KiTS-00000
+      - KiTS-00001
+      - KiTS-00002
+      - KiTS-00003
+      - KiTS-00004
+      - KiTS-00005
+      - KiTS-00006
+      - KiTS-00007
+      - KiTS-00008
+      - KiTS-00009
+      - KiTS-00010
+      - KiTS-00011
+      - KiTS-00012
+      - KiTS-00013
+      - KiTS-00014
+      - KiTS-00015
+      - KiTS-00016
+      - KiTS-00017
+      - KiTS-00018
+      - KiTS-00019
+
+  # ---- TCIA/HCC-TACE-Seg (20 subjects) -----------------------
+  # Hepatocellular carcinoma multiphase liver CT with segmentations (HCC-TACE-Seg).
+  - collection: TCIA/HCC-TACE-Seg
+    adapter: tcia
+    license_spdx: CC-BY-4.0
+    license_url: https://creativecommons.org/licenses/by/4.0/
+    citation_required: true
+    citation_text: >-
+      Morshid A, Elsayes KM, Khalaf AM, et al. A Machine Learning Model to
+      Predict Hepatocellular Carcinoma Response to Transcatheter Arterial
+      Chemoembolization. Radiol Artif Intell. 2019;1(5):e180021.
+      doi:10.1148/ryai.2019180021. Data: The Cancer Imaging Archive,
+      doi:10.7937/TCIA.5FNA-0924
+    subjects:
+      - HCC_001
+      - HCC_002
+      - HCC_003
+      - HCC_004
+      - HCC_005
+      - HCC_006
+      - HCC_007
+      - HCC_008
+      - HCC_009
+      - HCC_010
+      - HCC_011
+      - HCC_012
+      - HCC_013
+      - HCC_014
+      - HCC_015
+      - HCC_016
+      - HCC_017
+      - HCC_018
+      - HCC_019
+      - HCC_020
+
+  # ---- TCIA/CMMD (20 subjects) -------------------------------
+  # Digital mammography (MG) with biopsy-confirmed types (Chinese Mammography Database).
+  - collection: TCIA/CMMD
+    adapter: tcia
+    license_spdx: CC-BY-4.0
+    license_url: https://creativecommons.org/licenses/by/4.0/
+    citation_required: true
+    citation_text: >-
+      Cai H, Huang Q, Rong W, et al. Breast Microcalcification Diagnosis
+      Using Deep Convolutional Neural Network from Digital Mammograms.
+      Comput Math Methods Med. 2019;2019:2717454. doi:10.1155/2019/2717454.
+      Data: The Chinese Mammography Database (CMMD), The Cancer Imaging
+      Archive, doi:10.7937/tcia.eqde-4b16
+    subjects:
+      - D1-0001
+      - D1-0002
+      - D1-0003
+      - D1-0004
+      - D1-0005
+      - D1-0006
+      - D1-0007
+      - D1-0008
+      - D1-0009
+      - D1-0010
+      - D1-0011
+      - D1-0012
+      - D1-0013
+      - D1-0014
+      - D1-0015
+      - D1-0016
+      - D1-0017
+      - D1-0018
+      - D1-0019
+      - D1-0020
+
   # ---- OsiriX educational samples (DROPPED 2026-05-20) -----------
   # Pixmeo migrated the BRAINIX/MANIX/PHENIX/MAGIX downloads behind
   # a Zendesk SSO ("download-premium.php") gate; the direct ZIP URLs
