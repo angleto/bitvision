@@ -144,6 +144,9 @@ SCOPE_CATALOG: tuple[ScopeDef, ...] = (
     # --- Annotations + markers ------------------------------------------------
     ScopeDef("annotations:read", "Read in-viewer markers / annotations"),
     ScopeDef("annotations:write", "Create / update / delete in-viewer markers + annotations"),
+    # --- Findings (structured, coded clinical reperti) ------------------------
+    ScopeDef("findings:read", "Read + search structured findings + their vocabulary"),
+    ScopeDef("findings:write", "Create / update / delete / restore structured findings"),
     # --- Imaging --------------------------------------------------------------
     ScopeDef("imaging:read", "Read DICOM series metadata, slices, thumbnails"),
     ScopeDef(
@@ -279,6 +282,15 @@ TOOL_SCOPE: dict[str, str] = {
     "delete_annotation": "annotations:write",
     "restore_annotation": "annotations:write",
     "get_annotation_revisions": "annotations:read",
+    "get_finding_vocab": "findings:read",
+    "search_findings": "findings:read",
+    "get_finding": "findings:read",
+    "get_finding_revisions": "findings:read",
+    "create_finding": "findings:write",
+    "update_finding": "findings:write",
+    "delete_finding": "findings:write",
+    "restore_finding": "findings:write",
+    "add_finding_geometry": "findings:write",
     "write_clinical_note": "annotations:write",
     "update_clinical_note": "annotations:write",
     "delete_clinical_note": "annotations:write",
