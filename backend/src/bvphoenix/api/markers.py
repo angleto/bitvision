@@ -21,12 +21,14 @@ study identifier so the round-trip is self-describing.
 from __future__ import annotations
 
 import uuid
+from datetime import UTC, datetime, timedelta
 from typing import Annotated, Any, Literal
 
 from fastapi import (
     APIRouter,
     Depends,
     File,
+    Header,
     HTTPException,
     Query,
     Request,
@@ -34,20 +36,27 @@ from fastapi import (
     UploadFile,
     status,
 )
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from bvphoenix.auth import enforce_agent_patient_scope, require_user
-from bvphoenix.db.models import ImagingStudy, Marker, Patient, User
+from bvphoenix.db.models import ImagingStudy, Marker, MarkerRevision, Patient, User
 from bvphoenix.db.models.markers import MARKER_KINDS
 from bvphoenix.db.session import get_db
 from bvphoenix.middleware.audit_dependency import AuditDep
+from bvphoenix.middleware.idempotency import IdempotencyContext, idempotent
+from bvphoenix.services.etag import format_etag, parse_if_match
 from bvphoenix.services.permissions import (
     READ_METADATA,
     WRITE_REPORT,
     can_patient,
 )
+
+# Soft-deleted markers are retained for this long before a purge sweep
+# may reclaim them; until then ``restore`` brings them back.
+_PURGE_GRACE = timedelta(days=30)
 
 router = APIRouter(tags=["markers"])
 
@@ -70,8 +79,23 @@ class MarkerOut(BaseModel):
     author_kind: Literal["human", "agent", "system"]
     model_id: str | None
     provider: str | None
+    # Optimistic-concurrency token; pass it back as ``If-Match`` on the
+    # next update / delete. Also emitted in the ``ETag`` response header.
+    etag: str
+    # Set when the marker is soft-deleted (recoverable via restore).
+    deleted_at: str | None
     created_at: str
     updated_at: str
+
+
+class MarkerRevisionOut(BaseModel):
+    revision_no: int
+    change_kind: Literal["create", "update", "delete", "restore"]
+    author_kind: Literal["human", "agent", "system"]
+    actor_id: str | None
+    diff_summary: str | None
+    snapshot: dict
+    created_at: str
 
 
 class MarkerCreateIn(BaseModel):
@@ -110,6 +134,8 @@ def _out(m: Marker) -> MarkerOut:
         author_kind=m.author_kind,  # type: ignore[arg-type]
         model_id=m.model_id,
         provider=m.provider,
+        etag=str(m.etag),
+        deleted_at=m.deleted_at.isoformat() if m.deleted_at else None,
         created_at=m.created_at.isoformat(),
         updated_at=m.updated_at.isoformat(),
     )
@@ -139,10 +165,19 @@ async def _patient_for_write(
 
 
 async def _marker_for_write(
-    db: AsyncSession, request: Request, user: User, marker_id: uuid.UUID
+    db: AsyncSession,
+    request: Request,
+    user: User,
+    marker_id: uuid.UUID,
+    *,
+    allow_deleted: bool = False,
 ) -> Marker:
     m = (await db.execute(select(Marker).where(Marker.id == marker_id))).scalar_one_or_none()
     if m is None:
+        raise HTTPException(status_code=404, detail="marker not found")
+    # A soft-deleted marker is invisible to mutation: restore it first.
+    # ``allow_deleted`` lets the restore endpoint load the tombstone.
+    if m.deleted_at is not None and not allow_deleted:
         raise HTTPException(status_code=404, detail="marker not found")
     await _patient_for_write(db, request, user, m.patient_id)
     # Sprint 5 (ADR — agents API spec §5.5): an agent token cannot
@@ -177,6 +212,86 @@ def _agent_provenance(request: Request) -> tuple[str, str | None, str | None, uu
     return ("human", None, None, None)
 
 
+def _enforce_optional_if_match(if_match: str | None, current_etag: str) -> None:
+    """Optimistic-concurrency guard, opt-in (mirrors the Document PATCH).
+
+    When the caller supplies ``If-Match`` we reject a stale token with
+    412; when absent the write proceeds (last-write-wins). Agents SHOULD
+    pass the ETag they read so a concurrent edit cannot be silently
+    clobbered; the first-party viewer (single editor) may omit it. The
+    ``*`` wildcard explicitly opts out.
+    """
+    presented = parse_if_match(if_match)
+    if presented is not None and presented != "*" and presented != current_etag:
+        raise HTTPException(
+            status_code=status.HTTP_412_PRECONDITION_FAILED,
+            detail=(f"If-Match {presented!r} does not match the current marker etag"),
+        )
+
+
+# ---------------------------------------------------------------------------
+# Revision history (mirrors services/care_phases revision helpers)
+# ---------------------------------------------------------------------------
+
+
+def _marker_snapshot(m: Marker) -> dict[str, Any]:
+    """Full JSON snapshot of a marker for the revision log."""
+    return {
+        "id": str(m.id),
+        "target_kind": m.target_kind,
+        "target_id": str(m.target_id),
+        "kind": m.kind,
+        "geometry": m.geometry,
+        "body": m.body,
+        "computed": m.computed,
+        "author_kind": m.author_kind,
+        "author_subject_id": str(m.author_subject_id) if m.author_subject_id else None,
+        "etag": str(m.etag),
+        "deleted_at": m.deleted_at.isoformat() if m.deleted_at else None,
+    }
+
+
+async def _next_marker_revision_no(db: AsyncSession, *, marker_id: uuid.UUID) -> int:
+    current = (
+        await db.execute(
+            select(func.coalesce(func.max(MarkerRevision.revision_no), 0)).where(
+                MarkerRevision.marker_id == marker_id
+            )
+        )
+    ).scalar_one()
+    return int(current) + 1
+
+
+async def _append_marker_revision(
+    db: AsyncSession,
+    *,
+    marker: Marker,
+    change_kind: str,
+    actor_id: uuid.UUID | None,
+    author_kind: str,
+    diff_summary: str | None = None,
+) -> None:
+    """Record one immutable snapshot of ``marker`` after a CRUD act.
+
+    ``author_kind`` is the *acting* principal (agent vs human), not the
+    marker's original author, so an agent edit of a marker is tracked as
+    agent-authored in the history even when the row's ``author_kind``
+    differs.
+    """
+    rev = MarkerRevision(
+        marker_id=marker.id,
+        patient_id=marker.patient_id,
+        revision_no=await _next_marker_revision_no(db, marker_id=marker.id),
+        snapshot=_marker_snapshot(marker),
+        change_kind=change_kind,
+        author_kind=author_kind,
+        actor_id=actor_id,
+        diff_summary=diff_summary,
+    )
+    db.add(rev)
+    await db.flush()
+
+
 # ---------------------------------------------------------------------------
 # CRUD
 # ---------------------------------------------------------------------------
@@ -191,6 +306,9 @@ async def list_markers(
     target_kind: Literal["study", "series", "instance"] | None = Query(None),
     target_id: uuid.UUID | None = Query(None),
     kind: str | None = Query(None, max_length=48),
+    include_deleted: bool = Query(
+        False, description="Include soft-deleted markers (tombstones) in the result."
+    ),
     limit: int = Query(500, ge=1, le=2000),
 ) -> list[MarkerOut]:
     await _patient_for_read(db, request, user, patient_id)
@@ -200,6 +318,8 @@ async def list_markers(
         .order_by(Marker.created_at.desc())
         .limit(limit)
     )
+    if not include_deleted:
+        stmt = stmt.where(Marker.deleted_at.is_(None))
     if target_kind:
         stmt = stmt.where(Marker.target_kind == target_kind)
     if target_id:
@@ -222,6 +342,7 @@ async def create_marker(
     db: Annotated[AsyncSession, Depends(get_db)],
     user: Annotated[User, Depends(require_user)],
     audit: AuditDep,
+    idem: Annotated[IdempotencyContext, Depends(idempotent)],
     dry_run: bool = Query(
         False,
         description=(
@@ -231,7 +352,7 @@ async def create_marker(
             "``author_kind`` reflects the caller."
         ),
     ),
-) -> MarkerOut:
+) -> MarkerOut | JSONResponse:
     if body.kind not in MARKER_KINDS:
         # Pydantic-style 422 so MCP / SDK clients can self-correct.
         raise HTTPException(
@@ -252,10 +373,13 @@ async def create_marker(
         )
     await _patient_for_write(db, request, user, patient_id)
 
+    # Replay an identical prior create (the MCP client sends an
+    # Idempotency-Key; a retried tool call must not duplicate the row).
+    if idem.replay is not None:
+        return idem.replay
+
     author_kind, model_id, provider, agent_token_id = _agent_provenance(request)
     if dry_run:
-        from datetime import UTC, datetime
-
         now = datetime.now(UTC).isoformat()
         return MarkerOut(
             id="dry-run",
@@ -270,6 +394,8 @@ async def create_marker(
             author_kind=author_kind,  # type: ignore[arg-type]
             model_id=model_id,
             provider=provider,
+            etag="dry-run",
+            deleted_at=None,
             created_at=now,
             updated_at=now,
         )
@@ -287,8 +413,19 @@ async def create_marker(
         model_id=model_id,
         provider=provider,
         agent_token_id=agent_token_id,
+        # Assign the concurrency token in Python (mirrors CarePhase) so
+        # it is loaded before the pre-commit revision snapshot reads it.
+        etag=uuid.uuid4(),
     )
     db.add(m)
+    await db.flush()
+    await _append_marker_revision(
+        db,
+        marker=m,
+        change_kind="create",
+        actor_id=user.subject_id,
+        author_kind=author_kind,
+    )
     await db.commit()
     await db.refresh(m)
     await audit.log(
@@ -302,7 +439,11 @@ async def create_marker(
             "kind": body.kind,
         },
     )
-    return _out(m)
+    return idem.capture(
+        _out(m).model_dump(),
+        status_code=status.HTTP_201_CREATED,
+        extra_headers={"ETag": format_etag(str(m.etag))},
+    )
 
 
 @router.patch("/markers/{marker_id}", response_model=MarkerOut)
@@ -313,8 +454,14 @@ async def update_marker(
     db: Annotated[AsyncSession, Depends(get_db)],
     user: Annotated[User, Depends(require_user)],
     audit: AuditDep,
+    response: Response,
+    if_match: Annotated[str | None, Header(alias="If-Match")] = None,
 ) -> MarkerOut:
     m = await _marker_for_write(db, request, user, marker_id)
+    # Optimistic concurrency: a stale view (someone else edited the
+    # marker since the caller read it) is rejected rather than silently
+    # clobbered. Opt-in — see ``_enforce_optional_if_match``.
+    _enforce_optional_if_match(if_match, str(m.etag))
     changed: dict[str, Any] = {}
     if body.geometry is not None:
         m.geometry = body.geometry
@@ -326,9 +473,18 @@ async def update_marker(
         m.computed = body.computed
         changed["computed"] = True
     if changed:
-        from datetime import UTC, datetime
-
         m.updated_at = datetime.now(UTC)
+        m.etag = uuid.uuid4()
+        await db.flush()
+        author_kind, _model, _provider, _token = _agent_provenance(request)
+        await _append_marker_revision(
+            db,
+            marker=m,
+            change_kind="update",
+            actor_id=user.subject_id,
+            author_kind=author_kind,
+            diff_summary=",".join(sorted(changed.keys())),
+        )
         await db.commit()
         await db.refresh(m)
         await audit.log(
@@ -338,6 +494,7 @@ async def update_marker(
             resource_id=m.id,
             metadata={"changed": list(changed.keys())},
         )
+    response.headers["ETag"] = format_etag(str(m.etag))
     return _out(m)
 
 
@@ -348,18 +505,146 @@ async def delete_marker(
     db: Annotated[AsyncSession, Depends(get_db)],
     user: Annotated[User, Depends(require_user)],
     audit: AuditDep,
+    if_match: Annotated[str | None, Header(alias="If-Match")] = None,
+    hard: bool = Query(
+        False,
+        description=(
+            "Admin only: permanently purge the marker (and its revision "
+            "history) instead of the default recoverable soft-delete."
+        ),
+    ),
+    reason: str | None = Query(None, max_length=255),
 ) -> Response:
-    m = await _marker_for_write(db, request, user, marker_id)
-    await db.delete(m)
+    m = await _marker_for_write(db, request, user, marker_id, allow_deleted=True)
+    # Idempotent re-delete: already a tombstone → 204 no-op (a retried
+    # agent DELETE must not error), unless a hard purge is requested.
+    if m.deleted_at is not None and not hard:
+        return Response(status_code=status.HTTP_204_NO_CONTENT)
+    _enforce_optional_if_match(if_match, str(m.etag))
+
+    if hard:
+        if not getattr(user, "is_admin", False):
+            raise HTTPException(status_code=403, detail="hard delete requires admin")
+        kind, pid = m.kind, m.patient_id
+        await db.delete(m)  # cascades marker_revision
+        await db.commit()
+        await audit.log(
+            action="marker_purge",
+            actor_subject_id=user.subject_id,
+            resource_kind="marker",
+            resource_id=marker_id,
+            metadata={"kind": kind, "patient_id": str(pid)},
+        )
+        return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+    now = datetime.now(UTC)
+    m.deleted_at = now
+    m.purge_after = now + _PURGE_GRACE
+    m.delete_reason = reason
+    m.updated_at = now
+    m.etag = uuid.uuid4()
+    await db.flush()
+    author_kind, _model, _provider, _token = _agent_provenance(request)
+    await _append_marker_revision(
+        db,
+        marker=m,
+        change_kind="delete",
+        actor_id=user.subject_id,
+        author_kind=author_kind,
+        diff_summary=reason,
+    )
     await db.commit()
     await audit.log(
         action="marker_delete",
         actor_subject_id=user.subject_id,
         resource_kind="marker",
         resource_id=m.id,
-        metadata={"kind": m.kind, "patient_id": str(m.patient_id)},
+        metadata={"kind": m.kind, "patient_id": str(m.patient_id), "soft": True},
     )
     return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
+@router.post("/markers/{marker_id}/restore", response_model=MarkerOut)
+async def restore_marker(
+    request: Request,
+    marker_id: uuid.UUID,
+    db: Annotated[AsyncSession, Depends(get_db)],
+    user: Annotated[User, Depends(require_user)],
+    audit: AuditDep,
+    response: Response,
+) -> MarkerOut:
+    """Bring a soft-deleted marker back to life. 409 when it is not a
+    tombstone. Recovery deliberately does not require ``If-Match`` (the
+    caller is recovering a row it may not hold the latest ETag for)."""
+    m = await _marker_for_write(db, request, user, marker_id, allow_deleted=True)
+    if m.deleted_at is None:
+        raise HTTPException(status_code=409, detail="marker is not deleted")
+    m.deleted_at = None
+    m.purge_after = None
+    m.delete_reason = None
+    m.updated_at = datetime.now(UTC)
+    m.etag = uuid.uuid4()
+    await db.flush()
+    author_kind, _model, _provider, _token = _agent_provenance(request)
+    await _append_marker_revision(
+        db,
+        marker=m,
+        change_kind="restore",
+        actor_id=user.subject_id,
+        author_kind=author_kind,
+    )
+    await db.commit()
+    await db.refresh(m)
+    await audit.log(
+        action="marker_restore",
+        actor_subject_id=user.subject_id,
+        resource_kind="marker",
+        resource_id=m.id,
+        metadata={"kind": m.kind, "patient_id": str(m.patient_id)},
+    )
+    response.headers["ETag"] = format_etag(str(m.etag))
+    return _out(m)
+
+
+@router.get("/markers/{marker_id}/revisions", response_model=list[MarkerRevisionOut])
+async def list_marker_revisions(
+    request: Request,
+    marker_id: uuid.UUID,
+    db: Annotated[AsyncSession, Depends(get_db)],
+    user: Annotated[User, Depends(require_user)],
+    limit: int = Query(200, ge=1, le=1000),
+) -> list[MarkerRevisionOut]:
+    """Full create / update / delete / restore history of a marker, most
+    recent first. Each entry carries the acting ``author_kind`` so an
+    agent edit is distinguishable, plus the snapshot at that revision."""
+    m = (await db.execute(select(Marker).where(Marker.id == marker_id))).scalar_one_or_none()
+    if m is None:
+        raise HTTPException(status_code=404, detail="marker not found")
+    await _patient_for_read(db, request, user, m.patient_id)
+    rows = (
+        (
+            await db.execute(
+                select(MarkerRevision)
+                .where(MarkerRevision.marker_id == marker_id)
+                .order_by(MarkerRevision.revision_no.desc())
+                .limit(limit)
+            )
+        )
+        .scalars()
+        .all()
+    )
+    return [
+        MarkerRevisionOut(
+            revision_no=r.revision_no,
+            change_kind=r.change_kind,  # type: ignore[arg-type]
+            author_kind=r.author_kind,  # type: ignore[arg-type]
+            actor_id=str(r.actor_id) if r.actor_id else None,
+            diff_summary=r.diff_summary,
+            snapshot=r.snapshot,
+            created_at=r.created_at.isoformat(),
+        )
+        for r in rows
+    ]
 
 
 # ---------------------------------------------------------------------------

@@ -171,14 +171,20 @@ TOOLS: list[Tool] = [
                         "measurement.text",
                         "measurement.probe",
                         "measurement.bbox",
+                        "measurement.sphere",
                         "bbox.lesion",
+                        "bbox.exclusion",
                         "fiducial",
                         "reading-note",
                         "text-overlay",
                     ],
                     "description": (
-                        "Marker kind. See help(topic='annotation_kinds') "
-                        "for the per-kind geometry shape."
+                        "Marker kind. ``bbox.exclusion`` marks a region "
+                        "ROI-stats / hot-spot search must ignore (same "
+                        "geometry as bbox.lesion); ``measurement.sphere`` "
+                        "is a CircleROI used for PERCIST SUVpeak. See "
+                        "help(topic='annotation_kinds') for the per-kind "
+                        "geometry shape."
                     ),
                 },
                 "geometry": {
@@ -228,9 +234,14 @@ TOOLS: list[Tool] = [
         ),
         description=(
             f"{_APPROVAL_NOTE}\n\n"
-            "Mutate an existing annotation (marker). The backend rejects "
-            "the call with 403 when the agent tries to touch a marker "
-            "authored by a human."
+            "Mutate an existing annotation (marker). Every edit is tracked "
+            "(revision history + audit) and attributed to the agent. The "
+            "backend rejects the call with 403 when the agent tries to "
+            "touch a marker authored by a human. Pass ``if_match`` (the "
+            "``etag`` returned by get_annotations / a prior write) to make "
+            "the edit safe against a concurrent change: a stale token "
+            "→ HTTP 412 instead of silently clobbering. The response "
+            "echoes the new ``etag`` to chain the next edit."
         ),
         inputSchema={
             "type": "object",
@@ -239,6 +250,14 @@ TOOLS: list[Tool] = [
                 "geometry": {"type": "object"},
                 "body": {"type": "string"},
                 "computed": {"type": "object"},
+                "if_match": {
+                    "type": "string",
+                    "description": (
+                        "Optional optimistic-concurrency token (the "
+                        "marker's current ``etag``). Recommended for "
+                        "concurrent edits."
+                    ),
+                },
                 "idempotency_key": {"type": "string"},
             },
             "required": ["marker_id"],
@@ -255,13 +274,78 @@ TOOLS: list[Tool] = [
         ),
         description=(
             f"{_APPROVAL_NOTE}\n\n"
-            "Delete an annotation (marker). 403 when an agent attempts "
-            "to delete a human-authored marker."
+            "Soft-delete an annotation (marker). The removal is "
+            "recoverable via ``restore_annotation`` and recorded in the "
+            "revision history; it is not destroyed. 403 when an agent "
+            "attempts to delete a human-authored marker. Pass ``if_match`` "
+            "for safe concurrent deletion (stale token → 412)."
         ),
         inputSchema={
             "type": "object",
             "properties": {
                 "marker_id": {"type": "string"},
+                "reason": {
+                    "type": "string",
+                    "description": "Optional free-text reason recorded on the tombstone.",
+                },
+                "if_match": {
+                    "type": "string",
+                    "description": "Optional optimistic-concurrency token (the marker's etag).",
+                },
+            },
+            "required": ["marker_id"],
+        },
+    ),
+    Tool(
+        name="restore_annotation",
+        annotations=ToolAnnotations(
+            title="Restore annotation (marker)",
+            readOnlyHint=False,
+            destructiveHint=False,
+            idempotentHint=True,
+            openWorldHint=False,
+        ),
+        description=(
+            f"{_APPROVAL_NOTE}\n\n"
+            "Bring a soft-deleted annotation (marker) back to life. "
+            "409 when the marker is not a tombstone. Use "
+            "``get_annotations`` with ``include_deleted=true`` to find "
+            "removed markers and their ids."
+        ),
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "marker_id": {"type": "string"},
+            },
+            "required": ["marker_id"],
+        },
+    ),
+    Tool(
+        name="get_annotation_revisions",
+        annotations=ToolAnnotations(
+            title="Get annotation revision history",
+            readOnlyHint=True,
+            destructiveHint=False,
+            idempotentHint=True,
+            openWorldHint=False,
+        ),
+        description=(
+            "Read the full create / update / delete / restore history of "
+            "an annotation (marker), most recent first. Each revision "
+            "carries the acting ``author_kind`` (human / agent) and the "
+            "marker snapshot at that point, so an agent edit is auditable "
+            "and a prior value can be inspected."
+        ),
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "marker_id": {"type": "string"},
+                "limit": {
+                    "type": "integer",
+                    "default": 200,
+                    "minimum": 1,
+                    "maximum": 1000,
+                },
             },
             "required": ["marker_id"],
         },
@@ -673,6 +757,7 @@ async def _update_annotation(args: dict[str, Any]) -> str:
         payload, _headers = await api_patch(
             f"/api/markers/{marker_id}",
             json=body,
+            if_match=args.get("if_match"),
             idempotency_key=args.get("idempotency_key"),
         )
     except httpx.HTTPStatusError as exc:
@@ -682,11 +767,39 @@ async def _update_annotation(args: dict[str, Any]) -> str:
 
 async def _delete_annotation(args: dict[str, Any]) -> str:
     marker_id = args["marker_id"]
+    params: dict[str, Any] = {}
+    if args.get("reason"):
+        params["reason"] = args["reason"]
     try:
-        code = await api_delete(f"/api/markers/{marker_id}")
+        code = await api_delete(
+            f"/api/markers/{marker_id}",
+            params=params or None,
+            if_match=args.get("if_match"),
+        )
     except httpx.HTTPStatusError as exc:
         return format_http_error(exc)
-    return json.dumps({"status": "deleted", "http_status": code})
+    return json.dumps({"status": "deleted", "recoverable": True, "http_status": code})
+
+
+async def _restore_annotation(args: dict[str, Any]) -> str:
+    marker_id = args["marker_id"]
+    try:
+        payload, _headers = await api_post_with_headers(
+            f"/api/markers/{marker_id}/restore",
+        )
+    except httpx.HTTPStatusError as exc:
+        return format_http_error(exc)
+    return json.dumps(payload, indent=2, ensure_ascii=False)
+
+
+async def _get_annotation_revisions(args: dict[str, Any]) -> str:
+    marker_id = args["marker_id"]
+    params: dict[str, Any] = {"limit": int(args.get("limit", 200))}
+    try:
+        payload = await api_get(f"/api/markers/{marker_id}/revisions", params=params)
+    except httpx.HTTPStatusError as exc:
+        return format_http_error(exc)
+    return json.dumps(payload, indent=2, ensure_ascii=False)
 
 
 async def _crop_series_roi(args: dict[str, Any]) -> str:
@@ -829,6 +942,8 @@ _DISPATCH = {
     "write_annotation": _write_annotation,
     "update_annotation": _update_annotation,
     "delete_annotation": _delete_annotation,
+    "restore_annotation": _restore_annotation,
+    "get_annotation_revisions": _get_annotation_revisions,
     "crop_series_roi": _crop_series_roi,
     "measure_distance": _measure_distance,
     "measure_volume": _measure_volume,

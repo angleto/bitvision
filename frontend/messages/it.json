@@ -315,7 +315,9 @@
     "measurement_text": "Etichetta",
     "measurement_probe": "Sonda",
     "measurement_bbox": "Riquadro",
+    "measurement_sphere": "Sfera",
     "bbox_lesion": "Lesione",
+    "bbox_exclusion": "Esclusione",
     "fiducial": "Fiduciale",
     "reading_note": "Appunto",
     "text_overlay": "Testo"

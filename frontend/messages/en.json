@@ -315,7 +315,9 @@
     "measurement_text": "Label",
     "measurement_probe": "Probe",
     "measurement_bbox": "Box",
+    "measurement_sphere": "Sphere",
     "bbox_lesion": "Lesion",
+    "bbox_exclusion": "Exclusion",
     "fiducial": "Fiducial",
     "reading_note": "Note",
     "text_overlay": "Text"

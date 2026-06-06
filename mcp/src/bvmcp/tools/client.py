@@ -227,6 +227,7 @@ def format_http_error(exc: httpx.HTTPStatusError, *, hint: str = "") -> str:
 async def api_delete(
     path: str,
     *,
+    params: dict | None = None,
     if_match: str | None = None,
 ) -> int:
     """DELETE returning the response status code (typically 204)."""
@@ -234,6 +235,6 @@ async def api_delete(
     url = f"{settings.backend_base_url}{path}"
     headers = _augment_headers(if_match=if_match)
     async with httpx.AsyncClient(timeout=30.0) as client:
-        resp = await client.delete(url, headers=headers)
+        resp = await client.delete(url, headers=headers, params=params)
         resp.raise_for_status()
         return resp.status_code

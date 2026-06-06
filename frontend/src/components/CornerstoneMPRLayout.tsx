@@ -1626,6 +1626,7 @@ const CornerstoneMPRLayout = forwardRef<MPRLayoutHandle, ExtendedProps>(
             label: a.data?.label ?? undefined,
             points: points2d,
             worldPoints,
+            frameOfReferenceUID: a.metadata.FrameOfReferenceUID,
             sliceIndex,
             markerId: a.annotationUID,
             suv,

@@ -592,6 +592,12 @@ EXPECTED_TOOL_NAMES = {
     "download_document_binary",
     "get_document_text",
     "get_document_references",
+    # --- Resumable upload sessions (chunked document ingest) ---
+    "create_upload_session",
+    "get_upload_session",
+    "upload_session_chunk",
+    "commit_upload_session",
+    "abort_upload_session",
     # --- Sprint 4 — entities + lab time-series ---
     "extract_document_entities",
     "get_lab_timeseries",
@@ -601,6 +607,8 @@ EXPECTED_TOOL_NAMES = {
     "write_annotation",
     "update_annotation",
     "delete_annotation",
+    "restore_annotation",
+    "get_annotation_revisions",
     # --- Sprint 3.5 — agent-driven tag + metadata writes ---
     "add_tag_to_study",
     "remove_tag_from_study",
