@@ -8,6 +8,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import BrowserSupportGate from "@/components/BrowserSupportGate";
 import FiducialPanel, { useFiducials } from "@/components/FiducialMarkers3D";
+import FindingPanel from "@/components/FindingPanel";
 import FusionControls from "@/components/FusionControls";
 import HangingProtocolPicker from "@/components/HangingProtocolPicker";
 import HotSpotsPanel from "@/components/HotSpotsPanel";
@@ -2389,6 +2390,7 @@ export default function SeriesViewerPage() {
                     { label: tv("chipCine"), match: "cine" },
                     { label: tv("chip3d"), match: "3d" },
                     { label: tv("chipAnnot"), match: "marker-list" },
+                    { label: tv("chipFindings"), match: "findings" },
                     { label: tv("chipReport"), match: "report-composer" },
                     { label: tv("chipHelp"), match: "shortcuts" },
                   ]}
@@ -4032,6 +4034,23 @@ export default function SeriesViewerPage() {
                             }),
                           );
                         }}
+                      />
+                    </SidebarSection>
+                  )}
+
+                  {studyPatientId && series?.study_id && (
+                    <SidebarSection
+                      sectionId="findings"
+                      title="Reperti"
+                      defaultOpen={false}
+                      hint="Structured findings · type / anatomy / size / SUV"
+                    >
+                      <FindingPanel
+                        patientId={studyPatientId}
+                        studyId={series.study_id}
+                        seriesId={params.id}
+                        frameOfReferenceUid={displayMeta?.frame_of_reference_uid ?? null}
+                        refreshKey={markerListRefreshKey}
                       />
                     </SidebarSection>
                   )}

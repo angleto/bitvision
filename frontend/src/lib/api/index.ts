@@ -3370,6 +3370,171 @@ export const markersApi = {
   },
 };
 
+// -------- Findings (structured, coded clinical reperti) --------
+
+export type FindingLaterality = "left" | "right" | "bilateral" | "midline";
+export type FindingStatus = "candidate" | "confirmed" | "retracted";
+export type FindingGeometryRole = "measurement" | "bbox" | "mask" | "fiducial";
+
+export interface FindingVocabTerm {
+  id: string;
+  key: string;
+  display: string;
+  code_system: string | null;
+  code: string | null;
+}
+export interface FindingTypeTerm extends FindingVocabTerm {
+  category: string;
+}
+export interface AnatomySiteTerm extends FindingVocabTerm {
+  parent_id: string | null;
+  laterality_applicable: boolean;
+}
+export interface FindingVocab {
+  finding_types: FindingTypeTerm[];
+  anatomy_sites: AnatomySiteTerm[];
+  morphology_terms: FindingVocabTerm[];
+}
+
+export interface FindingGeometryRef {
+  id: string;
+  marker_id: string | null;
+  segmentation_id: string | null;
+  role: FindingGeometryRole;
+}
+
+export interface FindingMeasurements {
+  longest_diameter_mm?: number | null;
+  short_axis_mm?: number | null;
+  volume_ml?: number | null;
+  suv_max?: number | null;
+  suv_peak?: number | null;
+  suv_mean?: number | null;
+  hu_mean?: number | null;
+  hu_std?: number | null;
+}
+
+export interface Finding extends FindingMeasurements {
+  id: string;
+  patient_id: string;
+  study_id: string;
+  series_id: string | null;
+  frame_of_reference_uid: string | null;
+  finding_type_id: string;
+  type: string;
+  anatomy_site_id: string | null;
+  anatomy: string | null;
+  laterality: FindingLaterality | null;
+  morphology: string[];
+  bbox_lps: Record<string, unknown> | null;
+  status: FindingStatus;
+  confidence: number | null;
+  description: string | null;
+  author_subject_id: string | null;
+  author_kind: "human" | "agent" | "system";
+  model_id: string | null;
+  provider: string | null;
+  etag: string;
+  deleted_at: string | null;
+  created_at: string;
+  updated_at: string;
+  geometry: FindingGeometryRef[];
+}
+
+export interface FindingCreateInput extends FindingMeasurements {
+  study_id: string;
+  series_id?: string | null;
+  frame_of_reference_uid?: string | null;
+  type: string;
+  anatomy?: string | null;
+  laterality?: FindingLaterality | null;
+  morphology?: string[];
+  bbox_lps?: Record<string, unknown> | null;
+  status?: FindingStatus;
+  confidence?: number | null;
+  description?: string | null;
+  geometry_refs?: Array<{
+    marker_id?: string;
+    segmentation_id?: string;
+    role: FindingGeometryRole;
+  }>;
+}
+
+export interface FindingUpdateInput extends FindingMeasurements {
+  type?: string;
+  anatomy?: string | null;
+  laterality?: FindingLaterality | null;
+  morphology?: string[];
+  bbox_lps?: Record<string, unknown> | null;
+  status?: FindingStatus;
+  confidence?: number | null;
+  description?: string | null;
+}
+
+export interface FindingSearchParams {
+  study_id?: string;
+  type?: string;
+  anatomy?: string;
+  laterality?: FindingLaterality;
+  morphology?: string[];
+  status?: FindingStatus;
+  min_diameter_mm?: number;
+  max_diameter_mm?: number;
+  min_volume_ml?: number;
+  min_suv_max?: number;
+  scope?: "all" | "mine" | "public";
+  include_deleted?: boolean;
+  limit?: number;
+}
+
+export const findingsApi = {
+  /** The controlled vocabularies (type / anatomy / morphology slugs). */
+  getVocab: () => request<FindingVocab>("/api/findings/vocab"),
+
+  /** List a patient's findings (optionally filtered by study + attributes). */
+  list: (patientId: string, params: FindingSearchParams = {}) =>
+    request<Finding[]>(
+      `/api/patients/${patientId}/findings${qs(params as Record<string, QSValue>)}`,
+    ),
+
+  /** Corpus-wide structured search across every readable study. */
+  search: (params: FindingSearchParams = {}) =>
+    request<Finding[]>(`/api/findings/search${qs(params as Record<string, QSValue>)}`),
+
+  get: (findingId: string) => request<Finding>(`/api/findings/${findingId}`),
+
+  create: (
+    patientId: string,
+    input: FindingCreateInput,
+    opts: { idempotencyKey?: string; dryRun?: boolean } = {},
+  ) => {
+    const headers = new Headers();
+    if (opts.idempotencyKey) headers.set("idempotency-key", opts.idempotencyKey);
+    const suffix = opts.dryRun ? "?dry_run=true" : "";
+    return request<Finding>(`/api/patients/${patientId}/findings${suffix}`, {
+      method: "POST",
+      json: input,
+      headers,
+    });
+  },
+
+  update: (findingId: string, input: FindingUpdateInput, etag?: string) => {
+    const headers = new Headers();
+    if (etag) headers.set("if-match", etag.startsWith('"') ? etag : `"${etag}"`);
+    return request<Finding>(`/api/findings/${findingId}`, {
+      method: "PATCH",
+      json: input,
+      headers,
+    });
+  },
+
+  remove: (findingId: string, etag?: string) => {
+    const headers = new Headers();
+    if (etag) headers.set("if-match", etag.startsWith('"') ? etag : `"${etag}"`);
+    return request<void>(`/api/findings/${findingId}`, { method: "DELETE", headers });
+  },
+};
+
 // -------- App settings (admin-tunable runtime configuration) --------
 
 export interface AppSetting {
