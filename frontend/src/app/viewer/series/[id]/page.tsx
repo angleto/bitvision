@@ -204,7 +204,9 @@ type Tool =
   | "measure-angle"
   | "measure-area"
   | "measure-ellipse"
+  | "measure-rect"
   | "measure-sphere"
+  | "measure-bidirectional"
   | "measure-freehand"
   | "measure-arrow"
   | "measure-text"
@@ -3744,9 +3746,11 @@ export default function SeriesViewerPage() {
                               ["wl", tv("toolWl")],
                               ["pan", tv("toolPan")],
                               ["measure-dist", tv("toolDistance")],
+                              ["measure-bidirectional", tv("toolBidirectional")],
                               ["measure-angle", tv("toolAngle")],
                               ["measure-area", tv("toolArea")],
                               ["measure-ellipse", tv("toolEllipse")],
+                              ["measure-rect", tv("toolRect")],
                               ["measure-sphere", tv("toolSphere")],
                               ["measure-freehand", tv("toolFreehand")],
                               ["measure-arrow", tv("toolArrow")],
@@ -3795,9 +3799,11 @@ export default function SeriesViewerPage() {
                               wl: tv("hintWl"),
                               pan: tv("hintPan"),
                               "measure-dist": tv("hintDist"),
+                              "measure-bidirectional": tv("hintBidirectional"),
                               "measure-angle": tv("hintAngle"),
                               "measure-area": tv("hintArea"),
                               "measure-ellipse": tv("hintEllipse"),
+                              "measure-rect": tv("hintRect"),
                               "measure-sphere": tv("hintSphere"),
                               "measure-freehand": tv("hintFreehand"),
                               "measure-arrow": tv("hintArrow"),
