@@ -65,6 +65,52 @@ TOOLS: list[Tool] = [
             },
         },
     ),
+    Tool(
+        name="export_training_cohort_bundle",
+        annotations=ToolAnnotations(
+            title="Export training cohort bundle (job)",
+            readOnlyHint=False,
+            destructiveHint=False,
+            idempotentHint=True,
+            openWorldHint=False,
+        ),
+        description=(
+            "Enqueue the full de-identified training BUNDLE (images + masks "
+            "+ labels.json as a ZIP) for the cohort matching a structured "
+            "Finding query. Returns a Job descriptor — poll get_job(job_id) "
+            "and download via its result_download_url. Same gating as the "
+            "manifest (consent + tier + k-anonymity + admin), re-validated "
+            "when the worker runs. Use export_training_manifest first to "
+            "preview the cohort + check k-anonymity before committing the "
+            "heavy bundle."
+        ),
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "type": {"type": "string"},
+                "anatomy": {"type": "string"},
+                "laterality": {
+                    "type": "string",
+                    "enum": ["left", "right", "bilateral", "midline"],
+                },
+                "morphology": {"type": "array", "items": {"type": "string"}},
+                "status": {
+                    "type": "string",
+                    "enum": ["candidate", "confirmed", "retracted"],
+                },
+                "min_diameter_mm": {"type": "number"},
+                "max_diameter_mm": {"type": "number"},
+                "min_volume_ml": {"type": "number"},
+                "min_suv_max": {"type": "number"},
+                "scope": {
+                    "type": "string",
+                    "enum": ["all", "mine", "public"],
+                    "default": "all",
+                },
+                "k_min": {"type": "integer", "default": 5, "minimum": 1, "maximum": 1000},
+            },
+        },
+    ),
 ]
 
 
@@ -77,7 +123,18 @@ async def _export_training_manifest(args: dict[str, Any]) -> str:
     return json.dumps(payload, indent=2, ensure_ascii=False)
 
 
+async def _export_training_cohort_bundle(args: dict[str, Any]) -> str:
+    body = {k: v for k, v in args.items() if v is not None}
+    try:
+        payload, _headers = await api_post_with_headers("/api/training-exports", json=body)
+    except httpx.HTTPStatusError as exc:
+        return format_http_error(exc)
+    return json.dumps(payload, indent=2, ensure_ascii=False)
+
+
 async def handle(name: str, arguments: dict[str, Any]) -> str:
     if name == "export_training_manifest":
         return await _export_training_manifest(arguments)
+    if name == "export_training_cohort_bundle":
+        return await _export_training_cohort_bundle(arguments)
     return f"Error: unknown tool '{name}' in training module"
