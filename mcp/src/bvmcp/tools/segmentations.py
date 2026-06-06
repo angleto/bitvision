@@ -16,14 +16,15 @@ session (e.g. ``find_hot_spots`` → ``bbox.lesion`` marker →
 ``predict_segmentation_interactive`` with the bbox centroid →
 persisted mask under a semantic label).
 
-Provenance gap (tracked separately): the legacy
-``/series/{id}/segmentations`` family backs an S3-only ``.bin`` blob
-indexed by label; producer / model_id / agent_token_id are NOT
-captured per-mask the way they are on markers and ReportContent.
-Training-grade lineage requires a follow-up that promotes those
-fields onto the ``Segmentation`` ORM row. The tools here record
-intent in the audit trail; the worker-side persistence still hits
-the legacy path.
+Provenance (P1, resolved): every mask write now also writes a
+``Segmentation`` ORM row carrying producer (``manual`` / ``medsam`` /
+``totalsegmentator``), patient_id, ``author_kind`` (human / agent /
+system, so an AI mask is distinguishable), ``agent_token_id`` and the
+``nonzero_voxels`` size metric. ``get_segmentations`` surfaces those
+fields; the listing is ORM-authoritative and merges any legacy S3-only
+blob as a fallback. An agent token cannot overwrite a human-authored
+mask. DICOM SEG interop export remains a separate follow-up (blocked on
+volume-build geometry preservation, not on this lineage work).
 """
 
 from __future__ import annotations
