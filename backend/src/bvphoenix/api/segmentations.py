@@ -21,15 +21,17 @@ import uuid
 from typing import Annotated, Any
 
 import pydicom
-from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile, status
+from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, UploadFile, status
 from fastapi.responses import Response
 from pydantic import BaseModel
-from sqlalchemy import select
+from sqlalchemy import func, select
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from bvphoenix.api.markers import _agent_provenance
 from bvphoenix.auth import optional_user, require_user
 from bvphoenix.config import get_settings
-from bvphoenix.db.models import Derivative, ImagingStudy, Instance, Series, User
+from bvphoenix.db.models import Derivative, ImagingStudy, Instance, Segmentation, Series, User
 from bvphoenix.db.session import get_db
 from bvphoenix.services.permissions import READ_PIXELS, WRITE_ANNOTATIONS, can
 from bvphoenix.services.segmentation_import import (
@@ -64,6 +66,12 @@ class SegmentationOut(BaseModel):
     label: str
     size_bytes: int
     nonzero_voxels: int | None = None
+    # Provenance (present for masks promoted to the Segmentation ORM row;
+    # absent for legacy S3-only blobs surfaced as a fallback).
+    id: str | None = None
+    producer: str | None = None
+    author_kind: str | None = None
+    created_at: str | None = None
 
 
 class SegmentationListOut(BaseModel):
@@ -92,6 +100,89 @@ def _seg_prefix(series_id: uuid.UUID) -> str:
 
 def _seg_key(series_id: uuid.UUID, label: str) -> str:
     return f"{_seg_prefix(series_id)}{label}.bin"
+
+
+async def _upsert_segmentation(
+    db: AsyncSession,
+    request: Request,
+    user: User,
+    *,
+    series_id: uuid.UUID,
+    patient_id: uuid.UUID | None,
+    producer: str,
+    label: str,
+    s3_bucket: str,
+    s3_key: str,
+    size_bytes: int | None,
+    nonzero_voxels: int | None,
+    label_map: dict | None = None,
+) -> Segmentation:
+    """Promote a mask onto the ``Segmentation`` ORM row with provenance.
+
+    Idempotent on (series_id, producer, label): a re-write replaces the
+    pointer + metrics. An agent token cannot overwrite a human-authored
+    mask (mirrors the marker write gate); admins are exempt.
+    """
+    author_kind, model_id, _provider, agent_token_id = _agent_provenance(request)
+
+    existing = (
+        await db.execute(
+            select(Segmentation).where(
+                Segmentation.series_id == series_id,
+                Segmentation.producer == producer,
+                Segmentation.label == label,
+            )
+        )
+    ).scalar_one_or_none()
+    if (
+        existing is not None
+        and getattr(request.state, "is_agent", False)
+        and existing.author_kind == "human"
+        and not getattr(user, "is_admin", False)
+    ):
+        raise HTTPException(
+            status_code=403,
+            detail="agent tokens cannot overwrite a human-authored segmentation",
+        )
+
+    values = {
+        "series_id": series_id,
+        "patient_id": patient_id,
+        "producer": producer,
+        "label": label,
+        "s3_bucket": s3_bucket,
+        "s3_key": s3_key,
+        "size_bytes": size_bytes,
+        "nonzero_voxels": nonzero_voxels,
+        "label_map": label_map or {},
+        "author_kind": author_kind,
+        "model_id": model_id,
+        "agent_token_id": agent_token_id,
+        "created_by_subject_id": user.subject_id,
+    }
+    stmt = (
+        pg_insert(Segmentation)
+        .values(**values)
+        .on_conflict_do_update(
+            constraint="uq_segmentations_series_producer_label",
+            set_={
+                "patient_id": patient_id,
+                "s3_bucket": s3_bucket,
+                "s3_key": s3_key,
+                "size_bytes": size_bytes,
+                "nonzero_voxels": nonzero_voxels,
+                "author_kind": author_kind,
+                "model_id": model_id,
+                "agent_token_id": agent_token_id,
+                "created_by_subject_id": user.subject_id,
+                "created_at": func.now(),
+            },
+        )
+        .returning(Segmentation.id)
+    )
+    seg_id = (await db.execute(stmt)).scalar_one()
+    await db.commit()
+    return (await db.execute(select(Segmentation).where(Segmentation.id == seg_id))).scalar_one()
 
 
 async def _series_dims(db: AsyncSession, series: Series) -> tuple[int, int, int]:
@@ -168,20 +259,48 @@ async def list_segmentations(
     if not await can(db, user=user, action=READ_PIXELS, study=study):
         raise HTTPException(status_code=404, detail="series not found")
 
+    # The Segmentation ORM rows are authoritative (they carry provenance +
+    # metrics). Legacy S3-only ``.bin`` blobs with no ORM row are merged in
+    # as fallback entries so masks produced before P1 still appear.
+    rows = (
+        (
+            await db.execute(
+                select(Segmentation)
+                .where(Segmentation.series_id == series_id)
+                .order_by(Segmentation.created_at.desc())
+            )
+        )
+        .scalars()
+        .all()
+    )
+    items: list[SegmentationOut] = []
+    orm_labels: set[str] = set()
+    for r in rows:
+        orm_labels.add(r.label)
+        items.append(
+            SegmentationOut(
+                label=r.label,
+                size_bytes=r.size_bytes or 0,
+                nonzero_voxels=r.nonzero_voxels,
+                id=str(r.id),
+                producer=r.producer,
+                author_kind=r.author_kind,
+                created_at=r.created_at.isoformat(),
+            )
+        )
+
     settings = get_settings()
     storage = get_s3_storage()
     prefix = _seg_prefix(series_id)
     entries = await asyncio.to_thread(
         storage.list_objects, bucket=settings.s3_bucket_derivatives, prefix=prefix
     )
-
-    items: list[SegmentationOut] = []
     for key, size in entries:
         rel = key[len(prefix) :]
         if not rel.endswith(".bin"):
             continue
         label = rel[: -len(".bin")]
-        if not _LABEL_RE.match(label):
+        if not _LABEL_RE.match(label) or label in orm_labels:
             continue
         items.append(SegmentationOut(label=label, size_bytes=size))
 
@@ -221,6 +340,7 @@ async def get_segmentation(
     status_code=status.HTTP_201_CREATED,
 )
 async def upload_segmentation(
+    request: Request,
     series_id: uuid.UUID,
     db: Annotated[AsyncSession, Depends(get_db)],
     user: Annotated[User, Depends(require_user)],
@@ -274,10 +394,27 @@ async def upload_segmentation(
         bucket=settings.s3_bucket_derivatives,
         key=key,
     )
-    return SegmentationOut(
+    seg = await _upsert_segmentation(
+        db,
+        request,
+        user,
+        series_id=series_id,
+        patient_id=study.patient_id,
+        producer="manual",
         label=label,
+        s3_bucket=settings.s3_bucket_derivatives,
+        s3_key=key,
         size_bytes=len(imported.data),
         nonzero_voxels=imported.nonzero_voxels,
+    )
+    return SegmentationOut(
+        label=seg.label,
+        size_bytes=seg.size_bytes or len(imported.data),
+        nonzero_voxels=seg.nonzero_voxels,
+        id=str(seg.id),
+        producer=seg.producer,
+        author_kind=seg.author_kind,
+        created_at=seg.created_at.isoformat(),
     )
 
 
@@ -360,6 +497,7 @@ class InteractivePredictIn(BaseModel):
     status_code=status.HTTP_202_ACCEPTED,
 )
 async def enqueue_auto_segment(
+    request: Request,
     series_id: uuid.UUID,
     body: AutoSegmentIn,
     db: Annotated[AsyncSession, Depends(get_db)],
@@ -395,6 +533,11 @@ async def enqueue_auto_segment(
 
     from bvphoenix.services.arq_redis import redis_settings
 
+    # Provenance for the worker-written Segmentation rows: the worker has
+    # no request context, so resolve the acting principal + patient scope
+    # here and thread them through the job args.
+    author_kind, _model_id, _provider, agent_token_id = _agent_provenance(request)
+
     settings = get_settings()
     redis = await create_pool(redis_settings(settings.redis_url))
     job = await redis.enqueue_job(
@@ -403,6 +546,10 @@ async def enqueue_auto_segment(
         rois,
         body.overwrite,
         body.fast,
+        author_kind=author_kind,
+        agent_token_id=str(agent_token_id) if agent_token_id else None,
+        created_by=str(user.subject_id) if user.subject_id else None,
+        patient_id=str(study.patient_id) if study.patient_id else None,
     )
     job_id = job.job_id if job else ""
     await redis.close()
@@ -519,6 +666,7 @@ async def auto_segment_status(
 
 @router.post("/series/{series_id}/segmentations/interactive/predict")
 async def interactive_predict(
+    request: Request,
     series_id: uuid.UUID,
     body: InteractivePredictIn,
     db: Annotated[AsyncSession, Depends(get_db)],
@@ -618,11 +766,27 @@ async def interactive_predict(
             else:
                 storage = get_s3_storage()
                 key = _seg_key(series_id, body.label)
+                mask_bytes = np.ascontiguousarray(volume).tobytes()
                 await asyncio.to_thread(
                     storage.upload_bytes,
-                    np.ascontiguousarray(volume).tobytes(),
+                    mask_bytes,
                     bucket=settings.s3_bucket_derivatives,
                     key=key,
+                )
+                # Promote to the Segmentation ORM row with provenance
+                # (producer 'medsam' — MedSAM-2 prediction, operator-driven).
+                await _upsert_segmentation(
+                    db,
+                    request,
+                    user,
+                    series_id=series_id,
+                    patient_id=study.patient_id,
+                    producer="medsam",
+                    label=body.label,
+                    s3_bucket=settings.s3_bucket_derivatives,
+                    s3_key=key,
+                    size_bytes=len(mask_bytes),
+                    nonzero_voxels=int(volume.sum()),
                 )
                 # ``s3_key`` deliberately omitted — bucket layout is
                 # internal storage (``feedback_storage_isolation``); the

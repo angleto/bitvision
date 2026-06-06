@@ -182,12 +182,97 @@ def _run_totalsegmentator(
     )
 
 
+def _totalseg_version() -> str | None:
+    """Best-effort TotalSegmentator package version for provenance."""
+    try:
+        import importlib.metadata
+
+        return importlib.metadata.version("totalsegmentator")
+    except Exception:
+        return None
+
+
+async def _persist_segmentation_rows(
+    settings: Any,
+    series_id: uuid.UUID,
+    *,
+    metas: list[tuple[str, str, int, int]],
+    patient_id: str | None,
+    author_kind: str,
+    agent_token_id: str | None,
+    created_by: str | None,
+) -> None:
+    """Upsert one Segmentation ORM row per produced mask, with provenance.
+    Idempotent on (series_id, producer, label) so re-runs replace cleanly.
+    Best-effort: a DB failure here never loses the masks already in S3."""
+    from bvphoenix.db.models import Segmentation
+    from sqlalchemy import func
+    from sqlalchemy.dialects.postgresql import insert as pg_insert
+    from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
+
+    def _uid(v: str | None) -> uuid.UUID | None:
+        try:
+            return uuid.UUID(v) if v else None
+        except (ValueError, TypeError):
+            return None
+
+    pid, token, actor = _uid(patient_id), _uid(agent_token_id), _uid(created_by)
+    version = _totalseg_version()
+    engine = create_async_engine(settings.database_url, pool_pre_ping=True)
+    try:
+        async with AsyncSession(engine) as db:
+            for label, key, size_bytes, nonzero in metas:
+                stmt = (
+                    pg_insert(Segmentation)
+                    .values(
+                        series_id=series_id,
+                        patient_id=pid,
+                        producer="totalsegmentator",
+                        producer_version=version,
+                        label=label,
+                        s3_bucket=settings.s3_bucket_derivatives,
+                        s3_key=key,
+                        size_bytes=size_bytes,
+                        nonzero_voxels=nonzero,
+                        label_map={},
+                        author_kind=author_kind,
+                        agent_token_id=token,
+                        created_by_subject_id=actor,
+                    )
+                    .on_conflict_do_update(
+                        constraint="uq_segmentations_series_producer_label",
+                        set_={
+                            "patient_id": pid,
+                            "s3_key": key,
+                            "size_bytes": size_bytes,
+                            "nonzero_voxels": nonzero,
+                            "producer_version": version,
+                            "author_kind": author_kind,
+                            "agent_token_id": token,
+                            "created_by_subject_id": actor,
+                            "created_at": func.now(),
+                        },
+                    )
+                )
+                await db.execute(stmt)
+            await db.commit()
+    except Exception:
+        logger.exception("segmentation ORM persist failed for series %s", series_id)
+    finally:
+        await engine.dispose()
+
+
 async def segment_auto(
     ctx: dict[str, Any],
     series_id: str,
     roi_subset: list[str] | None = None,
     overwrite: bool = False,
     fast: bool = True,
+    *,
+    author_kind: str = "system",
+    agent_token_id: str | None = None,
+    created_by: str | None = None,
+    patient_id: str | None = None,
 ) -> dict[str, Any]:
     """Arq task: run TotalSegmentator on the series's packed volume
     and upload one binary mask per ROI to the derivatives bucket.
@@ -241,11 +326,12 @@ async def segment_auto(
             row = (
                 await db.execute(
                     text(
-                        "SELECT s.series_instance_uid, d.s3_bucket, d.s3_key "
+                        "SELECT s.series_instance_uid, d.s3_bucket, d.s3_key, st.patient_id "
                         "FROM series s "
                         "LEFT JOIN derivatives d "
                         "  ON d.series_id = s.id AND d.kind = 'volume_f32' "
                         "  AND d.stack_index = 0 "
+                        "LEFT JOIN imaging_studies st ON st.id = s.study_id "
                         "WHERE s.id = :sid"
                     ),
                     {"sid": sid},
@@ -253,7 +339,7 @@ async def segment_auto(
             ).first()
             if row is None:
                 return {"status": "series_not_found", "series_id": series_id}
-            series_uid, vol_bucket, vol_key = row
+            _series_uid, vol_bucket, vol_key, db_patient_id = row
             if not vol_bucket or not vol_key:
                 return {
                     "status": "volume_not_packed",
@@ -268,6 +354,8 @@ async def segment_auto(
 
     produced: list[str] = []
     failures: list[dict[str, str]] = []
+    # (label, s3_key, size_bytes, nonzero_voxels) for the ORM promotion.
+    produced_meta: list[tuple[str, str, int, int]] = []
 
     with tempfile.TemporaryDirectory(prefix="bvp-totalseg-") as td:
         tmp = Path(td)
@@ -310,7 +398,25 @@ async def segment_auto(
                     **settings.put_extra_args(),
                 )
             )
+            nonzero = int((np.frombuffer(mask_bytes, dtype=np.uint8) != 0).sum())
             produced.append(roi)
+            produced_meta.append((roi, key, len(mask_bytes), nonzero))
+
+    # Promote the produced masks to Segmentation ORM rows with provenance.
+    # The worker has no request context — author_kind / agent_token /
+    # created_by were threaded through from the enqueue site; patient_id
+    # falls back to the study's patient resolved above. Best-effort: a
+    # persist failure must not lose the masks already in S3.
+    if produced_meta:
+        await _persist_segmentation_rows(
+            settings,
+            sid,
+            metas=produced_meta,
+            patient_id=patient_id or (str(db_patient_id) if db_patient_id else None),
+            author_kind=author_kind,
+            agent_token_id=agent_token_id,
+            created_by=created_by,
+        )
 
     return {
         "status": "ok" if produced else "no_output",
@@ -323,4 +429,4 @@ async def segment_auto(
 
 
 # Re-exported only for clarity at task-registration time.
-__all__ = ["segment_auto", "DEFAULT_ROI_SUBSET"]
+__all__ = ["DEFAULT_ROI_SUBSET", "segment_auto"]

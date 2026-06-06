@@ -18,10 +18,13 @@ import uuid
 from datetime import datetime
 
 from sqlalchemy import (
+    BigInteger,
+    CheckConstraint,
     DateTime,
     ForeignKey,
     Index,
     String,
+    Text,
     UniqueConstraint,
     func,
 )
@@ -34,9 +37,14 @@ from bvphoenix.db.models._common import uuid_pk
 
 SEGMENTATION_PRODUCERS: tuple[str, ...] = (
     "totalsegmentator",
+    "medsam",
     "manual",
     "imported",
 )
+
+# Acting principal that authored the mask (shared shape with Marker /
+# Finding). Distinct from ``producer`` (the algorithm/engine).
+SEGMENTATION_AUTHOR_KINDS: tuple[str, ...] = ("human", "agent", "system")
 
 
 class Segmentation(Base):
@@ -64,14 +72,29 @@ class Segmentation(Base):
     # the voxel intensity to render anatomy-aware overlays.
     label_map: Mapped[dict] = mapped_column(JSONB, nullable=False, server_default="{}")
 
+    # Denormalized patient scope (mirrors Marker / Finding) for
+    # patient-scoped queries + cascade. Nullable like imaging_studies.patient_id.
+    patient_id: Mapped[uuid.UUID | None] = mapped_column(
+        PG_UUID(as_uuid=True),
+        ForeignKey("patients.id", ondelete="CASCADE"),
+    )
+
     created_by_subject_id: Mapped[uuid.UUID | None] = mapped_column(
         PG_UUID(as_uuid=True),
         ForeignKey("subjects.id", ondelete="SET NULL"),
     )
+    # Acting principal (human / agent / system). ``producer`` is the
+    # algorithm; ``author_kind`` is who triggered it, so an AI-authored
+    # mask is never indistinguishable from a human-uploaded one.
+    author_kind: Mapped[str] = mapped_column(String(16), nullable=False, server_default="human")
+    model_id: Mapped[str | None] = mapped_column(Text)
     agent_token_id: Mapped[uuid.UUID | None] = mapped_column(
         PG_UUID(as_uuid=True),
         ForeignKey("agent_tokens.id", ondelete="SET NULL"),
     )
+    # Foreground voxel count (the trainable size metric); persisted from
+    # the import / predict path instead of being computed and discarded.
+    nonzero_voxels: Mapped[int | None] = mapped_column(BigInteger)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )
@@ -80,6 +103,11 @@ class Segmentation(Base):
         UniqueConstraint(
             "series_id", "producer", "label", name="uq_segmentations_series_producer_label"
         ),
+        CheckConstraint(
+            "author_kind IN (" + ",".join(f"'{a}'" for a in SEGMENTATION_AUTHOR_KINDS) + ")",
+            name="ck_segmentations_author_kind",
+        ),
         Index("ix_segmentations_series", "series_id"),
         Index("ix_segmentations_producer", "producer", "created_at"),
+        Index("ix_segmentations_patient", "patient_id"),
     )
