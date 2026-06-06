@@ -28,6 +28,7 @@ from bvphoenix.db.models import ClinicalEvent, ImagingStudy, Instance, Patient, 
 from bvphoenix.services.permissions import platform_owner_subject_id
 from bvphoenix.services.public_dataset import (
     PublicDatasetSource,
+    completed_series_uids_for_source,
     import_public_dataset,
 )
 from tests.conftest import skip_if_no_db
@@ -251,6 +252,66 @@ def test_reimport_same_subject_is_idempotent(tmp_path: Path, sync_session: Sessi
         assert second.report.studies_existing == 1
         assert second.report.instances_inserted == 0
         assert second.report.instances_existing == 1
+    finally:
+        _cleanup_collection(sync_session, collection)
+        sync_session.close()
+
+
+@skip_if_no_db
+def test_completed_series_uids_for_source_reports_imported_series(
+    tmp_path: Path, sync_session: Session
+) -> None:
+    """The pre-download skip helper returns exactly the SeriesInstanceUIDs
+    already fully imported for a source subject, and an empty set for an
+    unknown subject. This is the signal that lets the public importer skip
+    re-downloading series it already holds (see public_import._adapter_tcia).
+    """
+    collection = f"TEST/UNIT-{uuid.uuid4().hex[:8]}"
+    subject_id = "SUBJ-SKIP"
+    study_uid = generate_uid()
+    series_uid = generate_uid()
+
+    dicom_dir = tmp_path / "subject"
+    dicom_dir.mkdir()
+    _write_dicom(
+        dicom_dir / "i1.dcm",
+        study_uid=study_uid,
+        series_uid=series_uid,
+        sop_uid=generate_uid(),
+    )
+
+    storage = _FakeS3Storage()
+    source = PublicDatasetSource(
+        collection=collection,
+        subject_id=subject_id,
+        license_spdx="CC-BY-4.0",
+        license_url="https://creativecommons.org/licenses/by/4.0/",
+        citation_text="Test citation.",
+    )
+
+    try:
+        import_public_dataset(
+            session=sync_session,
+            storage=storage,  # type: ignore[arg-type]
+            bucket="test-bucket",
+            dicom_dir=dicom_dir,
+            source=source,
+        )
+        sync_session.commit()
+
+        # The freshly-imported series is reported as done.
+        done = completed_series_uids_for_source(
+            sync_session, collection=collection, subject_id=subject_id
+        )
+        assert done == {series_uid}
+
+        # An unknown subject under the same collection has nothing to skip.
+        assert (
+            completed_series_uids_for_source(
+                sync_session, collection=collection, subject_id="SUBJ-DOES-NOT-EXIST"
+            )
+            == set()
+        )
     finally:
         _cleanup_collection(sync_session, collection)
         sync_session.close()
