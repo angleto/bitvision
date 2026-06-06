@@ -24,6 +24,7 @@ from bvphoenix.api import consultations_compat as consultations_compat_routes
 from bvphoenix.api import credits as credits_routes
 from bvphoenix.api import dicom_upload as dicom_upload_routes
 from bvphoenix.api import display_metadata as display_metadata_routes
+from bvphoenix.api import docs as docs_routes
 from bvphoenix.api import document_catalog as document_catalog_routes
 from bvphoenix.api import documents as documents_routes
 from bvphoenix.api import duc as duc_routes
@@ -139,5 +140,10 @@ api_router.include_router(app_settings_routes.router)
 api_router.include_router(admin_users_routes.router)
 api_router.include_router(admin_llm_rates_routes.router)
 api_router.include_router(admin_llm_prompts_routes.router)
+# Authenticated OpenAPI docs (Swagger / ReDoc / schema). Mounted under
+# the ``/api`` prefix so the ingress routes them to the backend; the
+# FastAPI defaults at ``/docs`` / ``/openapi.json`` are disabled in
+# ``main.py`` (they fell outside ``/api`` and 404'd in production).
+api_router.include_router(docs_routes.router)
 
 __all__ = ["api_router"]

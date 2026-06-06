@@ -223,7 +223,7 @@ export default async function HomePage() {
           fontSize: "0.82rem",
         }}
       >
-        <a href={`${API_BASE_URL}/docs`}>{t("footerApiDocs")}</a>
+        <a href={`${API_BASE_URL}/api/docs`}>{t("footerApiDocs")}</a>
         {" · "}
         <Link href="/transparency">{t("footerTransparency")}</Link>
         {" · "}

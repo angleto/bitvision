@@ -60,7 +60,18 @@ function LoginForm() {
       // open-redirect / phishing vector: a crafted
       // ``/login?next=https://evil.example`` would otherwise punt the
       // freshly-authenticated user off-origin.
-      router.push(safeInternalPath(search.get("next"), "/studies"));
+      const dest = safeInternalPath(search.get("next"), "/studies");
+      // ``/api/*`` targets are served by the backend (e.g. the
+      // auth-gated Swagger docs at /api/docs), not by the SPA router.
+      // ``router.push`` would try to resolve them as app routes and
+      // fail; hard-navigate instead so the browser issues a real
+      // request (carrying the freshly-set session cookie) to the
+      // ingress, which routes /api/* to the backend.
+      if (dest.startsWith("/api/")) {
+        window.location.assign(dest);
+      } else {
+        router.push(dest);
+      }
     } catch (e) {
       if (e instanceof ApiError && e.status === 401) {
         const detail = (e.detail as { detail?: string })?.detail;
