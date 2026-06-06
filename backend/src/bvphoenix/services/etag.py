@@ -163,8 +163,29 @@ def enforce_if_match_value(if_match: str | None, current_etag: str) -> None:
         )
 
 
+def enforce_optional_if_match(
+    if_match: str | None, current_etag: str, *, what: str = "resource"
+) -> None:
+    """Opt-in optimistic-concurrency guard (the Document / Marker / Finding
+    pattern, as opposed to the mandatory :func:`enforce_if_match_value`).
+
+    When the caller supplies ``If-Match`` a stale token is rejected with
+    412; when absent the write proceeds (last-write-wins). Agents SHOULD
+    pass the ETag they read so a concurrent edit cannot be silently
+    clobbered; a single-editor first-party UI may omit it. ``*`` opts out.
+    ``what`` is interpolated into the 412 detail for a clearer message.
+    """
+    presented = parse_if_match(if_match)
+    if presented is not None and presented != "*" and presented != current_etag:
+        raise HTTPException(
+            status_code=status.HTTP_412_PRECONDITION_FAILED,
+            detail=f"If-Match {presented!r} does not match the current {what} etag",
+        )
+
+
 __all__ = [
     "enforce_if_match_value",
+    "enforce_optional_if_match",
     "etag_for_branch",
     "format_etag",
     "parse_if_match",

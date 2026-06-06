@@ -51,6 +51,14 @@ from bvphoenix.db.models.duc import DUCMember, DUCRequest, DUCVote
 from bvphoenix.db.models.embedding_errors import EmbeddingError
 from bvphoenix.db.models.embedding_models import EmbeddingModel
 from bvphoenix.db.models.embeddings import Embedding
+from bvphoenix.db.models.findings import (
+    AnatomySite,
+    Finding,
+    FindingGeometry,
+    FindingRevision,
+    FindingType,
+    MorphologyTerm,
+)
 from bvphoenix.db.models.folders import Folder, FolderItem
 from bvphoenix.db.models.gdpr import Consent, DataErasureRequest
 from bvphoenix.db.models.grants import Grant
@@ -208,6 +216,7 @@ __all__ = [
     "AgentAssistant",
     "AgentAssistantPatient",
     "AgentToken",
+    "AnatomySite",
     "AppSetting",
     "AuditLog",
     "AuditSessionView",
@@ -244,6 +253,10 @@ __all__ = [
     "EmbeddingError",
     "EmbeddingModel",
     "EntityObject",
+    "Finding",
+    "FindingGeometry",
+    "FindingRevision",
+    "FindingType",
     "Folder",
     "FolderItem",
     "Grant",
@@ -259,6 +272,7 @@ __all__ = [
     "MarkerRevision",
     "Membership",
     "MergeConflict",
+    "MorphologyTerm",
     "NotificationDispatch",
     "OAuthCode",
     "Organization",

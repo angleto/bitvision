@@ -30,6 +30,7 @@ from bvphoenix.api import documents as documents_routes
 from bvphoenix.api import duc as duc_routes
 from bvphoenix.api import embeddings_admin as embeddings_admin_routes
 from bvphoenix.api import external_identifiers as external_identifiers_routes
+from bvphoenix.api import findings as findings_routes
 from bvphoenix.api import folders as folders_routes
 from bvphoenix.api import gdpr as gdpr_routes
 from bvphoenix.api import history as history_routes
@@ -136,6 +137,7 @@ api_router.include_router(credits_routes.router)
 api_router.include_router(duc_routes.router)
 api_router.include_router(payouts_routes.router)
 api_router.include_router(markers_routes.router)
+api_router.include_router(findings_routes.router)
 api_router.include_router(app_settings_routes.router)
 api_router.include_router(admin_users_routes.router)
 api_router.include_router(admin_llm_rates_routes.router)

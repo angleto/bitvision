@@ -47,7 +47,7 @@ from bvphoenix.db.models.markers import MARKER_KINDS
 from bvphoenix.db.session import get_db
 from bvphoenix.middleware.audit_dependency import AuditDep
 from bvphoenix.middleware.idempotency import IdempotencyContext, idempotent
-from bvphoenix.services.etag import format_etag, parse_if_match
+from bvphoenix.services.etag import enforce_optional_if_match, format_etag
 from bvphoenix.services.permissions import (
     READ_METADATA,
     WRITE_REPORT,
@@ -210,23 +210,6 @@ def _agent_provenance(request: Request) -> tuple[str, str | None, str | None, uu
         token = getattr(request.state, "agent_token", None)
         return ("agent", None, None, getattr(token, "id", None))
     return ("human", None, None, None)
-
-
-def _enforce_optional_if_match(if_match: str | None, current_etag: str) -> None:
-    """Optimistic-concurrency guard, opt-in (mirrors the Document PATCH).
-
-    When the caller supplies ``If-Match`` we reject a stale token with
-    412; when absent the write proceeds (last-write-wins). Agents SHOULD
-    pass the ETag they read so a concurrent edit cannot be silently
-    clobbered; the first-party viewer (single editor) may omit it. The
-    ``*`` wildcard explicitly opts out.
-    """
-    presented = parse_if_match(if_match)
-    if presented is not None and presented != "*" and presented != current_etag:
-        raise HTTPException(
-            status_code=status.HTTP_412_PRECONDITION_FAILED,
-            detail=(f"If-Match {presented!r} does not match the current marker etag"),
-        )
 
 
 # ---------------------------------------------------------------------------
@@ -460,8 +443,8 @@ async def update_marker(
     m = await _marker_for_write(db, request, user, marker_id)
     # Optimistic concurrency: a stale view (someone else edited the
     # marker since the caller read it) is rejected rather than silently
-    # clobbered. Opt-in — see ``_enforce_optional_if_match``.
-    _enforce_optional_if_match(if_match, str(m.etag))
+    # clobbered. Opt-in (see services.etag.enforce_optional_if_match).
+    enforce_optional_if_match(if_match, str(m.etag), what="marker")
     changed: dict[str, Any] = {}
     if body.geometry is not None:
         m.geometry = body.geometry
@@ -520,7 +503,7 @@ async def delete_marker(
     # agent DELETE must not error), unless a hard purge is requested.
     if m.deleted_at is not None and not hard:
         return Response(status_code=status.HTTP_204_NO_CONTENT)
-    _enforce_optional_if_match(if_match, str(m.etag))
+    enforce_optional_if_match(if_match, str(m.etag), what="marker")
 
     if hard:
         if not getattr(user, "is_admin", False):
