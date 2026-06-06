@@ -44,6 +44,7 @@ import yaml
 from sqlalchemy import create_engine
 from sqlalchemy.orm import Session
 
+from bvphoenix.cli.import_dicom import _enqueue_pack_jobs
 from bvphoenix.config import get_settings
 from bvphoenix.services.public_dataset import (
     PublicDatasetSource,
@@ -373,6 +374,10 @@ def main(
     processed = 0
     succeeded = 0
     failed: list[tuple[str, str, str]] = []
+    # Series completed this run, to enqueue volume-pack + image-embed jobs
+    # for. Without this the public importer leaves studies un-indexed for
+    # visual search (the regular bvphoenix-import CLI already does this).
+    enqueue_series_ids: list[str] = []
 
     with _temp_workdir() as workdir, httpx.Client(timeout=HTTP_TIMEOUT) as client:
         for src in sources:
@@ -450,6 +455,7 @@ def main(
                         f"studies=+{result.report.studies_inserted}/{result.report.studies_existing} "
                         f"instances=+{result.report.instances_inserted}/{result.report.instances_existing}"
                     )
+                    enqueue_series_ids.extend(result.report.series_ids)
                     # Free the per-subject temp dir before the next one
                     # so a 100-subject run does not balloon to 50 GB
                     # of resident scratch space.
@@ -460,6 +466,13 @@ def main(
                     failed.append((src.collection, subj.identifier, str(exc)))
                     if not continue_on_error:
                         raise
+
+    # Index the freshly-imported studies for visual search: enqueue
+    # volume-pack (all series) + image-embed (embeddable series) jobs.
+    # Idempotent — embed_series skips series that already have a vector —
+    # so it is safe even when --reimport-existing re-ran some subjects.
+    if not dry_run and enqueue_series_ids:
+        _enqueue_pack_jobs(settings, enqueue_series_ids)
 
     click.echo("---")
     click.echo(f"processed:  {processed}")
