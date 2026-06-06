@@ -65,7 +65,7 @@ from bvphoenix.db.models.llm_rate_cards import (
 from bvphoenix.db.models.llm_rate_cards import (
     LLMRateCard,
 )
-from bvphoenix.db.models.markers import Marker
+from bvphoenix.db.models.markers import Marker, MarkerRevision
 from bvphoenix.db.models.notifications import (
     NOTIFICATION_CHANNELS,
     NOTIFICATION_KINDS,
@@ -256,6 +256,7 @@ __all__ = [
     "LicensedDataset",
     "ManifestEntry",
     "Marker",
+    "MarkerRevision",
     "Membership",
     "MergeConflict",
     "NotificationDispatch",

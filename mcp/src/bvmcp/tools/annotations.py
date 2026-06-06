@@ -83,6 +83,15 @@ TOOLS = [
                         "When true, also include clinical notes attached to the same target."
                     ),
                 },
+                "include_deleted": {
+                    "type": "boolean",
+                    "default": False,
+                    "description": (
+                        "When true, also include soft-deleted markers "
+                        "(tombstones). Use to find a removed annotation's "
+                        "id and ``restore_annotation`` it."
+                    ),
+                },
                 "limit": {
                     "type": "integer",
                     "default": 500,
@@ -132,6 +141,7 @@ async def _get_annotations(arguments: dict) -> str:
     kind = arguments.get("kind")
     author_kind = arguments.get("author_kind")
     include_notes = bool(arguments.get("include_notes", False))
+    include_deleted = bool(arguments.get("include_deleted", False))
     limit = int(arguments.get("limit", 500))
 
     marker_params: dict[str, Any] = {
@@ -141,6 +151,8 @@ async def _get_annotations(arguments: dict) -> str:
     }
     if kind:
         marker_params["kind"] = kind
+    if include_deleted:
+        marker_params["include_deleted"] = "true"
     markers = await api_get(f"/api/patients/{patient_id}/markers", params=marker_params)
     if author_kind and isinstance(markers, list):
         markers = [m for m in markers if m.get("author_kind") == author_kind]

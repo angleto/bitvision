@@ -3281,6 +3281,7 @@ export type MarkerKind =
   | "measurement.text"
   | "measurement.probe"
   | "measurement.bbox"
+  | "measurement.sphere"
   | "bbox.lesion"
   | "bbox.exclusion"
   | "fiducial"

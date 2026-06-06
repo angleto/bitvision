@@ -277,6 +277,8 @@ TOOL_SCOPE: dict[str, str] = {
     "write_annotation": "annotations:write",
     "update_annotation": "annotations:write",
     "delete_annotation": "annotations:write",
+    "restore_annotation": "annotations:write",
+    "get_annotation_revisions": "annotations:read",
     "write_clinical_note": "annotations:write",
     "update_clinical_note": "annotations:write",
     "delete_clinical_note": "annotations:write",

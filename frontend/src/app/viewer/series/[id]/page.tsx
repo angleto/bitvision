@@ -175,6 +175,11 @@ function mapToolToMarkerKind(tool: string): MarkerKind {
     text: "measurement.text",
     probe: "measurement.probe",
     bbox: "measurement.bbox",
+    // CircleROI is surfaced by the MPR layout under the legacy "sphere"
+    // tool name (the backend treats it as the equator of a PERCIST
+    // sphere). Without this entry it fell through to the default and
+    // was mis-persisted as ``measurement.distance``.
+    sphere: "measurement.sphere",
   };
   return map[tool] ?? "measurement.distance";
 }
@@ -391,6 +396,14 @@ export default function SeriesViewerPage() {
         max?: number;
         peak?: number;
       };
+      // Patient/world (LPS) coordinates of the annotation handles, kept
+      // alongside the voxel ``points`` so the marker survives a re-pack
+      // and is comparable across series/modalities. Emitted by the MPR
+      // layout (Cornerstone-native world coords).
+      worldPoints?: Array<[number, number, number]>;
+      // FrameOfReferenceUID of the volume the annotation was drawn on —
+      // the anchor that makes ``worldPoints`` meaningful across series.
+      frameOfReferenceUID?: string;
     }>
   >([]);
   // Tracks ids that have already been synced to the markers API so
@@ -987,12 +1000,20 @@ export default function SeriesViewerPage() {
         : kind === "measurement.text"
           ? m.value
           : null;
+      // Persist the patient/world coordinates (already computed by the
+      // MPR layer) + the FrameOfReferenceUID alongside the voxel
+      // ``points`` so the annotation is recoverable and cross-series
+      // comparable, not just voxel indices meaningless outside this
+      // packed volume.
+      const geometry: Record<string, unknown> = { axis: "axial", points };
+      if (m.worldPoints?.length) geometry.world_points = m.worldPoints;
+      if (m.frameOfReferenceUID) geometry.frame_of_reference_uid = m.frameOfReferenceUID;
       markersApi
         .create(studyPatientId, {
           target_kind: "study",
           target_id: series.study_id,
           kind,
-          geometry: { axis: "axial", points },
+          geometry,
           body: persistedLabel,
           computed,
         })

@@ -62,6 +62,14 @@ export interface MPRLayoutProps {
         max?: number;
         peak?: number;
       };
+      /** Patient/world (LPS) coordinates of the annotation handles,
+       *  carried alongside the voxel ``points`` so a marker survives a
+       *  re-pack and is comparable across series/modalities. */
+      worldPoints?: Array<[number, number, number]>;
+      /** FrameOfReferenceUID of the volume the annotation was drawn on —
+       *  the spatial anchor that makes ``worldPoints`` meaningful across
+       *  series. */
+      frameOfReferenceUID?: string;
     }>,
   ) => void;
   markerFade?: { enabled: boolean; range: number; opacity: number };

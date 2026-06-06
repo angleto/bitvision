@@ -32,11 +32,12 @@ import uuid
 from datetime import UTC, datetime
 from typing import Annotated, Any, Literal
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, Field
 from sqlalchemy import Select, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from bvphoenix.api.markers import _agent_provenance
 from bvphoenix.auth import optional_user, require_user
 from bvphoenix.db.models import ImagingStudy, Marker, Series, User
 from bvphoenix.db.session import get_db
@@ -238,6 +239,7 @@ async def list_measurements(
     status_code=200,
 )
 async def upsert_measurements(
+    request: Request,
     series_id: uuid.UUID,
     body: MeasurementsUpsertIn,
     db: Annotated[AsyncSession, Depends(get_db)],
@@ -246,6 +248,10 @@ async def upsert_measurements(
     _series, study = await _load_series_and_study(db, series_id)
     if not await can(db, user=user, action=WRITE_ANNOTATIONS, study=study):
         raise HTTPException(status_code=403, detail="cannot write measurements")
+
+    # Provenance reflects the caller (human vs agent token); previously a
+    # measurement written by an agent was mislabelled author_kind='human'.
+    author_kind, model_id, provider, agent_token_id = _agent_provenance(request)
 
     existing = (await db.execute(_measurement_query(series_id))).scalars().all()
     by_client_id: dict[str, Marker] = {}
@@ -277,7 +283,10 @@ async def upsert_measurements(
                 computed=computed,
                 body=label,
                 author_subject_id=user.subject_id,
-                author_kind="human",
+                author_kind=author_kind,
+                model_id=model_id,
+                provider=provider,
+                agent_token_id=agent_token_id,
             )
             db.add(row)
         kept.append(row)
