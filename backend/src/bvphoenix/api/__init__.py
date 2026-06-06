@@ -66,6 +66,7 @@ from bvphoenix.api import storage as storage_routes
 from bvphoenix.api import studies as studies_routes
 from bvphoenix.api import summaries as summaries_routes
 from bvphoenix.api import tags as tags_routes
+from bvphoenix.api import training_exports as training_exports_routes
 from bvphoenix.api import transparency as transparency_routes
 from bvphoenix.api import upload_sessions as upload_sessions_routes
 from bvphoenix.api import user_api_keys as user_api_keys_routes
@@ -138,6 +139,7 @@ api_router.include_router(duc_routes.router)
 api_router.include_router(payouts_routes.router)
 api_router.include_router(markers_routes.router)
 api_router.include_router(findings_routes.router)
+api_router.include_router(training_exports_routes.router)
 api_router.include_router(app_settings_routes.router)
 api_router.include_router(admin_users_routes.router)
 api_router.include_router(admin_llm_rates_routes.router)

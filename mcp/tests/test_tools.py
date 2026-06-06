@@ -619,6 +619,8 @@ EXPECTED_TOOL_NAMES = {
     "delete_finding",
     "restore_finding",
     "add_finding_geometry",
+    # --- Training cohort export (P5) ---
+    "export_training_manifest",
     # --- Sprint 3.5 — agent-driven tag + metadata writes ---
     "add_tag_to_study",
     "remove_tag_from_study",

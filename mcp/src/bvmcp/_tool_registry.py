@@ -55,6 +55,7 @@ from bvmcp.tools import sharing as sharing_tools
 from bvmcp.tools import studies as studies_tools
 from bvmcp.tools import summaries as summaries_tools
 from bvmcp.tools import tags as tags_tools
+from bvmcp.tools import training as training_tools
 
 TOOL_MODULES = (
     help_tools,
@@ -91,6 +92,7 @@ TOOL_MODULES = (
     report_contents_tools,
     care_phases_tools,
     qna_tools,
+    training_tools,
 )
 
 

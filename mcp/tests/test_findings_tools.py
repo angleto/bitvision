@@ -14,6 +14,7 @@ import httpx
 
 from bvmcp.scopes import TOOL_SCOPE
 from bvmcp.tools import findings as findings_tools
+from bvmcp.tools import training as training_tools
 
 from .conftest import TEST_TOKEN, mock_backend
 
@@ -220,3 +221,25 @@ async def test_add_finding_geometry_posts_link() -> None:
             {"finding_id": fid, "role": "bbox", "marker_id": "m-1"},
         )
     assert json.loads(result)["geometry"][0]["role"] == "bbox"
+
+
+async def test_export_training_manifest_posts_query() -> None:
+    """P5: the training-manifest tool POSTs the structured query and
+    returns the de-identified manifest the backend builds."""
+    payload = {"dataset_id": "ds-1", "finding_count": 0, "items": []}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.method == "POST"
+        assert request.url.path == "/api/training-exports/manifest"
+        body = json.loads(request.content)
+        assert body["type"] == "nodule"
+        assert body["k_min"] == 5
+        _assert_auth(request)
+        return _json_response(payload)
+
+    with mock_backend(handler):
+        result = await training_tools.handle(
+            "export_training_manifest",
+            {"type": "nodule", "k_min": 5},
+        )
+    assert json.loads(result) == payload
