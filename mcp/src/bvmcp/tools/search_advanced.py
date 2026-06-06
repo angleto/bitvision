@@ -20,11 +20,13 @@ from mcp.types import Tool
 
 from bvmcp.tools.client import api_get
 
-# NB: ``annotation`` is intentionally absent — the backend
-# /search/semantic endpoint does not embed markers/findings (the
-# structured query path is search_findings); advertising it here would
-# only yield a 422. Findings join semantic search in a later phase.
-_SEMANTIC_TARGETS = ("series", "report", "consultation", "document", "patient")
+# NB: ``annotation`` (raw markers) is intentionally absent — markers are
+# not embedded; their structured query path is search_by_tags / the
+# findings tools. ``finding`` IS supported (a finding's coded text is
+# embedded under the MiniLM model), so use model='minilm' for it. For
+# free-text findings discovery prefer ``finding``; for attribute queries
+# (type / size / morphology) use search_findings.
+_SEMANTIC_TARGETS = ("series", "report", "consultation", "document", "patient", "finding")
 _SEMANTIC_MODELS = ("biomedclip", "minilm")
 
 
@@ -35,9 +37,10 @@ TOOLS = [
             "Semantic search over the bitvision phoenix vector store. The query "
             "is encoded with the selected embedding model and matched against "
             "vectors for the chosen target kind (series, report, "
-            "consultation, document, patient). Use 'biomedclip' for image-aware "
-            "clinical content and 'minilm' for fast general-purpose text. "
-            "Returns top-k matches with similarity scores and target metadata."
+            "consultation, document, patient, finding). Use 'biomedclip' for "
+            "image-aware clinical content and 'minilm' for fast general-purpose "
+            "text (findings are MiniLM-indexed). Returns top-k matches with "
+            "similarity scores and target metadata."
         ),
         inputSchema={
             "type": "object",

@@ -89,18 +89,23 @@ TOOLS: list[Tool] = [
             openWorldHint=False,
         ),
         description=(
-            "Structured query over a patient's findings: filter by type / "
-            "anatomy / laterality / morphology / status and by measurement "
-            "ranges (diameter / volume / SUVmax). e.g. type='nodule', "
+            "Structured query over findings: filter by type / anatomy / "
+            "laterality / morphology / status and by measurement ranges "
+            "(diameter / volume / SUVmax). e.g. type='nodule', "
             "anatomy='lung_upper_lobe', morphology=['spiculated'], "
             'min_diameter_mm=10 answers "spiculated RUL nodule > 1 cm". '
-            "``patient_id`` is required (findings are patient-scoped by "
-            "design; no cross-patient access)."
+            "Pass ``patient_id`` to scope to one patient; OMIT it for a "
+            "corpus-wide search across every study you may read "
+            "(visibility-scoped, never cross-patient). ``scope`` "
+            "(all|mine|public) narrows the corpus search."
         ),
         inputSchema={
             "type": "object",
             "properties": {
-                "patient_id": {"type": "string"},
+                "patient_id": {
+                    "type": "string",
+                    "description": "Scope to one patient; omit for a corpus-wide search.",
+                },
                 "study_id": {"type": "string"},
                 "type": {"type": "string", "description": "finding type key"},
                 "anatomy": {"type": "string", "description": "anatomy site key"},
@@ -121,10 +126,15 @@ TOOLS: list[Tool] = [
                 "max_diameter_mm": {"type": "number"},
                 "min_volume_ml": {"type": "number"},
                 "min_suv_max": {"type": "number"},
+                "scope": {
+                    "type": "string",
+                    "enum": ["all", "mine", "public"],
+                    "default": "all",
+                    "description": "Corpus search only (ignored when patient_id is set).",
+                },
                 "include_deleted": {"type": "boolean", "default": False},
                 "limit": {"type": "integer", "default": 200, "minimum": 1, "maximum": 1000},
             },
-            "required": ["patient_id"],
         },
     ),
     Tool(
@@ -366,10 +376,8 @@ async def _get_finding_vocab(_args: dict[str, Any]) -> str:
 
 
 async def _search_findings(args: dict[str, Any]) -> str:
-    patient_id = args["patient_id"]
     params: dict[str, Any] = {}
     for k in (
-        "study_id",
         "type",
         "anatomy",
         "laterality",
@@ -386,8 +394,19 @@ async def _search_findings(args: dict[str, Any]) -> str:
         params["morphology"] = args["morphology"]
     if args.get("include_deleted"):
         params["include_deleted"] = "true"
+    patient_id = args.get("patient_id")
+    if patient_id:
+        # Patient-scoped list (study_id filter only applies here).
+        if args.get("study_id") is not None:
+            params["study_id"] = args["study_id"]
+        path = f"/api/patients/{patient_id}/findings"
+    else:
+        # Corpus-wide, visibility-scoped search.
+        if args.get("scope"):
+            params["scope"] = args["scope"]
+        path = "/api/findings/search"
     try:
-        payload = await api_get(f"/api/patients/{patient_id}/findings", params=params or None)
+        payload = await api_get(path, params=params or None)
     except httpx.HTTPStatusError as exc:
         return format_http_error(exc)
     return json.dumps(payload, indent=2, ensure_ascii=False)
