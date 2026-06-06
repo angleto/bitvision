@@ -102,8 +102,14 @@ app = FastAPI(
     title="bitvision phoenix",
     description="REST API for the bitvision phoenix medical imaging platform.",
     version=__version__,
-    docs_url="/docs",
-    openapi_url="/openapi.json",
+    # The built-in docs live outside ``/api`` and so are shadowed by the
+    # frontend catch-all in production (the ingress only routes ``/api/*``
+    # to the backend) and are unauthenticated. We disable all three
+    # defaults and re-serve them, auth-gated, under ``/api`` — see
+    # ``bvphoenix.api.docs``.
+    docs_url=None,
+    redoc_url=None,
+    openapi_url=None,
 )
 
 # slowapi requires the Limiter on app.state — decorators resolve it via
@@ -365,7 +371,7 @@ async def system_features() -> dict[str, bool]:
 async def root() -> dict[str, str]:
     return {
         "name": "bitvision phoenix",
-        "docs": "/docs",
+        "docs": "/api/docs",
         "health": "/health",
     }
 

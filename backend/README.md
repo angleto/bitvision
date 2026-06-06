@@ -24,7 +24,7 @@ make db.migrate       # alembic upgrade head
 make backend.dev      # uvicorn on :8000, autoreload
 ```
 
-OpenAPI docs: http://localhost:8000/docs
+OpenAPI docs: http://localhost:8000/api/docs (auth-gated; log in first)
 Health check: http://localhost:8000/health
 
 ## Layout
