@@ -47,6 +47,7 @@ from sqlalchemy.orm import Session
 from bvphoenix.config import get_settings
 from bvphoenix.services.public_dataset import (
     PublicDatasetSource,
+    completed_series_uids_for_source,
     import_public_dataset,
     storage_target,
 )
@@ -230,15 +231,23 @@ def _adapter_tcia(
     collection: str,
     subject_id: str,
     workdir: Path,
-) -> Path:
+    skip_series: set[str] | None = None,
+) -> Path | None:
     """Fetch one TCIA subject's worth of DICOMs.
 
-    1. List series for (Collection, PatientID).
-    2. For each SeriesInstanceUID, download the per-series ZIP and
-       expand into ``workdir/<subject>/<series_uid>/``.
-    Returns the subject's root directory, which is what the scanner
-    walks recursively.
+    1. List series for (Collection, PatientID) — a cheap JSON call.
+    2. For each SeriesInstanceUID not already in ``skip_series``,
+       download the per-series ZIP and expand into
+       ``workdir/<subject>/<series_uid>/``.
+
+    ``skip_series`` holds SeriesInstanceUIDs already fully imported (see
+    :func:`completed_series_uids_for_source`); they are filtered out
+    *before* the expensive ``getImage`` ZIP download, which is the whole
+    point of the optimisation. Returns the subject's root directory, or
+    ``None`` when every series the subject offers is already imported (no
+    download performed, nothing to scan).
     """
+    skip_series = skip_series or set()
     # Strip the leading "TCIA/" namespace the manifest uses so it's
     # explicit which collection lives where.
     tcia_collection = collection.split("/", 1)[1] if "/" in collection else collection
@@ -256,9 +265,14 @@ def _adapter_tcia(
 
     subject_dir = workdir / subject_id
     subject_dir.mkdir(parents=True, exist_ok=True)
+    fetched = 0
+    skipped = 0
     for entry in series_list:
         series_uid = entry.get("SeriesInstanceUID")
         if not series_uid:
+            continue
+        if series_uid in skip_series:
+            skipped += 1
             continue
         zip_path = subject_dir / f"{series_uid}.zip"
         series_url = f"{TCIA_REST_BASE}/getImage?" + urlencode({"SeriesInstanceUID": series_uid})
@@ -269,6 +283,14 @@ def _adapter_tcia(
         files = _unzip(zip_path, series_dir)
         click.echo(f"      → {files} file(s)")
         zip_path.unlink(missing_ok=True)
+        fetched += 1
+    if skipped:
+        click.echo(f"    {skipped} series already imported, {fetched} fetched")
+    if fetched == 0:
+        # Subject is fully present already — no ZIP downloaded, nothing
+        # to scan. Drop the empty dir and signal the caller to skip.
+        shutil.rmtree(subject_dir, ignore_errors=True)
+        return None
     return subject_dir
 
 
@@ -323,11 +345,22 @@ def _adapter_osirix_zip(
     show_default=True,
     help="Per-subject failures are logged and skipped (default) vs aborting the run.",
 )
+@click.option(
+    "--reimport-existing",
+    is_flag=True,
+    help=(
+        "Re-download and re-process series that are already fully imported. "
+        "By default the importer skips them before download (idempotency "
+        "optimisation); pass this to force a full re-fetch, e.g. to repair "
+        "a corrupted upload."
+    ),
+)
 def main(
     manifest_path: Path,
     only: tuple[str, ...],
     dry_run: bool,
     continue_on_error: bool,
+    reimport_existing: bool,
 ) -> None:
     sources = _parse_manifest(manifest_path)
     settings = get_settings()
@@ -350,17 +383,47 @@ def main(
                     continue
                 click.echo(f"[{processed}/{total_subjects}] {key} (adapter={src.adapter})")
                 try:
+                    # Pre-download idempotency probe: which series do we
+                    # already hold complete for this source subject? The
+                    # adapter skips those before the costly per-series ZIP
+                    # download. Pure optimisation — ingestion_complete=True
+                    # guarantees the instances are present — so it is safe
+                    # unless --reimport-existing forces a full re-fetch.
+                    skip_series: set[str] = set()
+                    if not reimport_existing:
+                        with Session(engine) as probe:
+                            skip_series = completed_series_uids_for_source(
+                                probe,
+                                collection=src.collection,
+                                subject_id=subj.identifier,
+                            )
+
                     if src.adapter == "tcia":
                         subject_dir = _adapter_tcia(
                             client,
                             collection=src.collection,
                             subject_id=subj.identifier,
                             workdir=workdir,
+                            skip_series=skip_series,
                         )
                     elif src.adapter == "osirix_zip":
+                        # OsiriX ships one ZIP per subject; there is no
+                        # per-series fetch to trim. If anything is already
+                        # imported for this subject, treat it as done.
+                        if skip_series:
+                            click.echo(f"  ✓ already imported ({len(skip_series)} series), skipped")
+                            succeeded += 1
+                            continue
                         subject_dir = _adapter_osirix_zip(client, subject=subj, workdir=workdir)
                     else:
                         raise click.ClickException(f"unknown adapter: {src.adapter!r}")
+
+                    if subject_dir is None:
+                        click.echo(
+                            f"  ✓ already fully imported ({len(skip_series)} series), skipped"
+                        )
+                        succeeded += 1
+                        continue
 
                     source = PublicDatasetSource(
                         collection=src.collection,

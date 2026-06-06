@@ -37,7 +37,7 @@ from sqlalchemy.orm import Session
 
 from bvphoenix.cli.import_dicom import ImportReport, persist_and_upload, scan
 from bvphoenix.config import get_settings
-from bvphoenix.db.models import ImagingStudy, Patient, Subject
+from bvphoenix.db.models import ImagingStudy, Patient, Series, Subject
 from bvphoenix.services.permissions import platform_owner_subject_id
 from bvphoenix.storage import S3Storage
 
@@ -109,6 +109,36 @@ def _find_existing_patient_for_source(
     return session.execute(
         select(Patient).where(Patient.id == study.patient_id)
     ).scalar_one_or_none()
+
+
+def completed_series_uids_for_source(
+    session: Session, *, collection: str, subject_id: str
+) -> set[str]:
+    """SeriesInstanceUIDs already fully imported for this source subject.
+
+    A series counts only when ``Series.ingestion_complete`` is true — the
+    flag is set by ``persist_and_upload`` after every instance of the
+    series is uploaded and persisted, so partially-imported series are
+    intentionally excluded and will be re-fetched on the next run.
+
+    The public importer uses this to skip re-downloading series it
+    already holds: the per-series ``getImage`` ZIP that TCIA assembles is
+    the dominant cost of a run (minutes per thin-slice CT series), and a
+    full re-run of a manifest would otherwise re-fetch every previously
+    imported subject before the DB-level idempotency check discards it.
+    """
+    rows = (
+        session.execute(
+            select(Series.series_instance_uid)
+            .join(ImagingStudy, Series.study_id == ImagingStudy.id)
+            .where(ImagingStudy.source_collection == collection)
+            .where(ImagingStudy.source_subject_id == subject_id)
+            .where(Series.ingestion_complete.is_(True))
+        )
+        .scalars()
+        .all()
+    )
+    return set(rows)
 
 
 def import_public_dataset(
