@@ -3741,18 +3741,18 @@ export default function SeriesViewerPage() {
                         <div style={{ display: "flex", gap: "0.3rem", flexWrap: "wrap" }}>
                           {(
                             [
-                              ["wl", "W/L"],
-                              ["pan", "Pan"],
-                              ["measure-dist", "Distance"],
-                              ["measure-angle", "Angle"],
-                              ["measure-area", "Area"],
-                              ["measure-ellipse", "Ellipse"],
-                              ["measure-sphere", "Sphere"],
-                              ["measure-freehand", "Freehand"],
-                              ["measure-arrow", "Arrow"],
-                              ["measure-text", "Text"],
-                              ["measure-probe", "Probe"],
-                              ["measure-lens", "Lens"],
+                              ["wl", tv("toolWl")],
+                              ["pan", tv("toolPan")],
+                              ["measure-dist", tv("toolDistance")],
+                              ["measure-angle", tv("toolAngle")],
+                              ["measure-area", tv("toolArea")],
+                              ["measure-ellipse", tv("toolEllipse")],
+                              ["measure-sphere", tv("toolSphere")],
+                              ["measure-freehand", tv("toolFreehand")],
+                              ["measure-arrow", tv("toolArrow")],
+                              ["measure-text", tv("toolText")],
+                              ["measure-probe", tv("toolProbe")],
+                              ["measure-lens", tv("toolLens")],
                             ] as [Tool, string][]
                           ).map(([t, label]) => (
                             <button
@@ -3783,41 +3783,30 @@ export default function SeriesViewerPage() {
                               mprRef.current?.clearAnnotations();
                               setAllMeasurements([]);
                             }}
-                            title="Clear all measurements"
+                            title={tv("clearAllTitle")}
                           >
-                            Clear all
+                            {tv("clearAll")}
                           </button>
                         </div>
                         <p className="meta" style={{ marginTop: "0.3rem", fontSize: "0.65rem" }}>
-                          {activeTool === null
-                            ? "Click / drag = crosshair · Scroll = slice · Ctrl+Scroll = zoom · Middle-drag = pan"
-                            : activeTool === "wl"
-                              ? "Drag = W/L · Scroll = slice · Ctrl+Scroll = zoom · Middle-drag = pan"
-                              : activeTool === "pan"
-                                ? "Drag = pan · Right-drag = zoom · Scroll = slice"
-                                : activeTool === "measure-dist"
-                                  ? "Click two points to measure distance (mm)"
-                                  : activeTool === "measure-angle"
-                                    ? "Click three points to measure angle (°)"
-                                    : activeTool === "measure-area"
-                                      ? "Click polygon vertices, double-click to close (mm²)"
-                                      : activeTool === "measure-ellipse"
-                                        ? "Click two opposite corners of the ellipse bounding box"
-                                        : activeTool === "measure-sphere"
-                                          ? "Click center then edge to draw a circle; the backend treats it as the equator of a 3D sphere (PERCIST liver reference = 15 mm radius)"
-                                          : activeTool === "measure-freehand"
-                                            ? "Drag to trace a freehand path; release to finish"
-                                            : activeTool === "measure-arrow"
-                                              ? "Click tail then head to draw an arrow"
-                                              : activeTool === "measure-text"
-                                                ? "Click to place a text label"
-                                                : activeTool === "measure-probe"
-                                                  ? "Click a pixel to read its HU/intensity value"
-                                                  : activeTool === "measure-lens"
-                                                    ? "Move cursor = sample disc · Shift+Wheel = radius · Click = pin"
-                                                    : activeTool === "bbox"
-                                                      ? "Click and drag to draw a bounding box with label"
-                                                      : "Click to place a text annotation"}
+                          {(() => {
+                            const hints: Record<string, string> = {
+                              none: tv("hintNone"),
+                              wl: tv("hintWl"),
+                              pan: tv("hintPan"),
+                              "measure-dist": tv("hintDist"),
+                              "measure-angle": tv("hintAngle"),
+                              "measure-area": tv("hintArea"),
+                              "measure-ellipse": tv("hintEllipse"),
+                              "measure-sphere": tv("hintSphere"),
+                              "measure-freehand": tv("hintFreehand"),
+                              "measure-arrow": tv("hintArrow"),
+                              "measure-text": tv("hintText"),
+                              "measure-probe": tv("hintProbe"),
+                              "measure-lens": tv("hintLens"),
+                            };
+                            return hints[activeTool ?? "none"] ?? tv("hintText");
+                          })()}
                         </p>
 
                         {/* "Measurements" widget rimosso: era duplicato di
