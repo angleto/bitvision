@@ -57,6 +57,12 @@ NO_PIXEL_DATA_SOP_CLASSES: frozenset[str] = frozenset(
         # a raster.
         "1.2.840.10008.5.1.4.1.1.104.1",  # Encapsulated PDF
         "1.2.840.10008.5.1.4.1.1.104.2",  # Encapsulated CDA
+        # Raw data — arbitrary instrument/acquisition bytes (e.g. MR
+        # spectroscopy raw, tracking) with no standard PixelData. Seen in
+        # TCIA MR collections (ReMIND / UPENN-GBM); without this the embed
+        # path treats it as an image, the worker fails to decode it, and
+        # the backfill re-offers the series forever.
+        "1.2.840.10008.5.1.4.1.1.66",  # Raw Data Storage
     }
 )
 

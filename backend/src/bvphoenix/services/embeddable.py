@@ -89,6 +89,10 @@ _SEG_RT_REG_SOP_CLASSES: frozenset[str] = frozenset(
 
 NON_EMBEDDABLE_SOP_CLASSES: frozenset[str] = NO_PIXEL_DATA_SOP_CLASSES | _SEG_RT_REG_SOP_CLASSES
 
+# Inlined verbatim into SQL by ``embeddable_sop_class_clause``; assert they
+# are UID-shaped (digits + dots only) so there is no injection surface.
+assert all(all(c.isdigit() or c == "." for c in uid) for uid in NON_EMBEDDABLE_SOP_CLASSES)
+
 
 class SeriesNotEmbeddable(Exception):
     """A series BiomedCLIP cannot / should not embed.
@@ -140,3 +144,18 @@ def embeddable_modality_clause(column: str) -> str:
     """
     blocked = ", ".join(f"'{m}'" for m in sorted(NON_EMBEDDABLE_MODALITIES))
     return f"({column} IS NULL OR UPPER(TRIM({column})) NOT IN ({blocked}))"
+
+
+def embeddable_sop_class_clause(column: str) -> str:
+    """A SQL boolean predicate selecting rows whose SOP Class UID is embeddable.
+
+    ``column`` is the SQL expression for the SOP Class UID column (e.g.
+    ``"i.sop_class_uid"``). Blocklist semantics matching
+    :func:`is_embeddable_sop_class`: ``NULL`` / unknown passes; a no-pixel /
+    SEG / RT / REG class is excluded. UIDs are code-defined (digits + dots —
+    see the assertion above) so the literal ``IN (...)`` has no injection
+    surface. Mirrors the worker's per-instance image filter so the backfill
+    candidate set matches what ``embed_series`` will actually embed.
+    """
+    blocked = ", ".join(f"'{u}'" for u in sorted(NON_EMBEDDABLE_SOP_CLASSES))
+    return f"({column} IS NULL OR {column} NOT IN ({blocked}))"
