@@ -40,7 +40,10 @@ from bvphoenix.db.models.text_chunks import (
     DEFAULT_CHUNKER_VERSION,
 )
 from bvphoenix.services.arq_redis import redis_settings
-from bvphoenix.services.embeddable import embeddable_modality_clause
+from bvphoenix.services.embeddable import (
+    embeddable_modality_clause,
+    embeddable_sop_class_clause,
+)
 from bvphoenix.services.text_models import TEXT_MODELS
 
 
@@ -254,10 +257,22 @@ def _series_candidate_ids(
 ) -> list[uuid.UUID]:
     where: list[str] = []
     params: dict[str, object] = {}
-    # Never enqueue non-image series (SR / PR / SEG / ...) — they cannot be
-    # embedded and would only churn the worker + pollute embedding_errors.
-    # Single source of truth: bvphoenix.services.embeddable.
+    # Never enqueue non-image series — they can't be embedded and would only
+    # churn the worker + perpetually count as "missing". Two filters mirror
+    # what ``embed_series`` actually embeds (single source of truth:
+    # bvphoenix.services.embeddable):
+    #   1. modality is not a known non-image one (SR / PR / KO / ...);
+    #   2. the series has at least one instance with an embeddable SOP class
+    #      (the worker filters to image instances and skips a series with
+    #      none — e.g. a Raw Data Storage / SEG-only series that slips the
+    #      modality filter). Without (2) such series re-enqueue forever and
+    #      ``--only-missing`` never converges.
     where.append(embeddable_modality_clause("s.modality"))
+    where.append(
+        "EXISTS (SELECT 1 FROM instances i WHERE i.series_id = s.id AND "
+        + embeddable_sop_class_clause("i.sop_class_uid")
+        + ")"
+    )
     if patient_id is not None:
         where.append("st.patient_id = :pid")
         params["pid"] = patient_id
