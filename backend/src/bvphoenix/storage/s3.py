@@ -82,6 +82,14 @@ class S3Storage:
             signature_version="s3v4",
             s3={"addressing_style": "path"},
             max_pool_connections=64,
+            # Without an explicit retries policy boto3 falls back to the weak
+            # "legacy" mode. Transient Scaleway S3 connection blips
+            # (EndpointConnectionError "Could not connect to the endpoint
+            # URL") then fail a single op that should just be retried — e.g.
+            # one instance PUT failing a whole subject in a bulk import.
+            # "standard" mode retries connection/throttling/5xx with
+            # exponential backoff across every S3 call.
+            retries={"max_attempts": 5, "mode": "standard"},
         )
         self._client = boto3.client(
             "s3",
