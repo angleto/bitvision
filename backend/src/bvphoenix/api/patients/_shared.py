@@ -569,13 +569,51 @@ async def _load_patient_contacts(db: AsyncSession, patient_id: uuid.UUID) -> lis
     each row to the public ``PatientContact`` Pydantic shape. Used by
     every endpoint that needs to surface contacts on a ``PatientOut``
     (both reads and post-write responses)."""
+    from datetime import UTC, datetime
+
+    from sqlalchemy import or_, select
+
+    from bvphoenix.db.models import Grant
     from bvphoenix.services import patient_contacts as svc
 
     rows = await svc.list_contacts(db, patient_id)
+
+    # A contact carries delegation pointers (``delegation_grant_id`` etc.)
+    # even after its grant is revoked or expired — the pointers are only
+    # cleared on an explicit revoke. Surfacing them verbatim makes the
+    # contacts tab show a "Collaboratore" chip for access that ``/shares``
+    # (active-only) correctly hides, and lets a dead delegation read as
+    # live. So we project the delegation fields ONLY when the backing
+    # grant is still active; otherwise the contact falls back to its
+    # informational-only shape.
+    grant_ids = [r.delegation_grant_id for r in rows if r.delegation_grant_id is not None]
+    live_grants: set[uuid.UUID] = set()
+    if grant_ids:
+        now = datetime.now(UTC)
+        live_grants = set(
+            (
+                await db.execute(
+                    select(Grant.id).where(
+                        Grant.id.in_(grant_ids),
+                        Grant.revoked_at.is_(None),
+                        Grant.valid_from <= now,
+                        or_(Grant.valid_until.is_(None), Grant.valid_until >= now),
+                    )
+                )
+            )
+            .scalars()
+            .all()
+        )
+
     out: list[PatientContact] = []
     for row in rows:
+        data = svc.to_pydantic_dict(row)
+        if row.delegation_grant_id is None or row.delegation_grant_id not in live_grants:
+            data["delegation_subject_id"] = None
+            data["delegation_share_link_id"] = None
+            data["delegation_level"] = None
         try:
-            out.append(PatientContact(**svc.to_pydantic_dict(row)))
+            out.append(PatientContact(**data))
         except Exception:
             continue
     return out
