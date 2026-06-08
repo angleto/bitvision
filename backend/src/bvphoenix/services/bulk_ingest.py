@@ -530,33 +530,41 @@ async def process_bulk_ingest(
     # ---- Stage 5: folder linking + tier consents + commit ----
     if progress_cb:
         await progress_cb(0, 1, STAGE_FINALIZE)
-    # Anchor every uploaded STUDY in a folder so it is always visible + movable
-    # in Drive: the user-chosen folder, or the patient's root folder when none
-    # was picked. Without this a study gets no folder_items row and is reachable
-    # only from search / its direct URL — it never appears in Drive and can't be
-    # moved into a folder (the reported bug). Documents already auto-root via
-    # the no-orphan trigger; studies have no such trigger.
-    study_folder = folder
-    if study_folder is None and patient is not None:
-        study_folder = await get_or_create_root_folder(db, patient)
-    if study_folder is not None:
+    # Anchor every uploaded STUDY *and* DOCUMENT in a folder: the
+    # user-chosen folder, or the patient's root folder when none was
+    # picked. This must be explicit for both kinds, for two reasons:
+    #   * Drive visibility — a study/document with no folder_items row is
+    #     reachable only from search / its direct URL, never appears in
+    #     Drive, and can't be moved into a folder (the originally reported
+    #     "study not in Drive" bug).
+    #   * The deferred ``document_orphan_forbidden`` constraint
+    #     (``enforce_document_in_folder``) FAILS the commit for any live
+    #     document with zero folder containment. That trigger only
+    #     *checks* containment at commit time; there is NO trigger that
+    #     auto-materialises a root entry. The previous code relied on a
+    #     non-existent "auto-root trigger" and linked documents only when
+    #     the user picked a folder, so a non-DICOM upload without a chosen
+    #     folder stayed orphaned and the whole bulk commit blew up with
+    #     ``document_orphan_forbidden``.
+    # ``documents_created`` is only ever non-empty when a patient is set
+    # (Stage 4 skips non-DICOM files without a patient_id), so when there
+    # are documents to link ``target_folder`` always resolves.
+    target_folder = folder
+    if target_folder is None and patient is not None:
+        target_folder = await get_or_create_root_folder(db, patient)
+    if target_folder is not None:
         for s in summary.studies_created:
             db.add(
                 FolderItem(
-                    folder_id=study_folder.id,
+                    folder_id=target_folder.id,
                     resource_kind="study",
                     resource_id=uuid.UUID(s.id),
                 )
             )
-    # Documents: only a user-CHOSEN folder needs an explicit link — without an
-    # entry the Document shows up in the fascicolo root (the no-orphan trigger
-    # materialises it there), not in the folder the user dropped the file onto.
-    # Re-adding it to root would collide on the folder_items PK, so skip it.
-    if folder is not None:
         for d in summary.documents_created:
             db.add(
                 FolderItem(
-                    folder_id=folder.id,
+                    folder_id=target_folder.id,
                     resource_kind="document",
                     resource_id=uuid.UUID(d.id),
                 )

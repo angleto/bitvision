@@ -113,6 +113,11 @@ export default function SendStudyDialog({
   // Persisted on ShareLink.label and surfaced in the management
   // table.
   const [label, setLabel] = useState("");
+  // Fascicolo (kind="patient") shares can grant editor — a family member
+  // or caregiver who needs to upload reports/images, not just view.
+  // Study/folder shares stay view-only here. Defaults to viewer; the user
+  // opts up to editor explicitly via the access-level section.
+  const [accessLevel, setAccessLevel] = useState<"viewer" | "editor">("viewer");
   // AI sponsorship (patient-scoped shares only). When toggled on,
   // claiming the link auto-creates a WalletSponsorship of the share
   // creator's wallet up to ``aiCapEur`` so the recipient can run AI
@@ -346,7 +351,7 @@ export default function SendStudyDialog({
         aiCapCents = Math.round(eur * 100);
       }
       const sharePayload = {
-        access_level: "viewer",
+        access_level: kind === "patient" ? accessLevel : "viewer",
         download: true,
         target: { kind: "link_public" },
         expires_in_hours: EXPIRY_HOURS[expiry],
@@ -548,6 +553,48 @@ export default function SendStudyDialog({
                 />
               </label>
             </Section>
+
+            {/* Access level — fascicolo (patient) shares only. Study /
+                folder shares stay view-only on this surface. */}
+            {kind === "patient" && (
+              <Section title={t("accessLevelSection")}>
+                <label
+                  style={{
+                    display: "flex",
+                    alignItems: "center",
+                    gap: "0.5rem",
+                    marginBottom: "0.4rem",
+                  }}
+                >
+                  <input
+                    type="radio"
+                    name="accessLevel"
+                    checked={accessLevel === "viewer"}
+                    onChange={() => setAccessLevel("viewer")}
+                  />
+                  <span style={{ fontSize: "0.85rem" }}>{t("accessLevelViewer")}</span>
+                </label>
+                <label
+                  style={{
+                    display: "flex",
+                    alignItems: "center",
+                    gap: "0.5rem",
+                    marginBottom: "0.4rem",
+                  }}
+                >
+                  <input
+                    type="radio"
+                    name="accessLevel"
+                    checked={accessLevel === "editor"}
+                    onChange={() => setAccessLevel("editor")}
+                  />
+                  <span style={{ fontSize: "0.85rem" }}>{t("accessLevelEditor")}</span>
+                </label>
+                <p style={{ fontSize: "0.8rem", opacity: 0.7, margin: "0.25rem 0 0" }}>
+                  {t("accessLevelHint")}
+                </p>
+              </Section>
+            )}
 
             {/* Privacy */}
             <Section title={t("deidentifySection")}>

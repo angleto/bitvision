@@ -287,20 +287,18 @@ async def register(
             is_admin=user.is_admin,
         )
 
-    return RegisterOut(
-        subject_id=str(user.subject_id),
-        email=user.email,
-        email_verification_required=settings.require_email_verification,
-        access_token=access_token,
-    )
     await audit.log(
         action="register",
         actor_subject_id=user.subject_id,
         resource_kind="user",
         resource_id=user.subject_id,
     )
-    token = issue_access_token(subject_id=user.subject_id, email=user.email, is_admin=user.is_admin)
-    return TokenOut(access_token=token)
+    return RegisterOut(
+        subject_id=str(user.subject_id),
+        email=user.email,
+        email_verification_required=settings.require_email_verification,
+        access_token=access_token,
+    )
 
 
 @router.post("/login", response_model=TokenOut)
