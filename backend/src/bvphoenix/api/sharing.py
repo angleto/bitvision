@@ -329,7 +329,13 @@ class ShareInfoOut(BaseModel):
     # is anonymous, not yet claimed, has a recipient_email and the
     # grant is still alive (not revoked / expired).
     mode: str = "claim"
+    # ``claimable``: the recipient can turn this link into a NEW account
+    # (PUBLIC-held grant, alive, not yet claimed, no account exists yet
+    # for the recipient). ``bindable``: an account already exists for the
+    # recipient, so they log in and attach the grant via /bind instead of
+    # minting a second account. Exactly one of the two is ever true.
     claimable: bool = False
+    bindable: bool = False
     # recipient_name / recipient_email intentionally NOT exposed here:
     # /shared/{token}/info is an unauthenticated public endpoint. Anyone
     # with the token can hit it, so returning the intended addressee
@@ -1417,10 +1423,10 @@ async def claim_share_link(
     ).scalar_one_or_none()
     if link is None:
         raise HTTPException(status_code=404, detail="share link not found")
-    if link.mode != "anonymous":
+    if link.mode not in ("anonymous", "claim"):
         raise HTTPException(
             status_code=400,
-            detail="only anonymous links can be converted to an account",
+            detail="this link cannot be converted to an account",
         )
     if link.claimed_at is not None:
         raise HTTPException(
@@ -1443,9 +1449,16 @@ async def claim_share_link(
     email = link.recipient_email.lower()
     existing = (await db.execute(select(User).where(User.email == email))).scalar_one_or_none()
     if existing is not None:
+        # We can't mint a second account for this email. The recipient
+        # already has one (e.g. they registered separately before opening
+        # the delegation link), so they attach the grant to it via the
+        # authenticated ``/share-links/{token}/bind`` endpoint instead.
         raise HTTPException(
             status_code=409,
-            detail="an account already exists for this email",
+            detail=(
+                "an account already exists for this email; log in and open "
+                "this link again to attach it to your account"
+            ),
         )
 
     # Avoid a circular import: Subject lives in db.models.principals
@@ -1468,6 +1481,19 @@ async def claim_share_link(
     grant.grantee_subject_id = user.subject_id
     link.claimed_by_subject_id = user.subject_id
     link.claimed_at = now
+
+    # If this link backs a contact delegation, repoint the contact to the
+    # real subject too, so the fascicolo UI shows the delegate bound to
+    # their account and revocation keeps cascading through the FK.
+    from bvphoenix.db.models import PatientContact
+
+    contact = (
+        await db.execute(
+            select(PatientContact).where(PatientContact.delegation_share_link_id == link.id)
+        )
+    ).scalar_one_or_none()
+    if contact is not None:
+        contact.delegation_subject_id = user.subject_id
 
     # Materialise the wallet sponsorship now that we know the
     # recipient's subject_id. Best-effort: a failure here does not
@@ -1522,6 +1548,105 @@ async def claim_share_link(
         email=user.email,
         access_token=access_token,
         expires_in=settings.jwt_expires_seconds,
+    )
+
+
+class BindShareLinkOut(BaseModel):
+    """Result of attaching a claim/anonymous link's grant to the
+    already-authenticated caller."""
+
+    grant_id: str
+    resource_kind: str
+    resource_id: str
+    permissions: list[str]
+
+
+@router.post("/share-links/{token}/bind", response_model=BindShareLinkOut)
+async def bind_share_link(
+    token: str,
+    db: Annotated[AsyncSession, Depends(get_db)],
+    user: Annotated[User, Depends(require_user)],
+    audit: AuditDep,
+) -> BindShareLinkOut:
+    """Attach a magic-link's grant to the CURRENT logged-in account.
+
+    Companion to ``/claim`` for the case where the recipient already has
+    an account (so a new one can't be minted) — the path a delegate hits
+    when they registered separately and then open the delegation link.
+
+    Security: the caller proves possession of the link (the token) AND is
+    authenticated, and we still require ``user.email == recipient_email``
+    so a forwarded link can't be redirected onto a different account than
+    the grantor addressed. On a PHI platform the grantor picked a specific
+    recipient; possession alone must not let an arbitrary account inherit
+    access. Only PUBLIC-held grants are bindable, so a grant already on a
+    real subject can't be hijacked.
+
+    Idempotent: re-binding a link already attached to the same user is a
+    no-op success.
+    """
+    link = (
+        await db.execute(select(ShareLink).where(ShareLink.token == token))
+    ).scalar_one_or_none()
+    if link is None:
+        raise HTTPException(status_code=404, detail="share link not found")
+    if link.mode not in ("anonymous", "claim"):
+        raise HTTPException(status_code=400, detail="this link cannot be bound to an account")
+
+    grant = (await db.execute(select(Grant).where(Grant.id == link.grant_id))).scalar_one_or_none()
+    now = datetime.now(UTC)
+    if grant is None or grant.revoked_at is not None:
+        raise HTTPException(status_code=410, detail="grant has been revoked")
+    if grant.valid_until is not None and grant.valid_until < now:
+        raise HTTPException(status_code=410, detail="share link has expired")
+
+    # Already attached to this user — idempotent success.
+    if grant.grantee_subject_id == user.subject_id:
+        return BindShareLinkOut(
+            grant_id=str(grant.id),
+            resource_kind=grant.resource_kind,
+            resource_id=str(grant.resource_id),
+            permissions=list(grant.permissions),
+        )
+    if grant.grantee_subject_id != PUBLIC_SUBJECT_ID:
+        raise HTTPException(status_code=409, detail="this link is already attached to an account")
+
+    recipient_email = (link.recipient_email or "").strip().lower()
+    if not recipient_email or recipient_email != user.email.lower():
+        raise HTTPException(
+            status_code=403,
+            detail="this link was addressed to a different recipient",
+        )
+
+    grant.grantee_subject_id = user.subject_id
+    if link.claimed_at is None:
+        link.claimed_by_subject_id = user.subject_id
+        link.claimed_at = now
+
+    from bvphoenix.db.models import PatientContact
+
+    contact = (
+        await db.execute(
+            select(PatientContact).where(PatientContact.delegation_share_link_id == link.id)
+        )
+    ).scalar_one_or_none()
+    if contact is not None:
+        contact.delegation_subject_id = user.subject_id
+
+    await db.commit()
+
+    await audit.log(
+        action="share_link_bound",
+        actor_subject_id=user.subject_id,
+        resource_kind="share_link",
+        resource_id=link.id,
+        metadata={"grant_id": str(grant.id), "share_token": link.token},
+    )
+    return BindShareLinkOut(
+        grant_id=str(grant.id),
+        resource_kind=grant.resource_kind,
+        resource_id=str(grant.resource_id),
+        permissions=list(grant.permissions),
     )
 
 
@@ -1744,12 +1869,29 @@ async def share_link_info(
     grant_alive = grant.revoked_at is None and (
         grant.valid_until is None or grant.valid_until > now
     )
-    claimable = (
-        link.mode == "anonymous"
+    # A PUBLIC-held grant on an un-claimed link is attachable to a real
+    # account. ``claim`` (delegation / fascicolo share) links qualify too,
+    # not just ``anonymous`` ones — the old anonymous-only gate is exactly
+    # why a delegate could never turn their magic link into working access
+    # and kept landing on "patient not found". If an account already
+    # exists for the recipient we can't mint a second one, so the link is
+    # *bindable* (log in + /bind) rather than *claimable* (create account).
+    recipient_has_account = False
+    if link.recipient_email:
+        recipient_has_account = (
+            await db.execute(
+                select(User.subject_id).where(User.email == link.recipient_email.lower())
+            )
+        ).first() is not None
+    attachable = (
+        link.mode in ("anonymous", "claim")
         and link.claimed_at is None
         and bool(link.recipient_email)
         and grant_alive
+        and grant.grantee_subject_id == PUBLIC_SUBJECT_ID
     )
+    claimable = attachable and not recipient_has_account
+    bindable = attachable and recipient_has_account
 
     # Pre-flight payload size for the landing page. A study share
     # aggregates over its instances; a patient share over every
@@ -1882,6 +2024,7 @@ async def share_link_info(
         resource_id=str(grant.resource_id),
         mode=link.mode,
         claimable=claimable,
+        bindable=bindable,
         deidentified=bool(grant.deidentify),
         total_files=total_files,
         total_bytes=total_bytes,

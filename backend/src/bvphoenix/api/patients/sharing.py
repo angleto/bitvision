@@ -59,6 +59,22 @@ async def create_patient_share(
         grantee_id = target_user.subject_id
     elif body.target.kind in ("org", "link_org") and body.target.org_subject_id:
         grantee_id = uuid.UUID(body.target.org_subject_id)
+    elif body.target.kind == "link_public" and (body.recipient_email or "").strip():
+        # If the recipient already has an account, bind the grant straight
+        # to their subject so they get access on their NEXT LOGIN — no
+        # claim dance required. A link_public grant left on
+        # PUBLIC_SUBJECT_ID only works through the magic-link session and
+        # (until the recipient claims/binds it) never reattaches to their
+        # real login. That is exactly how a delegate who had already
+        # registered kept seeing "patient not found": the grant sat on
+        # PUBLIC while their account had none. Falls back to PUBLIC when
+        # the recipient has no account yet; the claim/bind flow reattaches
+        # the grant once they create or sign into one.
+        recipient = (
+            await db.execute(select(User).where(User.email == body.recipient_email.strip().lower()))
+        ).scalar_one_or_none()
+        if recipient is not None:
+            grantee_id = recipient.subject_id
 
     grant = Grant(
         resource_kind="patient",

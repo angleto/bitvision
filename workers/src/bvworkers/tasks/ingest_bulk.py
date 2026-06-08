@@ -78,8 +78,23 @@ async def ingest_bulk_files(
     settings = get_settings()
     engine = create_async_engine(settings.database_url, pool_pre_ping=True)
     try:
-        async with AsyncSession(engine, expire_on_commit=False) as db:
+        # Two independent sessions on the same engine:
+        #   * ``db``          — owns the single atomic ingest transaction.
+        #   * ``progress_db`` — short-lived writes of Job progress, each
+        #                       committed on its own so the heartbeat is
+        #                       visible to the UI WITHOUT committing the
+        #                       half-built ingest transaction mid-flight.
+        # Previously progress was committed on ``db`` itself, which flushed
+        # documents not yet linked to a folder, tripped the deferred
+        # ``document_orphan_forbidden`` constraint, and left ``db`` stuck in
+        # SQLAlchemy's PREPARED state — masking the real error behind an
+        # opaque "session is in 'prepared' state".
+        async with (
+            AsyncSession(engine, expire_on_commit=False) as db,
+            AsyncSession(engine, expire_on_commit=False) as progress_db,
+        ):
             await set_current_subject(db, SERVICE_SUBJECT)
+            await set_current_subject(progress_db, SERVICE_SUBJECT)
             await jobs_service.mark_running(db, jid)
             await db.commit()
 
@@ -113,23 +128,21 @@ async def ingest_bulk_files(
                 )
                 await db.commit()
                 return {"status": "error", "reason": "bad input"}
-            patient_id = (
-                uuid.UUID(payload["patient_id"]) if payload.get("patient_id") else None
-            )
-            folder_id = (
-                uuid.UUID(payload["folder_id"]) if payload.get("folder_id") else None
-            )
+            patient_id = uuid.UUID(payload["patient_id"]) if payload.get("patient_id") else None
+            folder_id = uuid.UUID(payload["folder_id"]) if payload.get("folder_id") else None
             tier = payload.get("tier", "t1")
 
             async def progress(done: int, total: int, stage: str) -> None:
+                # Heartbeat on the SEPARATE session so committing progress
+                # never commits the in-flight ingest transaction on ``db``.
                 await jobs_service.update_progress(
-                    db,
+                    progress_db,
                     jid,
                     progress_done=done,
                     progress_total=total or None,
                     stage=stage,
                 )
-                await db.commit()
+                await progress_db.commit()
 
             # Resolve / create one sub-folder per ``subfolder_name``
             # present in the manifest. The bare ``None`` group keeps
@@ -137,7 +150,7 @@ async def ingest_bulk_files(
             # up-front so the per-group ingests can reuse the IDs
             # without racing on the create.
             group_folder_ids: dict[str | None, uuid.UUID | None] = {}
-            for group_name in grouped.keys():
+            for group_name in grouped:
                 if group_name is None:
                     group_folder_ids[None] = folder_id
                     continue
@@ -184,6 +197,11 @@ async def ingest_bulk_files(
                     summary = IngestSummary()
             except Exception as exc:
                 log.exception("bulk ingest failed for job %s", jid)
+                # The data session may be in a failed / PREPARED state if a
+                # commit tripped a deferred constraint; roll it back so the
+                # mark_failed UPDATE runs on a clean transaction instead of
+                # raising a second, error-masking exception.
+                await db.rollback()
                 await jobs_service.mark_failed(
                     db,
                     jid,
@@ -204,9 +222,7 @@ async def ingest_bulk_files(
             stage_skipped = payload.get("stage_skipped") or []
             if stage_skipped:
                 result_dict["skipped"] = list(stage_skipped) + result_dict["skipped"]
-            result_dict["zip_archives_found"] = payload.get(
-                "zip_archives_found", 0
-            )
+            result_dict["zip_archives_found"] = payload.get("zip_archives_found", 0)
             # Persist every uploaded ISO archive as a downloadable
             # Document so a referring clinician can always grab
             # the bit-identical original CD/DVD image and read it on
@@ -227,9 +243,7 @@ async def ingest_bulk_files(
 
             new_input = dict(payload)
             new_input["result"] = result_dict
-            await db.execute(
-                update(Job).where(Job.id == jid).values(input=new_input)
-            )
+            await db.execute(update(Job).where(Job.id == jid).values(input=new_input))
             await jobs_service.mark_succeeded(db, jid, result_uri=None)
             await db.commit()
 
@@ -256,9 +270,7 @@ async def ingest_bulk_files(
                         key=iso["s3_key"],
                     )
                 except Exception:
-                    log.warning(
-                        "iso staging cleanup failed for %s", iso["s3_key"]
-                    )
+                    log.warning("iso staging cleanup failed for %s", iso["s3_key"])
 
             # Enqueue the post-ingest jobs per touched series so the viewer
             # doesn't have to pack on first open AND visual search can find
@@ -333,9 +345,8 @@ async def _ensure_subfolder(
     patient_id was provided (root-of-workspace ingest, can't anchor a
     subfolder safely — fall back to flat ingest in the caller).
     """
-    from sqlalchemy import select
-
     from bvphoenix.db.models import Folder
+    from sqlalchemy import select
 
     # An ISO without a patient or parent has nowhere stable to live.
     # Returning None makes the caller skip the wrap.
@@ -423,8 +434,10 @@ async def _persist_iso_archives(
     import hashlib
     from datetime import UTC, datetime
 
-    from bvphoenix.db.models import Document
+    from bvphoenix.db.models import Document, Patient
+    from bvphoenix.services.folders import get_or_create_root_folder
     from bvphoenix.storage import get_s3_storage
+    from sqlalchemy import select
 
     storage = get_s3_storage()
     settings = get_settings()
@@ -433,9 +446,7 @@ async def _persist_iso_archives(
     for iso in iso_archives:
         try:
             doc_id = uuid.uuid4()
-            safe_name = (iso.get("filename") or "archive.iso").replace(
-                "/", "_"
-            )
+            safe_name = (iso.get("filename") or "archive.iso").replace("/", "_")
             # Resolve where the bundle Document should land. Mirror the
             # staging-side subfolder logic so the bundle ends up in the
             # same place as the unpacked DICOMDIR/IMAGES tree. If no
@@ -465,6 +476,18 @@ async def _persist_iso_archives(
                         subfolder_id = None
                     if subfolder_id is not None:
                         target_folder_id = subfolder_id
+            if target_folder_id is None:
+                # No chosen folder and no per-ISO subfolder: anchor the
+                # bundle Document in the patient's root folder. Without a
+                # folder_items row the deferred no-orphan constraint fails
+                # the commit (the trigger only checks containment, it does
+                # not auto-create a root entry).
+                patient_obj = (
+                    await db.execute(select(Patient).where(Patient.id == patient_id))
+                ).scalar_one_or_none()
+                if patient_obj is not None:
+                    root_folder = await get_or_create_root_folder(db, patient_obj)
+                    target_folder_id = root_folder.id
             dst_key = f"patients/{patient_id}/iso/{doc_id}_{safe_name}"
             await asyncio.to_thread(
                 storage.copy_object,

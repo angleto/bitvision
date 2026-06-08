@@ -19,6 +19,9 @@ interface ShareInfo {
   /** True only when the link is anonymous, has a recipient_email,
    *  the grant is alive and no claim has been done yet. */
   claimable?: boolean;
+  /** True when an account already exists for the link's recipient: they
+   *  sign in and attach the grant via /bind instead of creating one. */
+  bindable?: boolean;
   recipient_name?: string | null;
   recipient_email?: string | null;
 }
@@ -234,6 +237,28 @@ export default function SharedLinkPage() {
       }
     } catch (e) {
       setErr(e instanceof ApiError ? e.message : "claim failed");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function onBind() {
+    setBusy(true);
+    setErr(null);
+    try {
+      // Caller is signed in (button is gated on getStoredToken); the api
+      // wrapper attaches the bearer. Backend repoints the PUBLIC-held
+      // grant onto this account, gated on email == recipient_email.
+      await api(`/api/share-links/${params.token}/bind`, { method: "POST" });
+      if (info?.resource_kind === "patient") {
+        router.push(`/patients/${info.resource_id}`);
+      } else if (info?.resource_kind === "study") {
+        router.push(`/studies/${info.resource_id}`);
+      } else {
+        router.push("/studies");
+      }
+    } catch (e) {
+      setErr(e instanceof ApiError ? e.message : "bind failed");
     } finally {
       setBusy(false);
     }
@@ -471,6 +496,34 @@ export default function SharedLinkPage() {
                   </button>
                 </div>
               </form>
+            )}
+          </div>
+        )}
+
+        {info.bindable && (
+          <div
+            className="card"
+            style={{
+              marginTop: "0.75rem",
+              borderColor: "var(--bv-accent)",
+              background: "var(--bv-accent-soft)",
+            }}
+          >
+            <h3 style={{ marginTop: 0 }}>{tStp("bindTitle")}</h3>
+            <p className="meta" style={{ fontSize: "0.85rem" }}>
+              {tStp("bindIntro")}
+            </p>
+            {getStoredToken() ? (
+              <button type="button" onClick={onBind} disabled={busy} style={{ width: "100%" }}>
+                {busy ? tStp("submitBusy") : tStp("bindButton")}
+              </button>
+            ) : (
+              <a
+                href={`/login?redirect=${encodeURIComponent(`/shared/${params.token}`)}`}
+                style={{ display: "block", textAlign: "center" }}
+              >
+                {tStp("bindLoginPrompt")}
+              </a>
             )}
           </div>
         )}

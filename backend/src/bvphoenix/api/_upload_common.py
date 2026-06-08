@@ -22,6 +22,7 @@ from bvphoenix.services.permissions import (
     DELETE,
     READ_METADATA,
     WRITE_REPORT,
+    can_access_folder,
     can_patient,
     effective_permissions_on_patient,
 )
@@ -64,6 +65,13 @@ async def resolve_folder(
     if folder_id is None:
         return None
     folder = (await db.execute(select(Folder).where(Folder.id == folder_id))).scalar_one_or_none()
-    if folder is None or not (user.is_admin or folder.owner_subject_id == user.subject_id):
+    # Use the shared folder-access cascade (admin / folder owner / direct
+    # folder grant / patient-level grant on a patient-scoped folder)
+    # rather than an owner-only check. The old owner-only gate diverged
+    # from ``can_access_folder`` and rejected a collaborator who could
+    # already write to the patient (``resolve_patient`` enforces
+    # WRITE_REPORT) the moment they targeted one of that patient's
+    # folders — a 404 on a folder they legitimately reach everywhere else.
+    if folder is None or not await can_access_folder(db, user=user, folder_id=folder.id):
         raise HTTPException(status_code=404, detail="folder not found")
     return folder

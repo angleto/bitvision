@@ -1091,6 +1091,10 @@
     "recipientNoneFound": "No contact with email on file for this patient.",
     "labelInputTitle": "Label (optional, for your eyes only)",
     "labelInputPlaceholder": "e.g. Consultation Dr. Bianchi 2026-05",
+    "accessLevelSection": "Access level",
+    "accessLevelViewer": "View only — can see the record",
+    "accessLevelEditor": "Editor — can upload reports and images, annotate and report",
+    "accessLevelHint": "For a family member or caregiver who needs to keep the record up to date, choose Editor. For a view-only external consult, leave View only.",
     "deidentifySection": "Patient privacy",
     "deidentifyOn": "Pseudonymize (strip PHI from DICOMs)",
     "deidentifyHint": "Recommended for external consults: PatientName / PatientID / birth date are scrubbed on delivery.",
@@ -2837,7 +2841,11 @@
     "claimOpen": "Create your account",
     "claimDisplayNameLabel": "Display name (optional)",
     "claimPasswordLabel": "Password (minimum 8 characters)",
-    "claimErrorPasswordTooShort": "Password must be at least 8 characters."
+    "claimErrorPasswordTooShort": "Password must be at least 8 characters.",
+    "bindTitle": "Attach to your account",
+    "bindIntro": "An account already exists for this link's recipient. Sign in with it and attach this access: your future logins will use it directly.",
+    "bindButton": "Attach to my account",
+    "bindLoginPrompt": "Sign in to attach"
   },
   "patientAsk": {
     "inputLabel": "Question",

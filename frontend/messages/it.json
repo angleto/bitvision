@@ -1091,6 +1091,10 @@
     "recipientNoneFound": "Nessun contatto con email registrato per questo paziente.",
     "labelInputTitle": "Etichetta (opzionale, solo per te)",
     "labelInputPlaceholder": "es. Consulto Dott. Bianchi 2026-05",
+    "accessLevelSection": "Livello di accesso",
+    "accessLevelViewer": "Sola lettura — può vedere il fascicolo",
+    "accessLevelEditor": "Gestione — può caricare referti e immagini, annotare e refertare",
+    "accessLevelHint": "Per un familiare o caregiver che deve aggiornare il fascicolo scegli Gestione. Per un consulto esterno in sola visione lascia Sola lettura.",
     "deidentifySection": "Privacy paziente",
     "deidentifyOn": "Pseudonimizza (rimuovi PHI dai DICOM)",
     "deidentifyHint": "Raccomandato per consulti esterni: PatientName / PatientID / data di nascita rimossi alla consegna.",
@@ -2837,7 +2841,11 @@
     "claimOpen": "Crea il tuo account",
     "claimDisplayNameLabel": "Nome visualizzato (opzionale)",
     "claimPasswordLabel": "Password (minimo 8 caratteri)",
-    "claimErrorPasswordTooShort": "La password deve essere almeno 8 caratteri."
+    "claimErrorPasswordTooShort": "La password deve essere almeno 8 caratteri.",
+    "bindTitle": "Collega al tuo account",
+    "bindIntro": "Esiste già un account per il destinatario di questo link. Accedi con quell'account e collega questo accesso: i tuoi login futuri lo useranno direttamente.",
+    "bindButton": "Collega al mio account",
+    "bindLoginPrompt": "Accedi per collegare"
   },
   "patientAsk": {
     "inputLabel": "Domanda",
