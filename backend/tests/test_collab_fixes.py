@@ -37,6 +37,7 @@ from bvphoenix.db.models import (
     FolderItem,
     Grant,
     Patient,
+    PatientContact,
     ShareLink,
     User,
 )
@@ -389,4 +390,74 @@ async def test_can_access_folder_via_patient_grant(db_session: AsyncSession, mak
     # Drop the flushed-but-uncommitted rows before make_user's teardown
     # deletes the subjects — otherwise the still-pending patient/folder/
     # grant FK-reference those subjects and the DELETE errors.
+    await db_session.rollback()
+
+
+# --------------------------------------------------------------------------
+# BUG#5 — contacts surface delegation only when the backing grant is live
+# --------------------------------------------------------------------------
+
+
+async def test_contacts_hide_delegation_when_grant_not_active(
+    db_session: AsyncSession, make_user
+) -> None:
+    from bvphoenix.api.patients._shared import _load_patient_contacts
+
+    owner = await make_user(email=f"cowner-{uuid.uuid4().hex[:8]}@test.local")
+    delegate = await make_user(email=f"cdelegate-{uuid.uuid4().hex[:8]}@test.local")
+    patient = Patient(
+        id=uuid.uuid4(),
+        managed_by_subject_id=owner.subject_id,
+        display_name="Contacts patient",
+    )
+    db_session.add(patient)
+    await db_session.flush()
+
+    g_revoked = Grant(
+        resource_kind="patient",
+        resource_id=patient.id,
+        grantor_subject_id=owner.subject_id,
+        grantee_subject_id=delegate.subject_id,
+        permissions=["read:metadata", "write:report"],
+        valid_from=datetime.now(UTC),
+        revoked_at=datetime.now(UTC),
+    )
+    g_active = Grant(
+        resource_kind="patient",
+        resource_id=patient.id,
+        grantor_subject_id=owner.subject_id,
+        grantee_subject_id=delegate.subject_id,
+        permissions=["read:metadata", "write:report"],
+        valid_from=datetime.now(UTC),
+    )
+    db_session.add_all([g_revoked, g_active])
+    await db_session.flush()
+
+    dead = PatientContact(
+        patient_id=patient.id,
+        label="Dead delegate",
+        email="dead@test.local",
+        delegation_subject_id=delegate.subject_id,
+        delegation_grant_id=g_revoked.id,
+        delegation_level="editor",
+    )
+    live = PatientContact(
+        patient_id=patient.id,
+        label="Live delegate",
+        email="live@test.local",
+        delegation_subject_id=delegate.subject_id,
+        delegation_grant_id=g_active.id,
+        delegation_level="editor",
+    )
+    db_session.add_all([dead, live])
+    await db_session.flush()
+
+    contacts = await _load_patient_contacts(db_session, patient.id)
+    by_label = {c.label: c for c in contacts}
+    # Revoked grant → delegation hidden (contact reads as informational).
+    assert by_label["Dead delegate"].delegation_level is None
+    assert by_label["Dead delegate"].delegation_subject_id is None
+    # Active grant → delegation surfaced.
+    assert by_label["Live delegate"].delegation_level == "editor"
+
     await db_session.rollback()
