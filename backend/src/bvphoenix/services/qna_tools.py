@@ -32,6 +32,7 @@ from __future__ import annotations
 import json
 import uuid
 from collections.abc import Awaitable, Callable
+from datetime import date, datetime
 from typing import Any
 
 from sqlalchemy import select, text
@@ -245,6 +246,37 @@ def build_tool_catalog() -> list[LLMTool]:
 # ---------------------------------------------------------------------------
 
 
+def _coerce_date(value: Any) -> date | None:
+    """Coerce an LLM-supplied date argument to ``datetime.date``.
+
+    The model passes dates as ISO strings ("2025-06-01", occasionally a
+    full ISO datetime). asyncpg binds a DATE column expecting a date
+    object (it calls ``.toordinal()``), so a raw ``str`` raises
+    ``DataError`` — which is exactly why ``find_clinical_events`` 500'd on
+    every "last year" query. Parse leniently; an unparseable value drops
+    the filter rather than failing the whole tool call.
+    """
+    if value is None:
+        return None
+    if isinstance(value, datetime):
+        return value.date()
+    if isinstance(value, date):
+        return value
+    if isinstance(value, str):
+        s = value.strip()
+        if not s:
+            return None
+        try:
+            return date.fromisoformat(s)
+        except ValueError:
+            pass
+        try:
+            return datetime.fromisoformat(s.replace("Z", "+00:00")).date()
+        except ValueError:
+            return None
+    return None
+
+
 def build_executors(
     *,
     db: AsyncSession,
@@ -260,8 +292,8 @@ def build_executors(
 
     async def find_clinical_events(args: dict[str, Any]) -> str:
         kind = args.get("kind")
-        since = args.get("since")
-        until = args.get("until")
+        since = _coerce_date(args.get("since"))
+        until = _coerce_date(args.get("until"))
         contains = args.get("contains")
         k = int(args.get("k", 10))
         k = max(1, min(50, k))
