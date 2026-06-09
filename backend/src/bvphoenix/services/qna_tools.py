@@ -33,7 +33,7 @@ import json
 import uuid
 from collections.abc import Awaitable, Callable
 from datetime import date, datetime
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -43,9 +43,16 @@ from bvphoenix.db.models import (
     CHUNK_SOURCE_KINDS,
     CLINICAL_EVENT_KINDS,
     ClinicalEvent,
+    Document,
+    Patient,
 )
 from bvphoenix.services.chunk_search import search_chunks
 from bvphoenix.services.llm_types import LLMTool
+
+if TYPE_CHECKING:
+    from fastapi import Request
+
+    from bvphoenix.db.models import User
 
 __all__ = [
     "ToolExecutor",
@@ -238,6 +245,62 @@ def build_tool_catalog() -> list[LLMTool]:
                 },
             },
         ),
+        LLMTool(
+            name="get_document",
+            description=(
+                "Fetch one document's metadata by id: title, kind (type), "
+                "document_date, authority and the current etag. Use before "
+                "completing or correcting metadata so you read the current "
+                "state and can pass its etag to update_document."
+            ),
+            input_schema={
+                "type": "object",
+                "required": ["document_id"],
+                "additionalProperties": False,
+                "properties": {
+                    "document_id": {"type": "string", "format": "uuid"},
+                },
+            },
+        ),
+        LLMTool(
+            name="update_document",
+            description=(
+                "Set or complete a document's metadata: title, kind_id "
+                "(e.g. 'lab_result' for blood tests), document_date "
+                "(YYYY-MM-DD), or inline text. Use ONLY when the user "
+                "explicitly asks to fill or fix a document's metadata. Read "
+                "the document first (get_document + get_document_text) so the "
+                "values reflect the real content. Pass the etag from "
+                "get_document. Set dry_run=true to preview the diff, then "
+                "call again without it to apply."
+            ),
+            input_schema={
+                "type": "object",
+                "required": ["document_id"],
+                "additionalProperties": False,
+                "properties": {
+                    "document_id": {"type": "string", "format": "uuid"},
+                    "title": {"type": "string"},
+                    "kind_id": {
+                        "type": "string",
+                        "description": "Document kind catalog id, e.g. 'lab_result'.",
+                    },
+                    "document_date": {
+                        "type": "string",
+                        "description": "ISO date YYYY-MM-DD.",
+                    },
+                    "text": {
+                        "type": "string",
+                        "description": "Inline text body; empty string clears it.",
+                    },
+                    "etag": {
+                        "type": "string",
+                        "description": "Optional If-Match token from get_document.",
+                    },
+                    "dry_run": {"type": "boolean", "default": False},
+                },
+            },
+        ),
     ]
 
 
@@ -281,6 +344,8 @@ def build_executors(
     *,
     db: AsyncSession,
     patient_id: uuid.UUID,
+    user: User | None = None,
+    request: Request | None = None,
 ) -> dict[str, ToolExecutor]:
     """Construct executors with ``patient_id`` baked into every call.
 
@@ -288,6 +353,12 @@ def build_executors(
     executor here and runs it with the (validated) input dict. The
     patient_id is NEVER taken from the input dict — it is captured
     from this closure.
+
+    ``user`` + ``request`` are needed only by WRITE executors
+    (``update_document``): the write is attributed to ``user`` but
+    recorded with ``author_kind='agent'`` so AI edits stay visible in
+    the revision history. When they are absent (anonymous / no request
+    context) the write executors refuse, and only the read tools work.
     """
 
     async def find_clinical_events(args: dict[str, Any]) -> str:
@@ -575,10 +646,119 @@ def build_executors(
             }
         )
 
+    async def get_document(args: dict[str, Any]) -> str:
+        try:
+            doc_uuid = uuid.UUID(args["document_id"])
+        except (KeyError, ValueError):
+            return json.dumps({"error": "invalid document_id"})
+        doc = (
+            await db.execute(
+                select(Document).where(
+                    Document.id == doc_uuid,
+                    Document.patient_id == patient_id,
+                    Document.deleted_at.is_(None),
+                )
+            )
+        ).scalar_one_or_none()
+        if doc is None:
+            return json.dumps({"error": "document not found in this patient's record"})
+        return json.dumps(
+            {
+                "document_id": str(doc.id),
+                "title": doc.title,
+                "kind_id": doc.kind_id,
+                "provenance_id": doc.provenance_id,
+                "authority_id": doc.authority_id,
+                "document_date": doc.document_date.isoformat() if doc.document_date else None,
+                "etag": str(doc.etag) if doc.etag else None,
+                "has_text": bool(doc.text),
+            }
+        )
+
+    async def update_document(args: dict[str, Any]) -> str:
+        # Write executors need the actor + request context; without them
+        # (anonymous / no request) refuse rather than write unattributed.
+        if user is None or request is None:
+            return json.dumps({"error": "writing metadata requires an authenticated session"})
+        from bvphoenix.services.document_bulk_update import (
+            BulkUpdateItem,
+            apply_bulk_update,
+        )
+        from bvphoenix.services.versioning import ActorContext
+
+        try:
+            doc_uuid = uuid.UUID(args["document_id"])
+        except (KeyError, ValueError):
+            return json.dumps({"error": "invalid document_id"})
+
+        patient = (
+            await db.execute(select(Patient).where(Patient.id == patient_id))
+        ).scalar_one_or_none()
+        if patient is None:
+            return json.dumps({"error": "patient not found"})
+
+        item = BulkUpdateItem(document_id=doc_uuid)
+        fields_set: set[str] = set()
+        if args.get("title") is not None:
+            item.title = args["title"]
+            fields_set.add("title")
+        if args.get("kind_id") is not None:
+            item.kind_id = args["kind_id"]
+            fields_set.add("kind_id")
+        if args.get("document_date") is not None:
+            d = _coerce_date(args["document_date"])
+            if d is None:
+                return json.dumps({"error": "invalid document_date (use YYYY-MM-DD)"})
+            item.document_date = d
+            fields_set.add("document_date")
+        if "text" in args:
+            item.text = args["text"]
+            fields_set.add("text")
+        if args.get("etag"):
+            item.etag = str(args["etag"])
+        item.fields_set = fields_set
+        if not fields_set:
+            return json.dumps({"error": "no metadata fields supplied"})
+
+        dry_run = bool(args.get("dry_run", False))
+        # AI provenance: the write is attributed to the user, but recorded
+        # with author_kind='agent' so the revision history shows the AI
+        # authored it (AI provenance must stay visible).
+        actor = ActorContext(subject_id=user.subject_id, kind="agent")
+        try:
+            result = await apply_bulk_update(
+                db,
+                patient=patient,
+                user=user,
+                request=request,
+                items=[item],
+                atomic=True,
+                dry_run=dry_run,
+                actor_override=actor,
+            )
+        except Exception as exc:  # surface to the model; don't abort the turn
+            return json.dumps({"error": f"update failed: {type(exc).__name__}: {exc}"})
+        # apply_bulk_update leaves the transaction open for the caller.
+        if not dry_run:
+            await db.commit()
+        out = result.items[0] if result.items else None
+        return json.dumps(
+            {
+                "status": out.status if out else "unknown",
+                "document_id": str(doc_uuid),
+                "diff": getattr(out, "diff", None),
+                "error": getattr(out, "error", None),
+                "etag": getattr(out, "etag", None),
+                "dry_run": dry_run,
+            }
+        )
+
     return {
         "find_clinical_events": find_clinical_events,
         "get_event": get_event,
         "search_text_chunks": search_text_chunks_exec,
         "get_document_text": get_document_text,
         "list_recent_documents": list_recent_documents,
+        "get_document": get_document,
+        "update_document": update_document,
     }

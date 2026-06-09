@@ -249,6 +249,8 @@ async def ask(
             query=payload.query,
             lang=payload.lang,
             user_subject_id=(user.subject_id if user else None),
+            user=user,
+            request=request,
             tier_override=effective_tier,
             model_override=payload.model_override,
         )
@@ -328,6 +330,8 @@ async def _stream_answer(
                 query=payload.query,
                 lang=payload.lang,
                 user_subject_id=(user.subject_id if user else None),
+                user=user,
+                request=request,
                 tier_override=tier,
                 model_override=payload.model_override,
             )

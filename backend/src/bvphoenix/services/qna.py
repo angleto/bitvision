@@ -150,6 +150,8 @@ async def answer_question(
     query: str,
     lang: str = "it",
     user_subject_id: uuid.UUID | None = None,
+    user: Any = None,
+    request: Any = None,
     tier_override: AiTier | None = None,
     model_override: str | None = None,
 ) -> AnswerResult:
@@ -196,7 +198,7 @@ async def answer_question(
     else:
         provider = provider_for_tier(tier)
     tools = build_tool_catalog()
-    executors = build_executors(db=db, patient_id=patient_id)
+    executors = build_executors(db=db, patient_id=patient_id, user=user, request=request)
     system = await build_system_prompt(db, lang)
 
     max_iterations = _MAX_ITERATIONS_BY_TIER.get(tier, 6)
