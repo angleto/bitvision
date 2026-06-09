@@ -313,6 +313,54 @@ async def ingest_bulk_files(
                 except Exception:
                     log.exception("bulk ingest job %s: postprocess enqueue failed", jid)
 
+            # Enqueue OCR for every OCR-able document created here so its
+            # text becomes searchable AND the Q&A assistant can read it.
+            # The single-document upload path does this via
+            # ``_auto_enqueue_ocr_on_ingest``; the bulk path used to skip
+            # it, leaving uploaded PDFs un-OCR'd and invisible to search /
+            # the assistant. ``run_document_ocr`` chains chunk_and_embed on
+            # success. Best-effort: a Redis blip just defers indexing.
+            ocr_docs = [d for d in summary.documents_created if d.kind in ("pdf", "image")]
+            if ocr_docs:
+                try:
+                    from arq import create_pool
+
+                    from bvphoenix.config import get_settings as _get_bvp_settings
+                    from bvphoenix.services.arq_redis import redis_settings
+                    from bvphoenix.services.jobs import enqueue_or_get, set_arq_job_id
+
+                    bvp_settings = _get_bvp_settings()
+                    pool = await create_pool(redis_settings(bvp_settings.redis_url))
+                    try:
+                        for d in ocr_docs:
+                            res = await enqueue_or_get(
+                                db,
+                                kind="run_document_ocr",
+                                owner_subject_id=owner_subject_id,
+                                scope_ids=[d.id],
+                                canonical_input={
+                                    "document_id": d.id,
+                                    "file_id": None,
+                                    "force": False,
+                                    "language": None,
+                                },
+                            )
+                            await db.commit()
+                            if not res.deduped:
+                                handle = await pool.enqueue_job("run_document_ocr", str(res.job.id))
+                                if handle is not None:
+                                    await set_arq_job_id(db, res.job.id, handle.job_id)
+                                    await db.commit()
+                    finally:
+                        await pool.close()
+                    log.info(
+                        "bulk ingest job %s: enqueued OCR for %d documents",
+                        jid,
+                        len(ocr_docs),
+                    )
+                except Exception:
+                    log.exception("bulk ingest job %s: OCR enqueue failed", jid)
+
             log.info(
                 "bulk ingest job %s done: %d studies, %d documents, %d skipped",
                 jid,

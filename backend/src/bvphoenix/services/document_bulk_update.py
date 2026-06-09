@@ -36,7 +36,7 @@ from bvphoenix.services.document_catalog_validation import (
     load_active_catalog_ids,
     validate_kind_id,
 )
-from bvphoenix.services.versioning import CommitResult
+from bvphoenix.services.versioning import ActorContext, CommitResult
 
 
 @dataclass(slots=True)
@@ -163,8 +163,15 @@ async def apply_bulk_update(
     items: list[BulkUpdateItem],
     atomic: bool,
     dry_run: bool,
+    actor_override: ActorContext | None = None,
 ) -> BulkResult:
     """Run the bulk update pipeline.
+
+    ``actor_override`` lets a caller attribute the commit to a specific
+    actor instead of deriving it from ``request.state`` — used by the
+    embedded Q&A assistant so a metadata edit it performs on the user's
+    behalf is recorded with ``author_kind='agent'`` (AI provenance must
+    stay visible) rather than as a plain human edit.
 
     The caller is responsible for the surrounding HTTP gates (auth,
     permission). This function owns the validation + per-item commit
@@ -331,6 +338,7 @@ async def apply_bulk_update(
             entity_id=doc.id,
             payload=_document_versioning_payload(doc, files),
             message=(f"[document] bulk edit ({', '.join(sorted(item.fields_set)) or 'no-op'})"),
+            actor_override=actor_override,
         )
         head_etag = commit.commit_hash.hex()
 
