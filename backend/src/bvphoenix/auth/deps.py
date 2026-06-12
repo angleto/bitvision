@@ -373,6 +373,33 @@ async def require_admin(
     return user
 
 
+def require_admin_or_scoped_agent(scope: str):
+    """Admin gate with an explicit, opt-in agent carve-out.
+
+    ``require_admin`` hard-refuses agent tokens so a leaked credential
+    cannot reach destructive account-wide operations. Some admin surfaces
+    are deliberately agent-operable though (MCP-GUI parity for
+    non-destructive maintenance like embedding backfills): for those, the
+    operator grants the assistant a dedicated *sensitive* scope and the
+    backend still requires the token's OWNER to be a platform admin. The
+    blast radius of the scope stays bounded to what the gated endpoints
+    can do -- never use this for destructive or account-management
+    endpoints; those keep ``require_admin``.
+    """
+
+    async def _dep(
+        request: Request,
+        user: Annotated[User, Depends(require_user)],
+    ) -> User:
+        if not user.is_admin:
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="admin required")
+        if getattr(request.state, "is_agent", False):
+            enforce_agent_scope(request, scope)
+        return user
+
+    return _dep
+
+
 def require_agent_scope(scope: str):
     """Build a dependency that enforces ``scope`` on the calling agent
     token.

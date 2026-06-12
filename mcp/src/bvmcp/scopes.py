@@ -227,6 +227,21 @@ SCOPE_CATALOG: tuple[ScopeDef, ...] = (
         "Create / update / delete patient tasks + all FSM transitions "
         "(start / snooze / wake / complete / drop / reopen)",
     ),
+    # --- Admin maintenance (platform-wide, owner must be admin) ---------------
+    # The backend gates these endpoints with
+    # ``require_admin_or_scoped_agent``: the assistant's OWNER must be a
+    # platform admin AND the operator must have granted this scope. Bounded
+    # to non-destructive embedding maintenance (coverage reads + enqueueing
+    # idempotent (re)embed jobs); destructive admin surfaces stay
+    # structurally human-only behind ``require_admin``. Sensitive because it
+    # is platform-wide rather than patient-scoped.
+    ScopeDef(
+        "admin:embeddings",
+        "Read embedding coverage (aggregate counts per model/kind) and enqueue "
+        "missing/failed (re)embedding jobs, including per-model text-chunk "
+        "re-embeds. Owner must be a platform admin.",
+        sensitive=True,
+    ),
 )
 
 
@@ -463,6 +478,15 @@ TOOL_SCOPE: dict[str, str] = {
     # invite. Mirrors export_event_ics but rides ``tasks:read`` rather
     # than ``calendar:read`` because tasks are not on the calendar feed.
     "export_task_ics": "tasks:read",
+    # --- Embeddings admin (MCP-GUI parity for /admin/embeddings) -------
+    # All five ride the single admin:embeddings scope: the surface is
+    # one capability (embedding maintenance) and the backend re-gates
+    # every call on the owner being a platform admin.
+    "get_embedding_coverage": "admin:embeddings",
+    "get_text_embedding_coverage": "admin:embeddings",
+    "retry_failed_embeddings": "admin:embeddings",
+    "embed_missing_targets": "admin:embeddings",
+    "reembed_text_chunks": "admin:embeddings",
 }
 
 

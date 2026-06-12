@@ -24,9 +24,10 @@ All four tasks share a single private helper that:
    and re-chunks.
 3. Slices the body via :func:`bvphoenix.services.chunking.chunk_document_text`
    and bulk-inserts into ``text_chunks``.
-4. Enqueues one ``embed_text_ml`` job per chunk so the MiniLM 384-d
-   vector lands in ``text_embeddings`` under
-   ``target_kind='document_chunk'``.
+4. Enqueues one embed job per chunk for EVERY routed, active text model
+   in the ``embedding_models`` registry (arq task + store table come
+   from the row's ``model_metadata``, migration 0023), so each model's
+   vectors land in its own store under ``target_kind='document_chunk'``.
 
 Idempotency is keyed on the (source, version, hash) triple. Re-runs
 are safe: matched hash → no-op, mismatched → atomic replace.
@@ -46,7 +47,7 @@ from bvphoenix.services.chunking import (
     DEFAULT_CHUNKER_VERSION,
     chunk_document_text,
 )
-from bvphoenix.services.text_models import TEXT_MODELS
+from bvphoenix.services.text_models import load_text_model_specs
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, create_async_engine
 
@@ -465,19 +466,30 @@ async def _persist_chunks_and_embed(
             content_sha256=content_sha256,
             chunks=chunks,
         )
+        # Resolve the dual-write targets while the session is open: every
+        # routed, active text model in the registry (arq task + store table
+        # from the row's model_metadata, migration 0023). Registering or
+        # deactivating a model changes this set with no code edit here.
+        try:
+            specs = list((await load_text_model_specs(db)).values())
+        except Exception:
+            logger.exception("failed to load text-model routing from the registry")
+            specs = []
         await db.commit()
 
     redis = ctx.get("redis") if isinstance(ctx, dict) else None
     enqueued = 0
-    if redis is not None:
+    if redis is not None and not specs:
+        logger.warning(
+            "no routed text models in the registry; %d chunks of %s %s NOT enqueued for embedding",
+            len(chunk_ids),
+            source_kind,
+            source_id,
+        )
+    if redis is not None and specs:
         for cid, ch in zip(chunk_ids, chunks, strict=True):
             try:
-                # Dual-write every text model's store during the transition
-                # so flipping the registry default has data to read. The set
-                # of (arq_task, store_table) is the shared TEXT_MODELS spec
-                # (also read by the query path + the backfill CLI); adding a
-                # model there future-proofs this loop with no edit here.
-                for spec in TEXT_MODELS.values():
+                for spec in specs:
                     await redis.enqueue_job(spec.arq_task, "document_chunk", str(cid), ch.text)
                 enqueued += 1
             except Exception:

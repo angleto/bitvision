@@ -1,37 +1,61 @@
-"""Canonical routing table for text-chunk embedding models.
+"""Registry-backed routing for text-chunk embedding models.
 
-Single source of truth for the fact that maps a registry text model (by
-``model_id`` -- equal to the worker ``MODEL_ID`` and to the value written
-into the store's ``model_id`` column) to (a) the arq task that produces
-its vectors and (b) the pgvector store table those vectors live in.
+The fact that maps a registry text model (by ``model_id`` -- equal to the
+worker ``MODEL_ID`` and to the value written into the store's ``model_id``
+column) to (a) the arq task that produces its vectors and (b) the pgvector
+store table those vectors live in, LIVES IN THE ``embedding_models`` ROW:
+``model_metadata`` carries ``arq_task`` / ``store_table`` (+ the optional
+``sparse_store_table`` / ``colbert_store_table`` auxiliary BGE-M3 stores)
+and ``dim`` is the row's own column. Migration 0023 seeded the routing for
+``minilm-multi-v1`` and ``bge-m3-v1``; new models get theirs via
+``embedding_models.set_text_routing`` (CLI: ``bvphoenix-embed-models
+set-routing``).
 
-Before this module the same fact was hand-duplicated across the read path
+History: the same fact was first hand-duplicated across the read path
 (``services/chunk_search.py``), the write path (workers
-``chunk_and_embed.py``), the backfill CLI, and the admin coverage API,
-with a "keep these byte-identical" comment. The admin copy had already
-drifted (MiniLM-only after the BGE-M3 rollout), which is exactly the
-coherence tax the no-duplication rule exists to prevent. Import
-``TEXT_MODELS`` everywhere instead.
+``chunk_and_embed.py``), the backfill CLI and the admin coverage API; then
+unified into an in-code ``TEXT_MODELS`` dict (commit 866899b); now it is
+data-driven from the row ``get_default_model`` already loads, so adding or
+re-routing a text model is a registry write, not a code change. This module
+keeps the parsing + validation of that row data.
 
-Data-only on purpose (no model weights, no encoder callables) so the lean
-CLI and the worker can import it without dragging ``sentence-transformers``
-into import time. The query-time encoder dispatch stays in
-``chunk_search`` (which owns the lazy ``ai``-extra import).
+Data-only on purpose (no model weights, no encoder callables, no ORM) so
+the lean CLI and the worker can import it without dragging
+``sentence-transformers`` or the model registry into import time. The
+query-time encoder dispatch stays in ``chunk_search`` (which owns the lazy
+``ai``-extra import) keyed on the model-id constants below: an encoder is
+code by nature, so a model whose id has no registered encoder simply
+contributes no dense arm.
 
-Longer term this should be backed by the ``embedding_models`` registry row
-(``store_table`` / ``arq_task`` in ``model_metadata`` JSONB) so routing is
-fully data-driven from the row ``get_default_model`` already loads; this
-in-code table is the intermediate that version can replace.
+Injection guard: ``store_table`` & friends are f-string-interpolated into
+SQL by every consumer (table names cannot be bind parameters). Now that
+they come from a DB row instead of an in-code literal, ``spec_from_registry``
+refuses any value that is not a plain lowercase SQL identifier -- a
+malformed registry row degrades that model to "unrouted" instead of
+reaching a query string.
 """
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
+from typing import Any
+
+from sqlalchemy import text
 
 # Registry model_id values (== worker MODEL_ID == the stored model_id
 # column == the value pinned by each store table's CHECK constraint).
+# Kept in code because the query-path encoder dispatch needs them; the
+# routing itself is registry data.
 MULTILINGUAL_MODEL_ID = "minilm-multi-v1"
 BGE_M3_MODEL_ID = "bge-m3-v1"
+
+# model_metadata keys that make up a text model's routing.
+ROUTING_KEYS = ("arq_task", "store_table", "sparse_store_table", "colbert_store_table")
+
+# Plain lowercase SQL identifier / arq task name. Deliberately strict:
+# every value is interpolated into SQL or handed to arq verbatim.
+_IDENT_RE = re.compile(r"^[a-z][a-z0-9_]{0,62}$")
 
 
 @dataclass(frozen=True)
@@ -53,29 +77,84 @@ class TextModelSpec:
     colbert_store_table: str | None = None
 
 
-# One entry per text embedding model. ``dim`` must match the pgvector
-# column width in the store table's migration (guarded by a unit test in
-# tests/test_text_models.py so a future edit cannot silently desync).
-TEXT_MODELS: dict[str, TextModelSpec] = {
-    MULTILINGUAL_MODEL_ID: TextModelSpec(
-        model_id=MULTILINGUAL_MODEL_ID,
-        arq_task="embed_text_ml",
-        store_table="text_embeddings",
-        dim=384,
-    ),
-    BGE_M3_MODEL_ID: TextModelSpec(
-        model_id=BGE_M3_MODEL_ID,
-        # embed_bge_m3_all: one FlagEmbedding forward writes dense + sparse +
-        # colbert in one txn (degrades to sentence-transformers dense-only if
-        # FlagEmbedding is unavailable). The dense-only embed_bge_m3_dense task
-        # stays registered as the explicit fallback.
-        arq_task="embed_bge_m3_all",
-        store_table="text_embeddings_bge_m3",
-        dim=1024,
-        sparse_store_table="text_embeddings_bge_m3_sparse",
-        colbert_store_table="text_embeddings_bge_m3_colbert",
-    ),
-}
+def _require_ident(value: Any, key: str, model_name: str) -> str:
+    if not isinstance(value, str) or not _IDENT_RE.match(value):
+        raise ValueError(
+            f"embedding model {model_name!r}: routing key {key!r} = {value!r} "
+            "is not a plain lowercase identifier"
+        )
+    return value
 
-# What the query path resolves to when the registry default cannot be read.
-DEFAULT_TEXT_MODEL_ID = MULTILINGUAL_MODEL_ID
+
+def spec_from_registry(
+    name: str,
+    dim: int,
+    metadata: dict[str, Any] | None,
+) -> TextModelSpec | None:
+    """Parse one ``embedding_models`` row into a :class:`TextModelSpec`.
+
+    Returns ``None`` when the row carries no routing at all (neither
+    ``arq_task`` nor ``store_table`` -- e.g. the dormant
+    ``biomedclip-text-v1`` row), so callers can skip unrouted models.
+    Raises :class:`ValueError` on partial or malformed routing: half a
+    route is an operator mistake that must surface, not silently behave
+    like "no route".
+    """
+    meta = metadata or {}
+    if "arq_task" not in meta and "store_table" not in meta:
+        return None
+    if "arq_task" not in meta or "store_table" not in meta:
+        raise ValueError(
+            f"embedding model {name!r}: routing requires both 'arq_task' and "
+            f"'store_table' (got {sorted(k for k in ROUTING_KEYS if k in meta)})"
+        )
+    sparse = meta.get("sparse_store_table")
+    colbert = meta.get("colbert_store_table")
+    return TextModelSpec(
+        model_id=name,
+        arq_task=_require_ident(meta["arq_task"], "arq_task", name),
+        store_table=_require_ident(meta["store_table"], "store_table", name),
+        dim=int(dim),
+        sparse_store_table=(
+            _require_ident(sparse, "sparse_store_table", name) if sparse is not None else None
+        ),
+        colbert_store_table=(
+            _require_ident(colbert, "colbert_store_table", name) if colbert is not None else None
+        ),
+    )
+
+
+# Active, non-deprecated text models -- the worker dual-write loop and the
+# admin surface route off this set. Raw SQL (no ORM import) on purpose;
+# see module docstring.
+_ACTIVE_TEXT_MODELS_SQL = text(
+    "SELECT name, dim, model_metadata FROM embedding_models "
+    "WHERE kind = 'text' AND is_active AND deprecated_at IS NULL "
+    "ORDER BY name"
+)
+
+
+def _specs_from_rows(rows: Any) -> dict[str, TextModelSpec]:
+    specs: dict[str, TextModelSpec] = {}
+    for name, dim, metadata in rows:
+        spec = spec_from_registry(name, dim, metadata)
+        if spec is not None:
+            specs[name] = spec
+    return specs
+
+
+async def load_text_model_specs(db: Any) -> dict[str, TextModelSpec]:
+    """Load every routed, active, non-deprecated text model from the registry.
+
+    ``db`` is an ``AsyncSession`` (or anything with an async ``execute``).
+    Unrouted rows are skipped; a malformed routing raises ``ValueError``
+    (see :func:`spec_from_registry`).
+    """
+    rows = (await db.execute(_ACTIVE_TEXT_MODELS_SQL)).all()
+    return _specs_from_rows(rows)
+
+
+def load_text_model_specs_sync(session: Any) -> dict[str, TextModelSpec]:
+    """Sync twin of :func:`load_text_model_specs` for the backfill CLI."""
+    rows = session.execute(_ACTIVE_TEXT_MODELS_SQL).all()
+    return _specs_from_rows(rows)

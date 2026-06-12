@@ -44,7 +44,7 @@ from bvphoenix.services.embeddable import (
     embeddable_modality_clause,
     embeddable_sop_class_clause,
 )
-from bvphoenix.services.text_models import TEXT_MODELS
+from bvphoenix.services.text_models import load_text_model_specs_sync
 
 
 @click.group()
@@ -380,12 +380,13 @@ def embed(
 
 # Text-chunk embedding backfill -----------------------------------------
 # Replaces the ad-hoc one-off snippet used to backfill the 122 document
-# chunks. The model -> {arq_task, store_table} routing lives in the shared
-# bvphoenix.services.text_models.TEXT_MODELS spec (the same one the query
-# path in chunk_search and the write path in chunk_and_embed read), so a
-# model/table change touches one place. The --model value is the registry
-# name, which by design equals the worker MODEL_ID and the value written
-# into the store's ``model_id`` column.
+# chunks. The model -> {arq_task, store_table} routing lives on the
+# embedding_models registry row (model_metadata, migration 0023) — the
+# same row the query path in chunk_search and the write path in
+# chunk_and_embed resolve — so a model/table change is a registry write,
+# not a code change. The --model value is the registry name, which by
+# design equals the worker MODEL_ID and the value written into the
+# store's ``model_id`` column.
 
 
 def _chunk_candidates(
@@ -403,8 +404,9 @@ def _chunk_candidates(
         params["pid"] = patient_id
     if only_missing:
         # ``store_table`` is f-string-interpolated because table names cannot
-        # be bind parameters. It is injection-safe: the value comes only from
-        # the validated TEXT_MODELS spec, never from raw user input.
+        # be bind parameters. It is injection-safe: the value is
+        # identifier-validated registry data (spec_from_registry), never
+        # raw user input.
         where.append(
             f"NOT EXISTS (SELECT 1 FROM {store_table} te "
             "WHERE te.target_kind = 'document_chunk' AND te.target_id = tc.id "
@@ -438,8 +440,10 @@ async def _enqueue_embed_text(
     "--model",
     "model",
     required=True,
-    type=click.Choice(sorted(TEXT_MODELS)),
-    help="Text embedding model name (minilm-multi-v1 | bge-m3-v1).",
+    help=(
+        "Text embedding model name (a routed, active row of the "
+        "embedding_models registry, e.g. minilm-multi-v1 | bge-m3-v1)."
+    ),
 )
 @click.option(
     "--patient",
@@ -475,11 +479,12 @@ def embed_text(
 ) -> None:
     """Enqueue per-chunk text-embedding jobs for the chosen model.
 
-    Routes to the model's arq task and pgvector store table
-    (minilm-multi-v1 -> embed_text_ml / text_embeddings; bge-m3-v1 ->
-    embed_bge_m3_dense / text_embeddings_bge_m3). The tasks are idempotent
-    (ON CONFLICT upsert) and no-op on blank chunk text. Requires an Arq
-    worker with the ``ai`` extra running to process the queue.
+    Routes to the model's arq task and pgvector store table as recorded
+    on its embedding_models registry row (minilm-multi-v1 ->
+    embed_text_ml / text_embeddings; bge-m3-v1 -> embed_bge_m3_all /
+    text_embeddings_bge_m3). The tasks are idempotent (ON CONFLICT
+    upsert) and no-op on blank chunk text. Requires an Arq worker with
+    the ``ai`` extra running to process the queue.
     """
     if (patient is None) == (not all_patients):
         click.echo("specify exactly one of --patient <id> or --all", err=True)
@@ -493,19 +498,24 @@ def embed_text(
             click.echo(f"--patient must be a UUID, got {patient!r}", err=True)
             sys.exit(2)
 
-    spec = TEXT_MODELS[model]
-    task_name = spec.arq_task
-    store_table = spec.store_table
-
     engine = _engine()
     with Session(engine) as session:
+        specs = load_text_model_specs_sync(session)
+        spec = specs.get(model)
+        if spec is None:
+            click.echo(
+                f"unknown or unrouted text model {model!r}; known: {sorted(specs)}",
+                err=True,
+            )
+            sys.exit(2)
         rows = _chunk_candidates(
             session,
             patient_id=patient_uuid,
             only_missing=only_missing,
-            store_table=store_table,
-            model_id=model,
+            store_table=spec.store_table,
+            model_id=spec.model_id,
         )
+    task_name = spec.arq_task
 
     scope = f"patient {patient_uuid}" if patient_uuid else "ALL patients"
     click.echo(f"scope            : {scope}")

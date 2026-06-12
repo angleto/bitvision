@@ -181,38 +181,50 @@ async def _probe_pgvector_capabilities() -> None:
 @app.on_event("startup")
 async def _check_embedding_registry_defaults() -> None:
     """Resolve the registry's default image/text models at boot, cache
-    their ids on ``app.state``, and warn loudly if a default diverges from
-    the ``model_id`` search actually queries.
+    their ids on ``app.state``, and warn loudly on misconfiguration.
 
-    The registry (``embedding_models``) is meant to be the source of
-    truth for which model search uses; migration 0011 reconciled its seed
-    with what the workers write. This guard catches future drift (e.g. an
-    operator promoting a new default whose name does not match a stored
-    ``model_id``) before it silently empties search results. Non-fatal:
-    the endpoints fall back to their validated constants."""
+    The registry (``embedding_models``) is the source of truth for which
+    model search uses: the image default must match the ``model_id`` the
+    ``embed_series`` worker writes, and the text default must carry the
+    routing metadata (arq task + store table, migration 0023) chunk
+    search resolves at query time. This guard catches drift (e.g. an
+    operator promoting an unrouted default) before it silently degrades
+    search. Non-fatal: chunk search degrades to FTS-only at runtime."""
     import logging
 
     from bvphoenix.db.session import SessionFactory
-    from bvphoenix.services.chunk_search import MULTILINGUAL_MODEL_ID
     from bvphoenix.services.embedding_models import get_default_model
+    from bvphoenix.services.text_models import spec_from_registry
 
     log = logging.getLogger("bvphoenix.startup")
-    # The model_id strings the code/workers actually read and write.
-    expected = {"image": "biomedclip-v1", "text": MULTILINGUAL_MODEL_ID}
     try:
         async with SessionFactory() as db:
-            for kind, expected_id in expected.items():
-                model = await get_default_model(kind, db)
-                setattr(app.state, f"default_{kind}_model_id", model.name)
-                if model.name != expected_id:
-                    log.warning(
-                        "embedding registry default for %r is %r but search queries %r — "
-                        "reconcile the registry or the code, or %r search will return empty",
-                        kind,
-                        model.name,
-                        expected_id,
-                        kind,
-                    )
+            image_model = await get_default_model("image", db)
+            app.state.default_image_model_id = image_model.name
+            if image_model.name != "biomedclip-v1":
+                log.warning(
+                    "embedding registry default for 'image' is %r but search queries "
+                    "'biomedclip-v1' — reconcile the registry or the code, or image "
+                    "search will return empty",
+                    image_model.name,
+                )
+
+            text_model = await get_default_model("text", db)
+            app.state.default_text_model_id = text_model.name
+            try:
+                spec = spec_from_registry(
+                    text_model.name, text_model.dim, text_model.model_metadata
+                )
+            except ValueError as exc:
+                spec = None
+                log.warning("default text model %r has malformed routing: %s", text_model.name, exc)
+            if spec is None:
+                log.warning(
+                    "embedding registry default text model %r carries no routing "
+                    "(model_metadata arq_task/store_table, migration 0023) — chunk "
+                    "search will degrade to FTS-only until it is routed",
+                    text_model.name,
+                )
     except Exception as exc:  # pragma: no cover — defensive boot path
         log.warning("embedding registry default check skipped: %s", exc)
 

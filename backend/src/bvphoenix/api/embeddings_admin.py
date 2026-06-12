@@ -14,8 +14,16 @@ Powers the admin dashboard view at ``/admin/embeddings`` in the frontend:
 - ``POST /api/embeddings/embed-missing`` — enqueue every target that
   has no ``embeddings`` row (regardless of whether it previously failed).
 
-All three are gated behind :func:`bvphoenix.auth.require_admin` — agent
-tokens are rejected there, so this surface is strictly human-gated.
+Plus the text-chunk twins (``/text-chunks/coverage`` and
+``/text-chunks/embed-missing``), whose per-model routing comes from the
+``embedding_models`` registry row (migration 0023).
+
+Gate: ``require_admin_or_scoped_agent("admin:embeddings")`` — humans must
+be platform admins; agent tokens additionally need the operator-granted
+``admin:embeddings`` scope AND an admin owner (MCP-GUI parity for this
+maintenance surface). Writes honour ``?dry_run=true`` (candidate counts,
+no enqueue, no audit) and audit-log the enqueue with AI provenance
+auto-derived from the request.
 """
 
 from __future__ import annotations
@@ -23,21 +31,30 @@ from __future__ import annotations
 from typing import Annotated, Literal
 
 from arq import create_pool
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import BaseModel
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from bvphoenix.auth import require_admin
+from bvphoenix.api._dry_run import dry_run_flag
+from bvphoenix.auth import require_admin_or_scoped_agent
 from bvphoenix.config import get_settings
 from bvphoenix.db.models import User
 from bvphoenix.db.session import get_db
 from bvphoenix.services.arq_redis import redis_settings
+from bvphoenix.services.audit import log_action
 from bvphoenix.services.embeddable import embeddable_modality_clause
-from bvphoenix.services.embedding_models import get_default_model
-from bvphoenix.services.text_models import DEFAULT_TEXT_MODEL_ID, TEXT_MODELS
+from bvphoenix.services.embedding_models import NoDefaultEmbeddingModel, get_default_model
+from bvphoenix.services.text_models import TextModelSpec, load_text_model_specs
 
 router = APIRouter(prefix="/embeddings", tags=["embeddings-admin"])
+
+# Operator-grantable (sensitive) scope that lets an agent token drive this
+# surface; the owner must be a platform admin either way. Mirrors the
+# catalog entry in ``mcp/src/bvmcp/scopes.py``.
+ADMIN_EMBEDDINGS_SCOPE = "admin:embeddings"
+
+_gate = require_admin_or_scoped_agent(ADMIN_EMBEDDINGS_SCOPE)
 
 # Map (target_kind, model_id) → arq task name. We only ship the series /
 # BiomedCLIP path today; the map makes it trivial to add study-level
@@ -93,7 +110,7 @@ class CoverageOut(BaseModel):
 @router.get("/coverage", response_model=CoverageOut)
 async def embedding_coverage(
     db: Annotated[AsyncSession, Depends(get_db)],
-    _admin: Annotated[User, Depends(require_admin)],
+    _admin: Annotated[User, Depends(_gate)],
 ) -> CoverageOut:
     """Per-(model × kind) coverage summary for the admin dashboard."""
     # Find every (model_id, target_kind) pair that's ever been touched,
@@ -199,6 +216,10 @@ class EnqueueResult(BaseModel):
     model_id: str
     target_kind: str
     enqueued: int
+    # How many targets matched the selection. On a dry run this is the
+    # whole answer (enqueued stays 0); on a real run it equals enqueued
+    # unless individual enqueues failed.
+    candidates: int = 0
 
 
 async def _enqueue_targets(target_ids: list[str], task_name: str) -> int:
@@ -217,8 +238,10 @@ async def _enqueue_targets(target_ids: list[str], task_name: str) -> int:
 
 @router.post("/retry-failed", response_model=EnqueueResult)
 async def retry_failed(
+    request: Request,
     db: Annotated[AsyncSession, Depends(get_db)],
-    _admin: Annotated[User, Depends(require_admin)],
+    admin: Annotated[User, Depends(_gate)],
+    dry_run: Annotated[bool, Depends(dry_run_flag)],
     model_id: str = Query(..., max_length=128),
     target_kind: Literal["study", "series", "instance"] = Query(...),
 ) -> EnqueueResult:
@@ -264,19 +287,37 @@ async def retry_failed(
     ).all()
 
     target_ids = [str(r[0]) for r in rows]
+    if dry_run:
+        return EnqueueResult(
+            status="dry_run",
+            model_id=model_id,
+            target_kind=target_kind,
+            enqueued=0,
+            candidates=len(target_ids),
+        )
     n = await _enqueue_targets(target_ids, task_name)
+    await log_action(
+        actor_subject_id=admin.subject_id,
+        action="embeddings.retry_failed",
+        resource_kind="embedding_model",
+        request=request,
+        metadata={"model_id": model_id, "target_kind": target_kind, "enqueued": n},
+    )
     return EnqueueResult(
         status="enqueued",
         model_id=model_id,
         target_kind=target_kind,
         enqueued=n,
+        candidates=len(target_ids),
     )
 
 
 @router.post("/embed-missing", response_model=EnqueueResult)
 async def embed_missing(
+    request: Request,
     db: Annotated[AsyncSession, Depends(get_db)],
-    _admin: Annotated[User, Depends(require_admin)],
+    admin: Annotated[User, Depends(_gate)],
+    dry_run: Annotated[bool, Depends(dry_run_flag)],
     model_id: str = Query(..., max_length=128),
     target_kind: Literal["study", "series", "instance"] = Query(...),
 ) -> EnqueueResult:
@@ -325,12 +366,28 @@ async def embed_missing(
     ).all()
 
     target_ids = [str(r[0]) for r in rows]
+    if dry_run:
+        return EnqueueResult(
+            status="dry_run",
+            model_id=model_id,
+            target_kind=target_kind,
+            enqueued=0,
+            candidates=len(target_ids),
+        )
     n = await _enqueue_targets(target_ids, task_name)
+    await log_action(
+        actor_subject_id=admin.subject_id,
+        action="embeddings.embed_missing",
+        resource_kind="embedding_model",
+        request=request,
+        metadata={"model_id": model_id, "target_kind": target_kind, "enqueued": n},
+    )
     return EnqueueResult(
         status="enqueued",
         model_id=model_id,
         target_kind=target_kind,
         enqueued=n,
+        candidates=len(target_ids),
     )
 
 
@@ -339,26 +396,33 @@ async def embed_missing(
 # text_chunks rows come from the chunk_and_embed_* workers; their vectors
 # live in the active text model's store (text_embeddings for MiniLM,
 # text_embeddings_bge_m3 for BGE-M3) under target_kind='document_chunk'.
-# Store + task are resolved per-model from the shared TEXT_MODELS spec, so
-# this surface tracks whatever model is active instead of hard-coding one.
+# Store + task are resolved per-model from the embedding_models registry
+# row (migration 0023), so this surface tracks whatever model is routed
+# instead of hard-coding one.
 # ---------------------------------------------------------------------------
 
 
-async def _resolve_text_model(db: AsyncSession, model: str | None) -> str:
-    """Resolve + validate a text ``model_id``, defaulting to the registry's
-    active text default. 400 on an unknown model so a typo can't silently
-    target a non-existent store."""
+async def _resolve_text_spec(db: AsyncSession, model: str | None) -> TextModelSpec:
+    """Resolve + validate a text ``model_id`` into its routing spec,
+    defaulting to the registry's active text default. 400 on an unknown /
+    unrouted model so a typo can't silently target a non-existent store;
+    503 when the deployment has no default text model at all."""
+    specs = await load_text_model_specs(db)
     if model is None:
         try:
             model = (await get_default_model("text", db)).name
-        except Exception:
-            model = DEFAULT_TEXT_MODEL_ID
-    if model not in TEXT_MODELS:
+        except NoDefaultEmbeddingModel as exc:
+            raise HTTPException(
+                status_code=503,
+                detail="no default text embedding model configured in the registry",
+            ) from exc
+    spec = specs.get(model)
+    if spec is None:
         raise HTTPException(
             status_code=400,
-            detail=f"unknown text model {model!r}; known: {sorted(TEXT_MODELS)}",
+            detail=f"unknown or unrouted text model {model!r}; known: {sorted(specs)}",
         )
-    return model
+    return spec
 
 
 class TextChunkCoverageOut(BaseModel):
@@ -373,7 +437,7 @@ class TextChunkCoverageOut(BaseModel):
 @router.get("/text-chunks/coverage", response_model=TextChunkCoverageOut)
 async def text_chunk_coverage(
     db: Annotated[AsyncSession, Depends(get_db)],
-    _admin: Annotated[User, Depends(require_admin)],
+    _admin: Annotated[User, Depends(_gate)],
     model: Annotated[str | None, Query(max_length=128)] = None,
 ) -> TextChunkCoverageOut:
     """Coverage of one text model's chunk embeddings over every
@@ -382,18 +446,20 @@ async def text_chunk_coverage(
     default; pass a model_id to inspect a specific store. The Q&A free /
     standard / premium paths consume these vectors via
     ``services.chunk_search``."""
-    resolved = await _resolve_text_model(db, model)
-    store = TEXT_MODELS[resolved].store_table
+    spec = await _resolve_text_spec(db, model)
+    # ``spec.store_table`` is identifier-validated registry data, so the
+    # f-string interpolation (table names can't be bound) is safe.
+    store = spec.store_table
     total = (await db.execute(text("SELECT COUNT(*) FROM text_chunks"))).scalar_one()
     embedded = (
         await db.execute(
-            # ``store`` comes only from the validated TEXT_MODELS spec, so
-            # the f-string interpolation (table names can't be bound) is safe.
             text(
                 f"SELECT COUNT(*) FROM {store} te "
                 "JOIN text_chunks tc ON tc.id = te.target_id "
-                "WHERE te.target_kind = 'document_chunk'"
-            )
+                "WHERE te.target_kind = 'document_chunk' "
+                "  AND te.model_id = :model"
+            ),
+            {"model": spec.model_id},
         )
     ).scalar_one()
     by_kind = (
@@ -405,9 +471,11 @@ async def text_chunk_coverage(
                 "FROM text_chunks tc "
                 f"LEFT JOIN {store} te ON te.target_id = tc.id "
                 "  AND te.target_kind = 'document_chunk' "
+                "  AND te.model_id = :model "
                 "GROUP BY tc.source_kind "
                 "ORDER BY tc.source_kind"
-            )
+            ),
+            {"model": spec.model_id},
         )
     ).all()
 
@@ -422,54 +490,90 @@ async def text_chunk_coverage(
             {"source_kind": k, "total": int(t), "embedded": int(e), "pending": int(t) - int(e)}
             for (k, t, e) in by_kind
         ],
-        model_id=resolved,
+        model_id=spec.model_id,
     )
 
 
 @router.post("/text-chunks/embed-missing", response_model=EnqueueResult)
 async def embed_missing_text_chunks(
+    request: Request,
     db: Annotated[AsyncSession, Depends(get_db)],
-    _admin: Annotated[User, Depends(require_admin)],
+    admin: Annotated[User, Depends(_gate)],
+    dry_run: Annotated[bool, Depends(dry_run_flag)],
     model: Annotated[str | None, Query(max_length=128)] = None,
+    only_missing: Annotated[
+        bool,
+        Query(
+            description=(
+                "true (default): only chunks lacking a vector in the model's "
+                "store; false: re-embed every chunk (the embed tasks are "
+                "idempotent ON CONFLICT upserts)."
+            )
+        ),
+    ] = True,
 ) -> EnqueueResult:
-    """Enqueue the text model's embed task for every ``text_chunks`` row
-    with no vector in that model's store. ``model`` defaults to the
-    registry's active text default. Useful right after rolling out a new
-    text model (the chunks exist but their vectors do not)."""
-    resolved = await _resolve_text_model(db, model)
-    spec = TEXT_MODELS[resolved]
+    """Enqueue the text model's embed task for ``text_chunks`` rows.
+
+    ``model`` defaults to the registry's active text default; routing
+    (arq task + store table) comes from its registry row. With
+    ``only_missing=true`` this is the post-rollout backfill (the chunks
+    exist but their vectors do not); ``only_missing=false`` re-embeds
+    everything, mirroring the ``bvphoenix-backfill embed-text
+    --all-chunks`` CLI."""
+    spec = await _resolve_text_spec(db, model)
+    # ``spec.store_table`` is identifier-validated registry data.
+    missing_clause = (
+        "WHERE NOT EXISTS ("
+        f"    SELECT 1 FROM {spec.store_table} te "
+        "    WHERE te.target_kind = 'document_chunk' "
+        "      AND te.target_id = tc.id "
+        "      AND te.model_id = :model"
+        ")"
+        if only_missing
+        else ""
+    )
     rows = (
         await db.execute(
-            # ``spec.store_table`` is from the validated TEXT_MODELS spec.
-            text(
-                "SELECT tc.id::text, tc.text FROM text_chunks tc "
-                "WHERE NOT EXISTS ("
-                f"    SELECT 1 FROM {spec.store_table} te "
-                "    WHERE te.target_kind = 'document_chunk' "
-                "      AND te.target_id = tc.id"
-                ")"
-            )
+            text(f"SELECT tc.id::text, tc.text FROM text_chunks tc {missing_clause}"),
+            {"model": spec.model_id} if only_missing else {},
         )
     ).all()
-    if not rows:
+    if dry_run or not rows:
         return EnqueueResult(
-            status="enqueued",
-            model_id=resolved,
+            status="dry_run" if dry_run else "enqueued",
+            model_id=spec.model_id,
             target_kind="document_chunk",
             enqueued=0,
+            candidates=len(rows),
         )
 
     pool = await create_pool(redis_settings(get_settings().redis_url))
     enq = 0
-    for cid, body in rows:
-        try:
-            await pool.enqueue_job(spec.arq_task, "document_chunk", cid, body)
-            enq += 1
-        except Exception:
-            pass
+    try:
+        for cid, body in rows:
+            try:
+                await pool.enqueue_job(spec.arq_task, "document_chunk", cid, body)
+                enq += 1
+            except Exception:
+                pass
+    finally:
+        await pool.close()
+    await log_action(
+        actor_subject_id=admin.subject_id,
+        action="embeddings.embed_missing_text_chunks",
+        resource_kind="embedding_model",
+        request=request,
+        metadata={
+            "model_id": spec.model_id,
+            "only_missing": only_missing,
+            "candidates": len(rows),
+            "enqueued": enq,
+        },
+    )
     return EnqueueResult(
         status="enqueued",
-        model_id=resolved,
+        model_id=spec.model_id,
         target_kind="document_chunk",
         enqueued=enq,
+        candidates=len(rows),
     )

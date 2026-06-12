@@ -30,6 +30,7 @@ restriction, and chunker version.
 from __future__ import annotations
 
 import asyncio
+import logging
 import uuid
 from dataclasses import dataclass
 from datetime import date
@@ -45,12 +46,12 @@ from bvphoenix.db.models.text_chunks import (
     DEFAULT_CHUNKER_VERSION,
 )
 from bvphoenix.services.bge_m3 import embed_query_dense as _embed_query_bge_m3
-from bvphoenix.services.embedding_models import get_default_model
+from bvphoenix.services.embedding_models import get_default_text_spec
 from bvphoenix.services.reranker import rerank_order
 from bvphoenix.services.text_models import (
     BGE_M3_MODEL_ID,
     MULTILINGUAL_MODEL_ID,
-    TEXT_MODELS,
+    TextModelSpec,
 )
 from bvphoenix.services.vector_search import tune_vector_query
 
@@ -63,6 +64,8 @@ __all__ = [
     "search_chunks",
 ]
 
+
+logger = logging.getLogger(__name__)
 
 MULTILINGUAL_MODEL_NAME = "paraphrase-multilingual-MiniLM-L12-v2"
 EMBEDDING_DIM = 384
@@ -173,8 +176,8 @@ async def _colbert_maxsim_order(
     product. Stored + query token vectors are L2-normalized, so dot == cosine.
     Returns the index permutation (best first, length ``top_n``) matching the
     ``rerank_order`` contract, or None on any failure so the caller keeps RRF
-    order / falls back to the cross-encoder. ``colbert_table`` is a TEXT_MODELS
-    literal (never user input).
+    order / falls back to the cross-encoder. ``colbert_table`` is
+    identifier-validated registry data (never raw user input).
     """
     if not chunk_ids:
         return None
@@ -329,38 +332,38 @@ async def search_chunks(
     where_sql = " AND ".join(where_clauses)
 
     # ---- resolve the active text model (registry default) ----
-    # Both stores are populated during the MiniLM -> BGE-M3 transition;
-    # the registry's default-for-kind decides which one search reads, so
-    # flipping the default (post-backfill) switches retrieval with no code
-    # change. Falls back to MiniLM if the registry can't be resolved.
-    active_model_id = MULTILINGUAL_MODEL_ID
+    # The registry row IS the routing: ``get_default_text_spec`` loads the
+    # default-for-kind('text') row and parses arq_task / store_table (+ the
+    # optional sparse/colbert aux stores) out of its model_metadata
+    # (migration 0023), so flipping the default switches retrieval with no
+    # code change. When the default is missing, unrouted, or the registry
+    # read fails, the dense/sparse/ColBERT arms are skipped and retrieval
+    # degrades to FTS-only -- an honest degrade instead of guessing a store.
+    spec: TextModelSpec | None = None
     try:
-        active_model_id = (await get_default_model("text", db)).name
+        spec = await get_default_text_spec(db)
     except Exception:
         # If the registry read itself errored it may have aborted the tx;
         # roll back so the downstream FTS query (which has no degrade guard of
         # its own) runs on a clean tx rather than 500-ing. Mirrors the
         # rollback-on-degrade pattern of the dense/sparse fetches below.
         await db.rollback()
-        active_model_id = MULTILINGUAL_MODEL_ID
-    if active_model_id != BGE_M3_MODEL_ID:
-        active_model_id = MULTILINGUAL_MODEL_ID
-    # Store tables are the single routing fact, shared with the backfill CLI
-    # and the write path via TEXT_MODELS, so a model/table change touches one
-    # place. active_model_id is guaranteed to be a TEXT_MODELS key here.
-    spec = TEXT_MODELS[active_model_id]
-    vec_table = spec.store_table
+        spec = None
+    if spec is None:
+        logger.warning("no routed default text model in registry; chunk search is FTS-only")
 
     # ---- encode the query ----
-    # For BGE-M3 with its sparse/colbert aux stores we do ONE FlagEmbedding
-    # forward (dense + sparse + colbert). If FlagEmbedding is unavailable we
-    # degrade to the sentence-transformers DENSE vector only (sparse + colbert
-    # arms skipped); MiniLM uses its own ST dense encoder. The whole encode is
+    # Encoder dispatch is code by nature (it imports the model runtime), so
+    # it stays keyed on the model-id constants: BGE-M3 with aux stores does
+    # ONE FlagEmbedding forward (dense + sparse + colbert; degrades to the
+    # sentence-transformers DENSE vector if FlagEmbedding is unavailable),
+    # MiniLM uses its own ST dense encoder, and a registry default this
+    # code has no encoder for contributes no dense arm. The whole encode is
     # behind ImportError so a lean env degrades to FTS-only rather than 500-ing.
     dense_vec: list[float] | None = None
     sparse_text: str | None = None
     query_colbert: Any = None
-    if active_model_id == BGE_M3_MODEL_ID and spec.sparse_store_table is not None:
+    if spec is not None and spec.model_id == BGE_M3_MODEL_ID and spec.sparse_store_table:
         try:
             from bvphoenix.services.bge_m3 import embed_query_all
 
@@ -373,22 +376,28 @@ async def search_chunks(
                 dense_vec = await _embed_query_bge_m3(query)
             except (ImportError, ModuleNotFoundError):
                 dense_vec = None
-    else:
-        encoder = _embed_query_bge_m3 if active_model_id == BGE_M3_MODEL_ID else _embed_query
+    elif spec is not None and spec.model_id in (BGE_M3_MODEL_ID, MULTILINGUAL_MODEL_ID):
+        encoder = _embed_query_bge_m3 if spec.model_id == BGE_M3_MODEL_ID else _embed_query
         try:
             dense_vec = await encoder(query)
         except (ImportError, ModuleNotFoundError):
             dense_vec = None
+    elif spec is not None:
+        logger.warning(
+            "default text model %r has no query encoder registered; dense arm skipped",
+            spec.model_id,
+        )
 
     # ---- dense vector top-k ----
     vec_rows: list = []
-    if dense_vec is not None:
-        # ``vec_table`` is a fixed literal from TEXT_MODELS (never user input).
+    if spec is not None and dense_vec is not None:
+        # ``spec.store_table`` is identifier-validated registry data
+        # (spec_from_registry), never raw user input.
         vec_sql = text(
             f"""
             SELECT ch.id AS chunk_id, te.vector <=> (:vec)::vector AS distance
             FROM text_chunks ch
-            JOIN {vec_table} te
+            JOIN {spec.store_table} te
               ON te.target_id = ch.id
              AND te.target_kind = 'document_chunk'
              AND te.model_id = :model_id
@@ -409,7 +418,7 @@ async def search_chunks(
                     {
                         **params,
                         "vec": _vec_literal(dense_vec),
-                        "model_id": active_model_id,
+                        "model_id": spec.model_id,
                         "limit": over,
                     },
                 )
@@ -425,9 +434,10 @@ async def search_chunks(
     # matching; pgvector ``<#>`` is negative inner product, so ORDER BY ASC
     # ranks the strongest lexical overlap first). Only when BGE is active, the
     # sparse store is routed, and the query encoded to sparse. Same degrade
-    # guards as the dense fetch. ``sparse_store_table`` is a TEXT_MODELS literal.
+    # guards as the dense fetch. ``sparse_store_table`` is identifier-validated
+    # registry data.
     sparse_rows: list = []
-    if sparse_text is not None and spec.sparse_store_table is not None:
+    if spec is not None and sparse_text is not None and spec.sparse_store_table is not None:
         sparse_sql = text(
             f"""
             SELECT ch.id AS chunk_id, (tes.sparse <#> (:qsparse)::sparsevec) AS neg_ip
@@ -448,7 +458,7 @@ async def search_chunks(
                     {
                         **params,
                         "qsparse": sparse_text,
-                        "model_id": active_model_id,
+                        "model_id": spec.model_id,
                         "limit": over,
                     },
                 )
@@ -548,13 +558,13 @@ async def search_chunks(
         # ColBERT late-interaction MaxSim over the pooled token matrices;
         # MiniLM (or BGE when ColBERT is unavailable) uses the cross-encoder.
         order: list[int] | None = None
-        if query_colbert is not None and spec.colbert_store_table is not None:
+        if spec is not None and query_colbert is not None and spec.colbert_store_table is not None:
             order = await _colbert_maxsim_order(
                 db,
                 query_colbert,
                 [hit.chunk_id for hit, _ in pooled],
                 colbert_table=spec.colbert_store_table,
-                model_id=active_model_id,
+                model_id=spec.model_id,
                 top_n=k,
             )
         if order is None:

@@ -2445,6 +2445,8 @@ export interface EmbeddingEnqueueResult {
   model_id: string;
   target_kind: EmbeddingTargetKind;
   enqueued: number;
+  /** Targets matching the selection; the whole answer on a dry run. */
+  candidates: number;
 }
 
 export interface TextChunkBySource {

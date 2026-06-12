@@ -244,6 +244,11 @@ Common scope buckets:
   * ``finalize:consultations`` — consultation signature. Agents
     never carry this scope; consultations always sign through a
     human gate.
+  * ``admin:embeddings`` — platform-wide embedding maintenance
+    (coverage reads + enqueueing missing/failed re-embeds, including
+    per-model text-chunk re-embeds). Sensitive, and only effective
+    when the assistant's OWNER is a platform admin: the backend
+    re-checks ownership on every call.
 
 ## Failure modes
 

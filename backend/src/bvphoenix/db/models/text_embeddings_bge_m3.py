@@ -96,9 +96,9 @@ class TextEmbeddingBgeM3Sparse(Base):
     ``sparsevec``. Queried by inner product (== FlagEmbedding lexical matching;
     the weights are non-negative magnitudes, so dot product not cosine) and
     fused with the dense + FTS arms via RRF in ``chunk_search``. NOT a separate
-    registry model: routing is keyed off the dense model's spec
-    (``text_models.TEXT_MODELS[...].sparse_store_table``), so a registry flip
-    back to MiniLM cleanly disables this arm.
+    registry model: routing is keyed off the dense model's registry row
+    (``model_metadata.sparse_store_table``, migration 0023), so a registry
+    flip back to MiniLM cleanly disables this arm.
     """
 
     __tablename__ = "text_embeddings_bge_m3_sparse"
@@ -141,8 +141,8 @@ class TextEmbeddingBgeM3Colbert(Base):
     ``target_id`` for the bounded top-K rerank pool in ``chunk_search``. No ANN
     index: MaxSim is not a single pgvector operator and the rerank is bounded
     to the RRF pool, so a per-token-row table would explode for zero index
-    value. Auxiliary signal of bge-m3-v1, routed via
-    ``text_models.TEXT_MODELS[...].colbert_store_table``.
+    value. Auxiliary signal of bge-m3-v1, routed via the registry row's
+    ``model_metadata.colbert_store_table`` (migration 0023).
     """
 
     __tablename__ = "text_embeddings_bge_m3_colbert"

@@ -16,6 +16,7 @@ the happy path does not trip the index.
 
 from __future__ import annotations
 
+import logging
 import uuid
 from datetime import UTC, datetime
 from typing import Any
@@ -25,8 +26,11 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from bvphoenix.db.models import EmbeddingModel
+from bvphoenix.services.text_models import TextModelSpec, spec_from_registry
 
 _VALID_KINDS: frozenset[str] = frozenset({"image", "text", "multimodal"})
+
+_log = logging.getLogger(__name__)
 
 
 class EmbeddingModelError(Exception):
@@ -135,6 +139,11 @@ async def register_model(
     if not provider.strip():
         raise ValueError("provider cannot be empty")
 
+    # If the caller ships routing keys in the metadata, validate them now:
+    # a malformed identifier must fail the registration, not surface later
+    # as an unrouted model (or worse, reach a SQL string).
+    spec_from_registry(name, dim, metadata)
+
     row = EmbeddingModel(
         name=name,
         kind=kind,
@@ -222,3 +231,55 @@ async def deprecate_model(
     row.model_metadata = meta
     await db.flush()
     return row
+
+
+async def set_text_routing(
+    db: AsyncSession,
+    id: str | uuid.UUID,
+    *,
+    arq_task: str,
+    store_table: str,
+    sparse_store_table: str | None = None,
+    colbert_store_table: str | None = None,
+) -> EmbeddingModel:
+    """Write a text model's routing into its ``model_metadata``.
+
+    This is the registry write path matching migration 0023's seed: the
+    arq task that produces the vectors and the pgvector store table(s)
+    they land in. Values are validated as plain lowercase identifiers
+    (they get interpolated into SQL by every consumer) via
+    :func:`bvphoenix.services.text_models.spec_from_registry`, which
+    raises ``ValueError`` on anything malformed.
+    """
+    row = await get_model(id, db)
+    if row.kind != "text":
+        raise ValueError(f"embedding model {row.name!r} has kind {row.kind!r}, expected 'text'")
+    routing: dict[str, Any] = {"arq_task": arq_task, "store_table": store_table}
+    if sparse_store_table is not None:
+        routing["sparse_store_table"] = sparse_store_table
+    if colbert_store_table is not None:
+        routing["colbert_store_table"] = colbert_store_table
+    # Validate the merged result before persisting anything.
+    meta = dict(row.model_metadata or {})
+    meta.update(routing)
+    spec_from_registry(row.name, row.dim, meta)
+    row.model_metadata = meta
+    await db.flush()
+    return row
+
+
+async def get_default_text_spec(db: AsyncSession) -> TextModelSpec | None:
+    """Resolve the default text model's routing spec from its registry row.
+
+    Returns ``None`` when the default row carries no (or malformed)
+    routing -- callers degrade to FTS-only retrieval rather than guessing
+    a store. Propagates :class:`NoDefaultEmbeddingModel` and DB errors so
+    the caller keeps control of its transaction (chunk_search rolls back
+    on failure before issuing further queries).
+    """
+    row = await get_default_model("text", db)
+    try:
+        return spec_from_registry(row.name, row.dim, row.model_metadata)
+    except ValueError as exc:
+        _log.warning("default text model %r has malformed routing: %s", row.name, exc)
+        return None
