@@ -38,10 +38,17 @@ from bvphoenix.services.versioning import (
 )
 from bvphoenix.storage import get_s3_storage
 
-pytestmark = pytest.mark.skipif(
-    not (os.getenv("BVP_DATABASE_URL") or os.getenv("DATABASE_URL")),
-    reason="needs a Postgres with F12 + 0048 migrations applied",
-)
+from .conftest import skip_if_no_s3
+
+pytestmark = [
+    pytest.mark.skipif(
+        not (os.getenv("BVP_DATABASE_URL") or os.getenv("DATABASE_URL")),
+        reason="needs a Postgres with F12 + 0048 migrations applied",
+    ),
+    # The round-trip writes real objects: a missing MinIO must skip,
+    # not surface as botocore ConnectionRefusedError mid-test.
+    skip_if_no_s3,
+]
 
 
 @pytest_asyncio.fixture

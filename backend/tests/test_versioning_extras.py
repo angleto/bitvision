@@ -402,20 +402,8 @@ class TestOwnerAsProposerPolicy:
         )
         await db.commit()
 
+        # No consultations row since v3: the branch ref is the record.
         cons_id = uuid.uuid4()
-        await db.execute(
-            text(
-                "INSERT INTO consultations "
-                "(id, patient_id, author_subject_id, author_kind, status, title) "
-                "VALUES (:id, :pid, :as, 'human', 'submitted', :ti)"
-            ),
-            {
-                "id": cons_id,
-                "pid": patient.id,
-                "as": owner.subject_id,
-                "ti": "owner self-consult",
-            },
-        )
         await open_consultation_branch(
             db,
             patient_id=patient.id,
@@ -499,20 +487,6 @@ class TestConcurrentMergesToMain:
         # Two consultations from the same main head with disjoint notes.
         async def _open_proposal(label: str) -> uuid.UUID:
             cons_id = uuid.uuid4()
-            await db.execute(
-                text(
-                    "INSERT INTO consultations "
-                    "(id, patient_id, author_subject_id, author_kind, "
-                    " status, title) VALUES "
-                    "(:id, :pid, :as, 'human', 'submitted', :ti)"
-                ),
-                {
-                    "id": cons_id,
-                    "pid": patient.id,
-                    "as": owner.subject_id,
-                    "ti": label,
-                },
-            )
             await open_consultation_branch(
                 db,
                 patient_id=patient.id,
@@ -595,20 +569,6 @@ class TestConcurrentMergesToMain:
 
         async def _make_proposal(label: str) -> uuid.UUID:
             cons_id = uuid.uuid4()
-            await db.execute(
-                text(
-                    "INSERT INTO consultations "
-                    "(id, patient_id, author_subject_id, author_kind, "
-                    " status, title) VALUES "
-                    "(:id, :pid, :as, 'human', 'submitted', :ti)"
-                ),
-                {
-                    "id": cons_id,
-                    "pid": patient.id,
-                    "as": owner.subject_id,
-                    "ti": label,
-                },
-            )
             await open_consultation_branch(
                 db,
                 patient_id=patient.id,

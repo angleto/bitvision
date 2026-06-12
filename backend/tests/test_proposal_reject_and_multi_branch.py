@@ -138,17 +138,9 @@ async def _setup_open_proposal(
         ],
     )
 
+    # v3 dropped the consultations table: the branch ref IS the
+    # consultation's record at this layer, so a fresh uuid is enough.
     consultation_id = uuid.uuid4()
-    await db.execute(
-        text(
-            "INSERT INTO consultations "
-            "(id, patient_id, author_subject_id, author_kind, "
-            " status, title, created_at, updated_at) "
-            "VALUES (:id, :pid, :sid, 'human', 'submitted', "
-            "  'reject test consultation', now(), now())"
-        ),
-        {"id": consultation_id, "pid": patient_id, "sid": user.subject_id},
-    )
     consult_ref = await open_consultation_branch(
         db,
         patient_id=patient_id,
@@ -231,16 +223,19 @@ class TestRejectProposal:
         ).scalar_one()
         assert is_locked is True
 
-        # Consultation row marked rejected with the reason.
-        cons_row = (
+        # The rejection reason is recorded on the proposal row (the
+        # consultations table is gone since v3; review_notes is the
+        # audit-visible reason, asserted above on the response too).
+        prop_row = (
             await db.execute(
-                text("SELECT status, rejected_reason FROM consultations WHERE id = :c"),
-                {"c": consultation_id},
+                text("SELECT status, review_decision, review_notes FROM proposals WHERE id = :p"),
+                {"p": proposal_id},
             )
         ).first()
-        assert cons_row is not None
-        assert cons_row[0] == "rejected"
-        assert cons_row[1] == "differs from clinical guidance"
+        assert prop_row is not None
+        assert prop_row[0] == "rejected"
+        assert prop_row[1] == "reject"
+        assert prop_row[2] == "differs from clinical guidance"
 
     @pytest.mark.asyncio
     async def test_reject_requires_non_empty_reason(self, owner_session) -> None:
@@ -336,18 +331,9 @@ class TestMultiBranchHistory:
                 )
             ],
         )
-        # Open a consultation branch and commit one note on it.
+        # Open a consultation branch and commit one note on it (no
+        # consultations table since v3: the ref is the record).
         cons_id = uuid.uuid4()
-        await db.execute(
-            text(
-                "INSERT INTO consultations "
-                "(id, patient_id, author_subject_id, author_kind, "
-                " status, title, created_at, updated_at) "
-                "VALUES (:id, :pid, :sid, 'human', 'draft', "
-                "  'multi-branch consultation', now(), now())"
-            ),
-            {"id": cons_id, "pid": pid, "sid": user.subject_id},
-        )
         consult_ref = await open_consultation_branch(
             db,
             patient_id=pid,

@@ -327,7 +327,10 @@ class Ref(Base):
     Naming convention (enforced by code in services/versioning):
       * ``main``: persistent main branch of the patient
       * ``consultation/<consultation_id>``: branch tied to a
-        consultation; lifecycle bound to consultations.status
+        consultation; ``owner_subject_id`` + ``is_locked`` carry its
+        write-gating state (the v3 fold dropped the consultations
+        table, so the ref row is the authoritative lifecycle record:
+        merge / reject / withdraw lock it)
 
     No other ref_name patterns are emitted by the system.
     """
@@ -421,9 +424,11 @@ class RefLog(Base):
 class Proposal(Base):
     """Pull-request between two refs of the same patient.
 
-    Lifecycle is bound 1:1 to ``consultations.status`` (see plan
-    ``L'esperienza utente``): the user only sees the consultation, the
-    proposal is the technical record of what to merge where.
+    The user-facing wrapper is the consultation, whose surviving
+    identity since the v3 fold is the ``consultation/<id>`` source ref
+    name (no consultations table, no FK column): the proposal is the
+    technical record of what to merge where, and the API derives the
+    consultation id from ``source_ref_name``.
     """
 
     __tablename__ = "proposals"
@@ -433,10 +438,6 @@ class Proposal(Base):
         PG_UUID(as_uuid=True),
         ForeignKey("patients.id", ondelete="CASCADE"),
         nullable=False,
-    )
-    consultation_id: Mapped[uuid.UUID | None] = mapped_column(
-        PG_UUID(as_uuid=True),
-        ForeignKey("consultations.id", ondelete="SET NULL"),
     )
     source_ref_name: Mapped[str] = mapped_column(String(128), nullable=False)
     target_ref_name: Mapped[str] = mapped_column(String(128), nullable=False)
@@ -502,7 +503,6 @@ class Proposal(Base):
         ),
         Index("ix_proposals_patient_status", "patient_id", "status"),
         Index("ix_proposals_proposer", "proposer_subject_id", "status"),
-        Index("ix_proposals_consultation", "consultation_id"),
     )
 
 

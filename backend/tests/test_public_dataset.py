@@ -172,7 +172,15 @@ def test_import_creates_platform_owned_public_study(tmp_path: Path, sync_session
             select(Patient).where(Patient.id == result.patient_id)
         ).scalar_one()
         assert patient.managed_by_subject_id == platform_owner_subject_id()
-        assert patient.external_id == f"{collection}/{subject_id}"
+        # v3: the upstream provenance lives in the external_identifiers
+        # JSONB array (synthetic per-collection system), not in a column.
+        assert patient.external_identifiers == [
+            {
+                "system": f"urn:tcia:collection:{collection}",
+                "type": "opendata-subject",
+                "value": subject_id,
+            }
+        ]
         assert result.patient_created is True
 
         # Study carries provenance + license + public flag.

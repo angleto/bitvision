@@ -436,8 +436,16 @@ class TestCrossPatientLeak:
             # Probe 2: /at on patient A with a non-existent commit.
             r_bogus = await client.get(f"/api/patients/{pid_a}/at/{bogus_commit.hex()}")
             assert r_real.status_code == r_bogus.status_code == 404
-            # Same detail: "commit not found for this patient".
-            assert r_real.json() == r_bogus.json()
+            # Same detail: "commit not found for this patient". The RFC
+            # 7807 problem-details middleware adds an ``instance`` field
+            # equal to the REQUESTED path — it necessarily differs between
+            # the two probes and carries zero information the attacker did
+            # not already supply, so it is excluded from the comparison.
+            body_real = r_real.json()
+            body_bogus = r_bogus.json()
+            body_real.pop("instance", None)
+            body_bogus.pop("instance", None)
+            assert body_real == body_bogus
         finally:
             await client.aclose()
             app.dependency_overrides.clear()
@@ -763,12 +771,13 @@ class TestPublishIsolation:
                 {"p": pid_a},
             )
         ).scalar_one()
-        # Capture mutable demographics for comparison.
+        # Capture mutable demographics for comparison (identifiers live
+        # in the external_identifiers JSONB since v3).
         snap_before = (
             src_before.display_name,
             src_before.email,
             src_before.phone,
-            src_before.tax_id,
+            list(src_before.external_identifiers or []),
             src_before.notes,
         )
 
@@ -786,7 +795,7 @@ class TestPublishIsolation:
             src_after.display_name,
             src_after.email,
             src_after.phone,
-            src_after.tax_id,
+            list(src_after.external_identifiers or []),
             src_after.notes,
         )
         assert snap_after == snap_before
