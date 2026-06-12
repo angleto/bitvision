@@ -15,6 +15,10 @@ Commands:
   default-for-kind. Safe to re-run; idempotent.
 * ``deprecate`` — retire a model with a mandatory ``--reason``. The
   row is kept so historical embeddings still resolve.
+* ``set-routing`` — write a TEXT model's routing (arq task + pgvector
+  store table[s]) into its ``model_metadata``, the fact the query path,
+  the worker dual-write loop, the backfill CLI and the admin coverage
+  API all resolve (migration 0023 seeded the shipped models).
 
 Sessions are borrowed from the shared :func:`bvphoenix.db.session.get_session`
 context manager with ``SERVICE_SUBJECT`` so the CLI bypasses RLS the
@@ -197,6 +201,53 @@ def deprecate(id: str, reason: str) -> None:
 
     async def _action(db: AsyncSession) -> EmbeddingModel:
         return await svc.deprecate_model(db, id, reason=reason)
+
+    row = _run_with_session(_action)
+    click.echo(json.dumps(_format_row(row), indent=2))
+
+
+@cli.command("set-routing")
+@click.argument("id")
+@click.option("--arq-task", required=True, help="Arq task that produces the vectors.")
+@click.option("--store-table", required=True, help="pgvector store table for the dense vectors.")
+@click.option(
+    "--sparse-store-table",
+    default=None,
+    help="Optional auxiliary sparsevec store (BGE-M3-style lexical arm).",
+)
+@click.option(
+    "--colbert-store-table",
+    default=None,
+    help="Optional auxiliary ColBERT token-vector store (late-interaction rerank).",
+)
+def set_routing(
+    id: str,
+    arq_task: str,
+    store_table: str,
+    sparse_store_table: str | None,
+    colbert_store_table: str | None,
+) -> None:
+    """Write a text model's routing into its registry row.
+
+    Values are validated as plain lowercase identifiers (they are
+    interpolated into SQL by the consumers); the command refuses
+    non-text rows.
+    """
+    _require_uuid(id)
+
+    async def _action(db: AsyncSession) -> EmbeddingModel:
+        try:
+            return await svc.set_text_routing(
+                db,
+                id,
+                arq_task=arq_task,
+                store_table=store_table,
+                sparse_store_table=sparse_store_table,
+                colbert_store_table=colbert_store_table,
+            )
+        except ValueError as exc:
+            click.echo(str(exc), err=True)
+            sys.exit(2)
 
     row = _run_with_session(_action)
     click.echo(json.dumps(_format_row(row), indent=2))

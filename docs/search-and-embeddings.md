@@ -345,8 +345,14 @@ curl -X POST -H "Authorization: Bearer $TOKEN" \
   http://localhost:8000/api/series/$SERIES_ID/embed
 ```
 
-Mass-embed endpoint ***(planned E6)***:
-`POST /api/embeddings/embed-missing`, `POST /api/embeddings/retry-failed`.
+Mass-embed endpoints (admin, or agent with the `admin:embeddings` scope;
+all honour `?dry_run=true`):
+`POST /api/embeddings/embed-missing`, `POST /api/embeddings/retry-failed`,
+and for text chunks `POST /api/embeddings/text-chunks/embed-missing`
+(per-model routing from the `embedding_models` registry row, migration
+0023; `only_missing=false` re-embeds everything). CLI equivalents:
+`bvphoenix-backfill embed` / `embed-text`; MCP equivalents:
+`embed_missing_targets`, `retry_failed_embeddings`, `reembed_text_chunks`.
 
 ### "Search is slow"
 - Check statement timeout: `/api/search` sets

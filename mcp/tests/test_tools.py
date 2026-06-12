@@ -783,6 +783,14 @@ EXPECTED_TOOL_NAMES = {
     "start_telegram_link",
     "check_telegram_link",
     "unlink_telegram",
+    # --- Embeddings admin (MCP-GUI parity for /admin/embeddings;
+    # admin:embeddings scope, owner must be a platform admin). Backend
+    # api/embeddings_admin.py.
+    "get_embedding_coverage",
+    "get_text_embedding_coverage",
+    "retry_failed_embeddings",
+    "embed_missing_targets",
+    "reembed_text_chunks",
 }
 
 

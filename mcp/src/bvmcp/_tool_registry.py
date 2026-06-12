@@ -32,6 +32,7 @@ from bvmcp.tools import document_reads as document_reads_tools
 from bvmcp.tools import document_writes as document_writes_tools
 from bvmcp.tools import documents as documents_tools
 from bvmcp.tools import documents_upload as documents_upload_tools
+from bvmcp.tools import embeddings_admin as embeddings_admin_tools
 from bvmcp.tools import entities as entities_tools
 from bvmcp.tools import external_identifiers as external_identifiers_tools
 from bvmcp.tools import findings as findings_tools
@@ -93,6 +94,7 @@ TOOL_MODULES = (
     care_phases_tools,
     qna_tools,
     training_tools,
+    embeddings_admin_tools,
 )
 
 

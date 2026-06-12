@@ -365,13 +365,25 @@ in favour of `ClinicalNote` for prose and `Marker` for geometry.
 Ops endpoints to monitor and backfill the embedding pipeline. Source:
 `backend/src/bvphoenix/api/embeddings_admin.py`.
 
+Auth: human platform admins, or agent tokens holding the sensitive
+`admin:embeddings` scope whose OWNER is a platform admin
+(`require_admin_or_scoped_agent`). The write endpoints accept
+`?dry_run=true` (candidate count, no enqueue, no audit) and audit-log
+real enqueues. The text-chunk routing (arq task + store table) comes
+from the `embedding_models` registry row (migration 0023).
+
 | Method | Path | Auth | Notes |
 |--------|------|------|-------|
-| `GET` | `/api/embeddings/coverage` | required (admin) | Response: `{total_series, embedded, pending, failed, coverage_pct, per_model: {model_id: {embedded, coverage_pct}}}`. |
-| `POST` | `/api/embeddings/retry-failed` | required (admin) | Re-enqueue failed embedding jobs. Params: `model_id` optional. Response: `{enqueued: n}`. |
-| `POST` | `/api/embeddings/embed-missing` | required (admin) | Enqueue `embed_series` for every series without an embedding for the given model. Params: `model_id` optional, `limit` (1-10000). Response: `{enqueued: n}`. |
+| `GET` | `/api/embeddings/coverage` | admin or `admin:embeddings` | Per-(model, target_kind) rows: `{total, done, failed, pending, percentage, last_failures}`. |
+| `POST` | `/api/embeddings/retry-failed` | admin or `admin:embeddings` | Re-enqueue targets with an error and no embedding. Params: `model_id`, `target_kind`, `dry_run`. Response: `EnqueueResult` (`status, model_id, target_kind, enqueued, candidates`). |
+| `POST` | `/api/embeddings/embed-missing` | admin or `admin:embeddings` | Enqueue the kind's task for every target without an embedding for the model. Params: `model_id`, `target_kind`, `dry_run`. Response: `EnqueueResult`. |
+| `GET` | `/api/embeddings/text-chunks/coverage` | admin or `admin:embeddings` | One text model's chunk-vector coverage + per-source-kind breakdown. Param: `model` (defaults to the registry text default). |
+| `POST` | `/api/embeddings/text-chunks/embed-missing` | admin or `admin:embeddings` | Enqueue the model's embed task per chunk. Params: `model`, `only_missing` (false = full re-embed), `dry_run`. Response: `EnqueueResult`. |
 
 Already-landed per-series trigger: `POST /api/series/{id}/embed` (§3).
+MCP parity: `get_embedding_coverage`, `get_text_embedding_coverage`,
+`retry_failed_embeddings`, `embed_missing_targets`, `reembed_text_chunks`
+(all under the `admin:embeddings` scope).
 
 See [`search-and-embeddings.md`](./search-and-embeddings.md) §3-§8
 for the model registry, HNSW tuning, and troubleshooting.
