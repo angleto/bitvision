@@ -791,6 +791,17 @@ EXPECTED_TOOL_NAMES = {
     "retry_failed_embeddings",
     "embed_missing_targets",
     "reembed_text_chunks",
+    # --- Patient inbound inbox (fbbf5270 §12; inbox:read / inbox:manage /
+    # inbox:review scopes). Backend api/inbox.py.
+    "list_patient_inbox_addresses",
+    "create_inbox_address",
+    "set_inbox_address_label",
+    "revoke_inbox_address",
+    "configure_trusted_senders",
+    "list_inbox_items",
+    "get_inbox_item",
+    "accept_inbox_item",
+    "reject_inbox_item",
 }
 
 

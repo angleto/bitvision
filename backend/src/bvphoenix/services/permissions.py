@@ -92,6 +92,12 @@ DOWNLOAD_DERIVATIVE = "download:derivative"
 SHARED_DOWNLOAD = "download:derivative"
 SHARE = "share"
 SHARE_DELEGATE = "share:delegate"
+# Patient inbound inbox (api/inbox.py): manage the capability addresses
+# and accept/reject staged items into the fascicolo. Owner-level by
+# construction (member of ALL_PERMS, never of PUBLIC_READ_PERMS); the
+# inbox endpoints additionally refuse share-link sessions outright —
+# a delegated viewer must not triage what enters the record.
+REVIEW_INBOX = "review:inbox"
 PUBLISH = "publish"
 LIST_FOR_SALE = "list:for_sale"
 TRANSFER_OWNERSHIP = "transfer:ownership"
@@ -111,6 +117,7 @@ ALL_PERMS: frozenset[str] = frozenset(
         DOWNLOAD_DERIVATIVE,
         SHARE,
         SHARE_DELEGATE,
+        REVIEW_INBOX,
         PUBLISH,
         LIST_FOR_SALE,
         TRANSFER_OWNERSHIP,

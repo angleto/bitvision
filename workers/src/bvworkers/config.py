@@ -38,6 +38,10 @@ class Settings(BaseSettings):
     # Mirrors backend ``bvphoenix.config.review_profile_modules``.
     review_profile_modules: str = Field(default="")
 
+    # Patient inbound inbox — mirrors the backend settings of the same
+    # name (the maintenance sweep enforces retention worker-side).
+    inbound_email_raw_retention_days: int = Field(default=90, ge=1)
+
     # Auto-tag stage-2 toggle. Off by default so the worker runs purely
     # on the deterministic lexicon; flip BVP_AUTOTAG_USE_LLM=1 to call
     # the configured LLM provider on long-form text.

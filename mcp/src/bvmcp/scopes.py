@@ -91,6 +91,27 @@ SCOPE_CATALOG: tuple[ScopeDef, ...] = (
     ),
     ScopeDef("documents:delete", "Soft-delete + restore documents"),
     ScopeDef("documents:merge", "Merge / split document aliases"),
+    # --- Patient inbound inbox (fbbf5270) --------------------------------------
+    ScopeDef(
+        "inbox:read",
+        "List + read the patient inbox review queue (staged items, manifests, auto-check verdicts)",
+    ),
+    ScopeDef(
+        "inbox:manage",
+        "Mint / relabel / revoke inbound-email capability addresses and "
+        "configure trusted senders. Sensitive: an address is a bearer "
+        "capability to deliver into the patient's review queue, and a "
+        "trusted sender bypasses human review on a clean pass.",
+        sensitive=True,
+    ),
+    ScopeDef(
+        "inbox:review",
+        "Accept / reject staged inbox items. Accepting writes into the "
+        "fascicolo (documents + studies); the review profile is "
+        "agent_capable by design, with agent provenance stamped on every "
+        "transition.",
+        sensitive=True,
+    ),
     # --- Report contents (Expression) -----------------------------------------
     ScopeDef("reports:read", "Read report_contents, list per event, citations"),
     ScopeDef(
@@ -487,6 +508,16 @@ TOOL_SCOPE: dict[str, str] = {
     "retry_failed_embeddings": "admin:embeddings",
     "embed_missing_targets": "admin:embeddings",
     "reembed_text_chunks": "admin:embeddings",
+    # --- Patient inbound inbox (fbbf5270 §12) ------------------------
+    "list_inbox_items": "inbox:read",
+    "get_inbox_item": "inbox:read",
+    "list_patient_inbox_addresses": "inbox:manage",
+    "create_inbox_address": "inbox:manage",
+    "set_inbox_address_label": "inbox:manage",
+    "revoke_inbox_address": "inbox:manage",
+    "configure_trusted_senders": "inbox:manage",
+    "accept_inbox_item": "inbox:review",
+    "reject_inbox_item": "inbox:review",
 }
 
 

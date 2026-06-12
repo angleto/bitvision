@@ -63,6 +63,13 @@ from bvphoenix.db.models.folders import Folder, FolderItem
 from bvphoenix.db.models.gdpr import Consent, DataErasureRequest
 from bvphoenix.db.models.grants import Grant
 from bvphoenix.db.models.idempotency import IdempotencyRecord
+from bvphoenix.db.models.inbox import (
+    INBOX_SOURCE_CHANNELS,
+    InboundEmail,
+    InboxItem,
+    InboxSenderAllowlist,
+    PatientInboxAddress,
+)
 from bvphoenix.db.models.jobs import Job
 from bvphoenix.db.models.llm_rate_cards import (
     PROVIDERS as LLM_PROVIDERS,
@@ -191,6 +198,7 @@ __all__ = [
     "CONTENT_DOCUMENT_LINK_ROLES",
     "DEFAULT_CHUNKER_VERSION",
     "EMAIL_DELIVERY_STATES",
+    "INBOX_SOURCE_CHANNELS",
     "LLM_PROVIDERS",
     "LLM_TIER_HINTS",
     "NOTIFICATION_CHANNELS",
@@ -263,6 +271,9 @@ __all__ = [
     "Group",
     "IdempotencyRecord",
     "ImagingStudy",
+    "InboundEmail",
+    "InboxItem",
+    "InboxSenderAllowlist",
     "Instance",
     "Job",
     "LLMRateCard",
@@ -280,6 +291,7 @@ __all__ = [
     "PathologySlide",
     "Patient",
     "PatientContact",
+    "PatientInboxAddress",
     "Proposal",
     "ProvenanceEvent",
     "Ref",

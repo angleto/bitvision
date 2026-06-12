@@ -87,6 +87,36 @@ class Settings(BaseSettings):
     # deployments where no consumer has landed yet.
     review_profile_modules: str = Field(default="")
 
+    # ---- Patient inbound email inbox (services/inbox) ------------------
+    # Master switch: when off, the internal inbound endpoints answer 503
+    # and address provisioning is refused — the MTA deployment is
+    # pointless without it, and a half-configured deployment must fail
+    # closed, not accept mail it cannot store.
+    inbound_email_enabled: bool = Field(default=False)
+    # The address domain (the MX host's mail domain, NOT the MX host
+    # itself): addresses read ``{code}+{tag}@{domain}``.
+    inbound_email_domain: str = Field(default="inbox.bitvision.xeno.garden")
+    inbound_email_tag: str = Field(default="patient")
+    # Entropy of the capability code. 80 bits ⇒ 16 Crockford base32
+    # chars; raising it only lengthens new addresses.
+    inbound_email_code_bits: int = Field(default=80, ge=40, le=160)
+    # Raw ``.eml`` retention; the worker sweep purges older blobs and
+    # blanks the subject on the row past this window.
+    inbound_email_raw_retention_days: int = Field(default=90, ge=1)
+    # Hard cap on one raw message (the MTA advertises it as SMTP SIZE).
+    # 50 MiB ≈ the ceiling of mainstream providers; bigger payloads
+    # belong to the upload channel.
+    inbound_email_max_raw_bytes: int = Field(default=50 * 1024 * 1024)
+    # Shared secret the MTA adapter presents on the internal inbound
+    # endpoints (``X-Inbound-Key``). Deliberately distinct from
+    # ``internal_api_key``: the MTA terminates port 25 on the open
+    # Internet — least privilege says its credential must not open the
+    # mcp-resolve RPC too. Empty ⇒ endpoints disabled (503).
+    inbound_internal_secret: str = Field(default="")
+    # Per-address ingestion cap (messages/hour) — the anti-enumeration
+    # backstop next to the MTA's own connection limits.
+    inbound_email_rate_per_hour: int = Field(default=30, ge=1)
+
     s3_endpoint_url: str = Field(default="http://localhost:9000")
     # Public-facing endpoint used when signing URLs handed to the
     # browser. When empty we reuse ``s3_endpoint_url`` — correct only if
