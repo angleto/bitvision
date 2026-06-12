@@ -153,6 +153,14 @@ jobs:
     runs-on: ubuntu-24.04-arm
     needs: [backend-test, search-eval, frontend-build]
     if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    env:
+      # Push credential for rg.fr-par.scw.cloud (IAM application
+      # ``bvphoenix-registry-push``, ContainerRegistryFullAccess scoped
+      # to project bitvision). Declared at job level so the mirror
+      # step's ``if:`` can test for its presence — repos without the
+      # secret (forks, pre-migration checkouts) skip the mirror and
+      # still publish to GHCR.
+      SCW_REGISTRY_SECRET_KEY: ${{ secrets.SCW_REGISTRY_SECRET_KEY }}
     strategy:
       # Don't cancel sibling builds on first failure: the four images
       # are independent (a registry-side permissions glitch on one of
@@ -217,3 +225,19 @@ jobs:
             VERSION=${{ steps.buildmeta.outputs.version }}
             GIT_SHA=${{ github.sha }}
             BUILD_DATE=${{ steps.buildmeta.outputs.build_date }}
+
+      # Mirror the release image to the Scaleway Container Registry —
+      # the production cluster pulls from rg.fr-par.scw.cloud/bvphoenix
+      # (same cloud: the NAT'd pool egress to GHCR/Azure CDN times out
+      # on multi-GB blobs, the recurring ImagePullBackOff at every
+      # release). skopeo ships preinstalled on the GitHub runners; the
+      # digest-level copy reuses the blobs just pushed to GHCR.
+      - name: Mirror release image to Scaleway registry
+        if: env.SCW_REGISTRY_SECRET_KEY != ''
+        run: |
+          ver="${{ steps.buildmeta.outputs.version }}"
+          skopeo copy --all --retry-times 5 \
+            --src-creds "${{ github.actor }}:${{ secrets.GITHUB_TOKEN }}" \
+            --dest-creds "nologin:${SCW_REGISTRY_SECRET_KEY}" \
+            "docker://ghcr.io/${{ env.IMAGE_PREFIX }}/${{ matrix.service }}:${ver}" \
+            "docker://rg.fr-par.scw.cloud/bvphoenix/${{ matrix.service }}:${ver}"

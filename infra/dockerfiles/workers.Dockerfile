@@ -48,24 +48,16 @@ RUN --mount=type=cache,target=/root/.cache/uv uv sync --extra ai --extra seg --n
 RUN --mount=type=cache,target=/root/.cache/uv \
     uv pip install --python /app/.venv/bin/python --no-deps "FlagEmbedding==1.4.0"
 
-# Pre-fetch HF checkpoint, same reasoning as the backend image.
-ENV HF_HOME=/app/.cache/huggingface
+# Model weights are NOT baked into the image (task d11a0b0f fix 2).
+# They live in s3://bvphoenix-models-prod/hf-cache/v1/ and the
+# ``model-sync`` initContainer in workers-deployment.yaml syncs them
+# into the HF_HOME emptyDir at pod start (intra-cloud, fast). This
+# cuts ~2.8 GB off the image and removes the HuggingFace download —
+# the recurring 429 build flake — from the CI critical path entirely.
+# Import-only smoke test: a missed --no-deps transitive dep must stay
+# a BUILD failure, not a prod 500 (no weights are downloaded here).
 RUN --mount=type=cache,target=/root/.cache/uv \
-    /app/.venv/bin/python -c "from sentence_transformers import SentenceTransformer; SentenceTransformer('paraphrase-multilingual-MiniLM-L12-v2')"
-# Pre-bake BGE-M3 (BAAI/bge-m3, 1024-d dense via sentence-transformers,
-# ~2.3 GB) so workers never download it at runtime — runtime HF fetch is
-# slow/rate-limited and times out on CPU ARM (proven with BiomedCLIP).
-# Cached in HF_HOME, copied into the runtime image below.
-RUN --mount=type=cache,target=/root/.cache/uv \
-    /app/.venv/bin/python -c "from sentence_transformers import SentenceTransformer; SentenceTransformer('BAAI/bge-m3')"
-# Build-time smoke test of the FULL FlagEmbedding read-out path (construct +
-# encode dense/sparse/colbert). Turns any missed --no-deps transitive dep
-# into a BUILD failure, not a prod 500. The dense transformer loads from the
-# ST-baked cache above; FlagEmbedding's sparse_linear/colbert_linear heads are
-# fetched from HF here (CI egress, same as the ST pre-bakes) into HF_HOME, so
-# they are baked into the runtime image — no runtime HF fetch.
-RUN --mount=type=cache,target=/root/.cache/uv \
-    /app/.venv/bin/python -c "from FlagEmbedding import BGEM3FlagModel; m=BGEM3FlagModel('BAAI/bge-m3', use_fp16=False); m.encode(['ciao mondo'], return_dense=True, return_sparse=True, return_colbert_vecs=True)"
+    /app/.venv/bin/python -c "import FlagEmbedding, open_clip, sentence_transformers"
 
 # ---
 
