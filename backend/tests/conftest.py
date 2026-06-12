@@ -89,6 +89,32 @@ def _have_db() -> bool:
 skip_if_no_db = pytest.mark.skipif(not _have_db(), reason="no Postgres available")
 
 
+def _have_s3() -> bool:
+    """Cheap probe for the S3/MinIO endpoint, twin of :func:`_have_db`.
+
+    True iff something is listening on the configured
+    ``BVP_S3_ENDPOINT_URL`` (default ``http://localhost:9000``, the dev
+    docker-compose MinIO). Local runs typically have Postgres but no
+    MinIO; the S3 round-trip tests skip instead of failing with
+    ``ConnectionRefusedError`` deep inside botocore.
+    """
+    import socket
+    from urllib.parse import urlparse
+
+    url = os.getenv("BVP_S3_ENDPOINT_URL") or "http://localhost:9000"
+    parsed = urlparse(url)
+    host = parsed.hostname or "localhost"
+    port = parsed.port or (443 if parsed.scheme == "https" else 80)
+    try:
+        with socket.create_connection((host, port), timeout=0.2):
+            return True
+    except OSError:
+        return False
+
+
+skip_if_no_s3 = pytest.mark.skipif(not _have_s3(), reason="no S3/MinIO endpoint available")
+
+
 @pytest_asyncio.fixture
 async def db_session() -> AsyncIterator[AsyncSession]:
     """Yields a session bound to the dev Postgres. Rolls back at the end

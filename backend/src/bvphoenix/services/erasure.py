@@ -182,7 +182,12 @@ async def execute_erasure(
                 email=None,
                 phone=None,
                 address=None,
-                tax_id=None,
+                # v3: the tax_id column became an entry of the
+                # external_identifiers JSONB array (codice fiscale, MRNs,
+                # DICOM PatientIDs) — all direct identifiers, so the whole
+                # array is cleared. ``cf_normalized`` is GENERATED from it
+                # and follows automatically.
+                external_identifiers=[],
                 notes=None,
             )
         )

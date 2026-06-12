@@ -190,23 +190,11 @@ async def _open_consultation_with_proposal(
     owner_sid: uuid.UUID,
     proposer_sid: uuid.UUID,
 ) -> tuple[uuid.UUID, uuid.UUID]:
-    """Create a Consultation row + branch + open proposal. Returns
-    (consultation_id, proposal_id)."""
+    """Create a consultation branch + open proposal. Returns
+    (consultation_id, proposal_id). No consultations row since v3:
+    the branch ref is the consultation's record."""
     await _seed_main(db, pid, owner_sid)
     consultation_id = uuid.uuid4()
-    await db.execute(
-        text(
-            "INSERT INTO consultations "
-            "(id, patient_id, author_subject_id, author_kind, status, title) "
-            "VALUES (:id, :pid, :ps, 'human', 'submitted', :ti)"
-        ),
-        {
-            "id": consultation_id,
-            "pid": pid,
-            "ps": proposer_sid,
-            "ti": "consult test",
-        },
-    )
     # Open the consultation branch from main and add a clinical_note on it.
     from bvphoenix.services.versioning import open_consultation_branch
 
@@ -554,6 +542,51 @@ class TestRefLockSerialisesConcurrentCommits:
 
 
 class TestAgentTokenBoundaries:
+    async def _make_token_row(
+        self,
+        db: AsyncSession,
+        owner: User,
+        *,
+        expires_at: datetime,
+        revoked_at: datetime | None = None,
+    ) -> str:
+        """Persist an AgentAssistant + AgentToken pair (v3 schema: the
+        token hangs off the assistant, the owner lives on the assistant)
+        and return the raw JWT. The JWT itself is minted valid for 1h so
+        signature decoding succeeds and the DB-row checks are what get
+        exercised."""
+        from bvphoenix.auth.tokens import issue_agent_token
+        from bvphoenix.db.models import AgentAssistant
+
+        token_id = uuid.uuid4()
+        raw, token_hash = issue_agent_token(
+            agent_token_id=token_id,
+            owner_subject_id=owner.subject_id,
+            scope=["patient:read"],
+            ttl_seconds=3600,
+        )
+        assistant = AgentAssistant(
+            id=uuid.uuid4(),
+            owner_subject_id=owner.subject_id,
+            label="boundary-test",
+            permissions=["patient:read"],
+            client_id=f"test-{uuid.uuid4().hex[:12]}",
+        )
+        db.add(assistant)
+        await db.flush()
+        db.add(
+            AgentToken(
+                id=token_id,
+                assistant_id=assistant.id,
+                token_hash=token_hash,
+                token_tail=raw[-8:],
+                expires_at=expires_at,
+                revoked_at=revoked_at,
+            )
+        )
+        await db.commit()
+        return raw
+
     @pytest.mark.asyncio
     async def test_expired_agent_token_is_rejected_by_optional_user(self, authz_world) -> None:
         """An ``AgentToken`` with ``expires_at <= now`` must fail auth
@@ -564,27 +597,11 @@ class TestAgentTokenBoundaries:
         from fastapi.security import HTTPAuthorizationCredentials
 
         from bvphoenix.auth.deps import _resolve_credential
-        from bvphoenix.auth.tokens import issue_agent_token
 
         db, owner, _, _ = authz_world
-        token_id = uuid.uuid4()
-        raw, token_hash = issue_agent_token(
-            agent_token_id=token_id,
-            owner_subject_id=owner.subject_id,
-            scope=["patient:read"],
-            ttl_seconds=3600,  # JWT valid for 1h so decode succeeds
+        raw = await self._make_token_row(
+            db, owner, expires_at=datetime.now(UTC) - timedelta(hours=1)
         )
-        # DB row expires_at in the past: this is the check we want to verify.
-        token_row = AgentToken(
-            id=token_id,
-            owner_subject_id=owner.subject_id,
-            label="expired-test",
-            token_hash=token_hash,
-            permissions=["patient:read"],
-            expires_at=datetime.now(UTC) - timedelta(hours=1),
-        )
-        db.add(token_row)
-        await db.commit()
 
         class _StubState:
             pass
@@ -604,27 +621,14 @@ class TestAgentTokenBoundaries:
         from fastapi.security import HTTPAuthorizationCredentials
 
         from bvphoenix.auth.deps import _resolve_credential
-        from bvphoenix.auth.tokens import issue_agent_token
 
         db, owner, _, _ = authz_world
-        token_id = uuid.uuid4()
-        raw, token_hash = issue_agent_token(
-            agent_token_id=token_id,
-            owner_subject_id=owner.subject_id,
-            scope=["patient:read"],
-            ttl_seconds=3600,
-        )
-        token_row = AgentToken(
-            id=token_id,
-            owner_subject_id=owner.subject_id,
-            label="revoked-test",
-            token_hash=token_hash,
-            permissions=["patient:read"],
+        raw = await self._make_token_row(
+            db,
+            owner,
             expires_at=datetime.now(UTC) + timedelta(hours=1),
             revoked_at=datetime.now(UTC),
         )
-        db.add(token_row)
-        await db.commit()
 
         class _StubState:
             pass
@@ -640,28 +644,18 @@ class TestAgentTokenBoundaries:
     @pytest.mark.asyncio
     async def test_agent_token_scoped_to_other_patient_blocked(self, authz_world) -> None:
         """``enforce_agent_patient_scope`` must 403 when the request
-        targets a patient the agent token was not minted for."""
+        targets a patient outside the assistant's granted set (cached on
+        ``request.state.agent_patient_ids`` by the auth resolver)."""
         from fastapi import HTTPException
 
         from bvphoenix.auth.deps import enforce_agent_patient_scope
 
-        _, owner, _, patient = authz_world
-        # Create a token scoped to a DIFFERENT patient (in-memory only;
-        # we don't need to persist it for this synchronous check).
+        _, _, _, patient = authz_world
         other_pid = uuid.uuid4()
-        token_row = AgentToken(
-            id=uuid.uuid4(),
-            owner_subject_id=owner.subject_id,
-            label="cross-patient-test",
-            token_hash="0" * 64,  # placeholder valid hex string
-            permissions=["patient:read"],
-            patient_id=other_pid,
-            expires_at=datetime.now(UTC) + timedelta(hours=1),
-        )
 
         class _StubState:
             is_agent = True
-            agent_token = token_row
+            agent_patient_ids = {other_pid}
 
         class _StubRequest:
             state = _StubState()

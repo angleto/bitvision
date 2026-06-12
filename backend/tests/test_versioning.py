@@ -774,25 +774,16 @@ class TestConsultationAsFork:
         await db.flush()
         await db.commit()
 
-        # Stub a consultation row directly (we are not going through the
-        # FastAPI endpoint here, just exercising the versioning service).
-        from bvphoenix.db.models import Consultation
-
-        consultation = Consultation(
-            patient_id=pid,
-            author_subject_id=reader_sid,
-            author_kind="human",
-            status="draft",
-            title="Consulto pneumologico",
-            summary_md="Quesito sull'opacità",
-        )
-        db.add(consultation)
-        await db.flush()
+        # v3 dropped the Consultation table (folded into ReportContent):
+        # the consultation's identity at the versioning layer is just the
+        # ``consultation/<id>`` branch ref, so a fresh uuid is all the
+        # service needs.
+        consultation_id = uuid.uuid4()
 
         await open_consultation_branch(
             db,
             patient_id=pid,
-            consultation_id=consultation.id,
+            consultation_id=consultation_id,
             actor=ActorContext(subject_id=reader_sid),
         )
         await db.commit()
@@ -802,7 +793,7 @@ class TestConsultationAsFork:
         await commit_change(
             db,
             patient_id=pid,
-            branch_ref=f"consultation/{consultation.id}",
+            branch_ref=f"consultation/{consultation_id}",
             actor=ActorContext(subject_id=reader_sid),
             message="[clinical-notes] add note during consult",
             changes=[
@@ -842,9 +833,9 @@ class TestConsultationAsFork:
         proposal_id = await submit_consultation_proposal(
             db,
             patient_id=pid,
-            consultation_id=consultation.id,
+            consultation_id=consultation_id,
             proposer_subject_id=reader_sid,
-            title=consultation.title,
+            title="Consulto pneumologico",
         )
         await db.commit()
 
@@ -873,15 +864,26 @@ class TestConsultationAsFork:
         assert prop[1] == new_main
         assert prop[2] == "approve"
 
-        # Consultation moved to 'reviewed' (signing as 'signed' is a
-        # separate physician-credential check the merge does not assume).
-        cons_status = (
+        # The reviewed branch is frozen: the merge locks the source ref so
+        # no further commits can land on it (the v3+ form of the old
+        # consultations.status='reviewed' write freeze; signing as
+        # 'signed' is a separate physician-credential flow on the
+        # canonical_synthesis ReportContent).
+        src_locked = (
             await db.execute(
-                text("SELECT status FROM consultations WHERE id = :c"),
-                {"c": consultation.id},
+                text("SELECT is_locked FROM refs WHERE patient_id = :p AND ref_name = :r"),
+                {"p": pid, "r": f"consultation/{consultation_id}"},
             )
         ).scalar_one()
-        assert cons_status == "reviewed"
+        assert src_locked is True
+        with pytest.raises(PermissionError, match="locked"):
+            await resolve_branch_for_write(
+                db,
+                patient_id=pid,
+                user_subject_id=reader_sid,
+                consultation_id=consultation_id,
+                is_owner=False,
+            )
 
         # ref_log records the merge event.
         merge_log = (
@@ -900,10 +902,8 @@ class TestConsultationAsFork:
 
         # Cleanup. Order matters: proposals.proposer_subject_id has
         # ON DELETE RESTRICT, so the proposal must go first; then the
-        # consultation (cascade-deletes ref via patient_id cascade only,
-        # but we explicitly clear it); then the subject.
+        # subject.
         await db.execute(text("DELETE FROM proposals WHERE patient_id = :p"), {"p": pid})
-        await db.execute(text("DELETE FROM consultations WHERE id = :c"), {"c": consultation.id})
         await db.execute(text("DELETE FROM subjects WHERE id = :s"), {"s": reader_sid})
         await db.commit()
 
@@ -1359,7 +1359,12 @@ class TestPublishToOpenData:
         await db.execute(
             text(
                 "UPDATE patients SET display_name='Mario Bianchi', "
-                "  birth_date='1970-05-12', tax_id='BNCMRA70E12H501Z', "
+                "  birth_date='1970-05-12', "
+                # v3: the codice fiscale lives in the external_identifiers
+                # JSONB array, not in a tax_id column.
+                '  external_identifiers=\'[{"system": '
+                '"urn:oid:2.16.840.1.113883.2.9.4.3.2", '
+                '"value": "BNCMRA70E12H501Z", "type": "fiscal-code"}]\'::jsonb, '
                 "  phone='+39 333 1234567', email='mario@example.com', "
                 "  address='Via Roma 12, 00100 Roma', "
                 "  notes='Paziente seguito da MMG Dr. Verdi' "
@@ -1406,7 +1411,7 @@ class TestPublishToOpenData:
             await db.execute(
                 text(
                     "SELECT display_name, managed_by_subject_id, birth_date, "
-                    "  tax_id, phone, email, address "
+                    "  external_identifiers, phone, email, address "
                     "FROM patients WHERE id = :p"
                 ),
                 {"p": new_pid},
@@ -1415,7 +1420,7 @@ class TestPublishToOpenData:
         assert new_patient[0] == "OpenData Test 001"
         assert new_patient[1] == platform_owner_subject_id()
         assert new_patient[2] == date(1970, 1, 1)  # year-only
-        assert new_patient[3] is None  # tax_id stripped
+        assert new_patient[3] == []  # identifiers (CF, MRN, ...) never cloned
         assert new_patient[4] is None  # phone stripped
         assert new_patient[5] is None  # email stripped
         assert new_patient[6] is None  # address stripped
@@ -1465,12 +1470,14 @@ class TestPublishToOpenData:
         # 4. Original (private) patient is untouched.
         original = (
             await db.execute(
-                text("SELECT display_name, tax_id, phone FROM patients WHERE id = :p"),
+                text(
+                    "SELECT display_name, external_identifiers, phone FROM patients WHERE id = :p"
+                ),
                 {"p": pid},
             )
         ).first()
         assert original[0] == "Mario Bianchi"
-        assert original[1] == "BNCMRA70E12H501Z"
+        assert original[1][0]["value"] == "BNCMRA70E12H501Z"
         assert original[2] == "+39 333 1234567"
 
         # 5. Public main has the seed commit + cloned note.

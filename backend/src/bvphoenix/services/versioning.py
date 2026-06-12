@@ -545,12 +545,20 @@ async def resolve_branch_for_write(
     """Pick the branch a write should land on.
 
     Rules:
-      - If a consultation_id is supplied AND the consultation is in a
-        mutable state (``draft``/``submitted``) for the same user, the
-        write goes to that consultation's branch.
+      - If a consultation_id is supplied AND its branch ref is owned by
+        the same user and not locked, the write goes to that branch.
       - Otherwise, owner writes go to ``main`` directly.
       - Non-owners with no active consultation are rejected (raises
         :class:`PermissionError`); they must open a consultation first.
+
+    The gating state lives on the ``refs`` row itself
+    (``owner_subject_id`` + ``is_locked``): v3 folded the Consultation
+    entity into ReportContent and dropped its table, so the branch ref
+    is the only — and authoritative — record of who may write and
+    whether the review closed the branch (merge / reject / withdraw all
+    lock it). Looking the ref up by ``(patient_id, ref_name)`` also
+    makes a cross-patient consultation id indistinguishable from a
+    non-existent one (no existence oracle).
 
     The caller is expected to have already loaded the patient and
     determined ``is_owner``; this function handles the branch policy
@@ -560,23 +568,21 @@ async def resolve_branch_for_write(
         row = (
             await db.execute(
                 text(
-                    "SELECT author_subject_id, status, patient_id FROM consultations WHERE id = :c"
+                    "SELECT owner_subject_id, is_locked FROM refs "
+                    "WHERE patient_id = :p AND ref_name = :r"
                 ),
-                {"c": consultation_id},
+                {"p": patient_id, "r": f"consultation/{consultation_id}"},
             )
         ).first()
         if row is None:
             raise ValueError(f"consultation {consultation_id} not found")
-        cons_author, cons_status, cons_patient = row
-        if cons_patient != patient_id:
-            raise ValueError(
-                f"consultation {consultation_id} does not belong to patient {patient_id}"
-            )
-        if cons_author != user_subject_id:
+        branch_owner, is_locked = row
+        if branch_owner != user_subject_id:
             raise PermissionError("only the consultation author can write on its branch")
-        if cons_status not in ("draft", "submitted"):
+        if is_locked:
             raise PermissionError(
-                f"consultation is in '{cons_status}' state and cannot accept new writes"
+                "consultation branch is locked (reviewed / rejected / withdrawn) "
+                "and cannot accept new writes"
             )
         return f"consultation/{consultation_id}"
 
@@ -665,20 +671,22 @@ async def submit_consultation_proposal(
     )
 
     proposal_id = uuid.uuid4()
+    # No consultation_id column: the linkage to the consultation is the
+    # ``consultation/<id>`` source ref name itself (v3 dropped the
+    # Consultation table; the branch ref is the surviving record).
     await db.execute(
         text(
             "INSERT INTO proposals "
-            "(id, patient_id, consultation_id, source_ref_name, "
+            "(id, patient_id, source_ref_name, "
             " target_ref_name, source_head_commit, target_head_commit, "
             " base_commit, proposer_subject_id, title, description, "
             " status, conflict_count) "
-            "VALUES (:id, :pid, :cid, :src, :tgt, :sh, :th, :bc, :ps, :ti, "
+            "VALUES (:id, :pid, :src, :tgt, :sh, :th, :bc, :ps, :ti, "
             " :de, 'open', :cc)"
         ),
         {
             "id": proposal_id,
             "pid": patient_id,
-            "cid": consultation_id,
             "src": branch_name,
             "tgt": "main",
             "sh": source_head,
@@ -1167,8 +1175,10 @@ async def fast_forward_merge(
     use the three-way merge engine (F12.3).
 
     Updates: refs(main) → source_head, ref_log(merge), proposal.status
-    ('merged'), consultation.status ('reviewed' → 'signed' is left to a
-    separate sign_consultation flow that records the signing physician).
+    ('merged'), and the SOURCE ref is locked so the reviewed branch
+    accepts no further writes (the post-review write freeze used to ride
+    the dropped consultations.status; the ref lock is its v3+ form —
+    new work means a new consultation branch).
 
     Returns the new merge_commit hash (== source_head for fast-forward).
     """
@@ -1177,7 +1187,7 @@ async def fast_forward_merge(
             text(
                 "SELECT patient_id, source_ref_name, target_ref_name, "
                 "       source_head_commit, target_head_commit, "
-                "       base_commit, consultation_id, status "
+                "       base_commit, status "
                 "FROM proposals WHERE id = :p FOR UPDATE"
             ),
             {"p": proposal_id},
@@ -1185,7 +1195,7 @@ async def fast_forward_merge(
     ).first()
     if row is None:
         raise ValueError(f"proposal {proposal_id} not found")
-    patient_id, _src_ref, tgt_ref, src_head, tgt_head, base, cons_id, status_ = row
+    patient_id, src_ref, tgt_ref, src_head, tgt_head, base, status_ = row
     if status_ != "open":
         raise ValueError(f"proposal already in status '{status_}'")
     # Re-read target head WITH a row lock (FOR UPDATE) so a concurrent
@@ -1241,17 +1251,16 @@ async def fast_forward_merge(
             "p": proposal_id,
         },
     )
-    if cons_id is not None:
-        # Move the consultation forward but do not auto-sign: signing
-        # is a separate authority check (licensed physician).
-        await db.execute(
-            text(
-                "UPDATE consultations SET status='reviewed', "
-                "  updated_at=now() WHERE id = :c "
-                "  AND status IN ('submitted','draft')"
-            ),
-            {"c": cons_id},
-        )
+    # Freeze the reviewed branch: resolve_branch_for_write refuses locked
+    # refs, so no commit can land on a consultation after its merge. The
+    # row stays for audit (mirrors the reject / withdraw endpoints).
+    await db.execute(
+        text(
+            "UPDATE refs SET is_locked = true, updated_at = now() "
+            "WHERE patient_id = :pid AND ref_name = :r"
+        ),
+        {"pid": patient_id, "r": src_ref},
+    )
     return src_head
 
 

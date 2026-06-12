@@ -1,10 +1,12 @@
 """Proposals API: pull-request lifecycle for the F12 versioning.
 
-A proposal is the technical record of "this consultation wants to merge
-into main". Lifecycle is bound 1:1 to the wrapping consultation: the
-consultation is what the user sees ("consulto in attesa di review"),
-the proposal is what carries the source/target refs, the precomputed
-conflicts, and the merge commit hash.
+A proposal is the technical record of "this consultation branch wants
+to merge into main". The proposal carries the source/target refs, the
+precomputed conflicts, and the merge commit hash; the consultation
+itself has no table of its own since v3 (D2 folded it into
+ReportContent) — its surviving identity is the ``consultation/<id>``
+source ref, whose ``is_locked`` flag freezes the branch once the
+review closes it (merge / withdraw / reject).
 
 Endpoints:
   - ``GET    /proposals/{id}`` — full detail incl. conflicts.
@@ -16,7 +18,7 @@ Endpoints:
     conflicts are resolved. Fast-forward when possible; three-way
     merge otherwise.
   - ``POST   /proposals/{id}/withdraw`` — drop the proposal without
-    merging. Branch is locked, consultation marked rejected.
+    merging. The source branch is locked.
 
 Permissions:
   - Reading a proposal: the underlying patient must be readable
@@ -145,11 +147,27 @@ def _hex(b: bytes | None) -> str | None:
     return b.hex() if b is not None else None
 
 
+def _consultation_id_from_ref(ref_name: str) -> uuid.UUID | None:
+    """Derive the consultation id from a ``consultation/<uuid>`` ref name.
+
+    There is no ``proposals.consultation_id`` column (the Consultation
+    table was dropped in v3); the source ref name is the linkage. Kept
+    in the API shape so clients can still join proposal ↔ consultation.
+    """
+    prefix = "consultation/"
+    if not ref_name.startswith(prefix):
+        return None
+    try:
+        return uuid.UUID(ref_name[len(prefix) :])
+    except ValueError:
+        return None
+
+
 async def _proposal_or_404(db: AsyncSession, proposal_id: uuid.UUID) -> dict:
     row = (
         await db.execute(
             text(
-                "SELECT id, patient_id, consultation_id, source_ref_name, "
+                "SELECT id, patient_id, source_ref_name, "
                 "  target_ref_name, source_head_commit, target_head_commit, "
                 "  base_commit, proposer_subject_id, title, description, "
                 "  status, conflict_count, merge_commit, "
@@ -165,24 +183,24 @@ async def _proposal_or_404(db: AsyncSession, proposal_id: uuid.UUID) -> dict:
     return {
         "id": row[0],
         "patient_id": row[1],
-        "consultation_id": row[2],
-        "source_ref_name": row[3],
-        "target_ref_name": row[4],
-        "source_head_commit": row[5],
-        "target_head_commit": row[6],
-        "base_commit": row[7],
-        "proposer_subject_id": row[8],
-        "title": row[9],
-        "description": row[10],
-        "status": row[11],
-        "conflict_count": row[12],
-        "merge_commit": row[13],
-        "reviewed_by_subject_id": row[14],
-        "reviewed_at": row[15],
-        "review_decision": row[16],
-        "review_notes": row[17],
-        "created_at": row[18],
-        "closed_at": row[19],
+        "consultation_id": _consultation_id_from_ref(row[2]),
+        "source_ref_name": row[2],
+        "target_ref_name": row[3],
+        "source_head_commit": row[4],
+        "target_head_commit": row[5],
+        "base_commit": row[6],
+        "proposer_subject_id": row[7],
+        "title": row[8],
+        "description": row[9],
+        "status": row[10],
+        "conflict_count": row[11],
+        "merge_commit": row[12],
+        "reviewed_by_subject_id": row[13],
+        "reviewed_at": row[14],
+        "review_decision": row[15],
+        "review_notes": row[16],
+        "created_at": row[17],
+        "closed_at": row[18],
     }
 
 
@@ -501,7 +519,8 @@ async def merge_proposal(
                 detail=f"{len(exc.conflicts)} conflict(s) unresolved",
             ) from exc
 
-        # Update proposal record + companion consultation (status='reviewed').
+        # Update proposal record + freeze the reviewed source branch
+        # (mirrors fast_forward_merge: locked refs refuse further writes).
         await db.execute(
             text(
                 "UPDATE proposals SET status='merged', merge_commit=:mc, "
@@ -517,15 +536,13 @@ async def merge_proposal(
                 "p": proposal_id,
             },
         )
-        if p["consultation_id"] is not None:
-            await db.execute(
-                text(
-                    "UPDATE consultations SET status='reviewed', "
-                    "  updated_at=now() WHERE id = :c "
-                    "  AND status IN ('submitted','draft')"
-                ),
-                {"c": p["consultation_id"]},
-            )
+        await db.execute(
+            text(
+                "UPDATE refs SET is_locked = true, updated_at = now() "
+                "WHERE patient_id = :pid AND ref_name = :r"
+            ),
+            {"pid": p["patient_id"], "r": p["source_ref_name"]},
+        )
         await db.commit()
 
     await audit.log(
@@ -581,15 +598,6 @@ async def withdraw_proposal(
         ),
         {"n": now, "pid": p["patient_id"], "r": p["source_ref_name"]},
     )
-    if p["consultation_id"] is not None and not is_proposer:
-        # Owner-driven withdraw also marks the consultation as rejected.
-        await db.execute(
-            text(
-                "UPDATE consultations SET status='rejected', "
-                "  rejected_reason=:rn, updated_at=:n WHERE id = :c"
-            ),
-            {"rn": body.reason, "n": now, "c": p["consultation_id"]},
-        )
     await db.commit()
 
     await audit.log(
@@ -614,10 +622,9 @@ async def reject_proposal(
 ) -> ProposalOut:
     """Owner / admin rejects a proposal without merging.
 
-    Sets ``proposals.status='rejected'``, ``review_decision='reject'``,
-    locks the source ref (so the proposer cannot push more commits to
-    that branch), and marks the linked consultation as ``rejected``
-    with the same reason.
+    Sets ``proposals.status='rejected'``, ``review_decision='reject'``
+    with the reason in ``review_notes``, and locks the source ref (so
+    the proposer cannot push more commits to that branch).
 
     Refused with 403 if the caller is not the patient owner or an
     admin: the proposer self-cancels via ``/withdraw`` instead.
@@ -652,6 +659,8 @@ async def reject_proposal(
     )
     # Lock the source branch so no more commits land on it. The branch
     # row stays for audit; archiving it is left to a periodic worker.
+    # The rejection reason lives on the proposal row (review_notes);
+    # the canonical_synthesis ReportContent has its own reject FSM.
     await db.execute(
         text(
             "UPDATE refs SET is_locked = true, updated_at = :n "
@@ -659,14 +668,6 @@ async def reject_proposal(
         ),
         {"n": now, "pid": p["patient_id"], "r": p["source_ref_name"]},
     )
-    if p["consultation_id"] is not None:
-        await db.execute(
-            text(
-                "UPDATE consultations SET status='rejected', "
-                "  rejected_reason=:rn, updated_at=:n WHERE id = :c"
-            ),
-            {"rn": body.review_notes, "n": now, "c": p["consultation_id"]},
-        )
     await db.commit()
 
     await audit.log(

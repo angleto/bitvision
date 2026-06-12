@@ -84,19 +84,20 @@ def _anonymise_demographics(p: Patient, pseudonym: str) -> dict:
     birth_year_only: date | None = None
     if p.birth_date is not None:
         birth_year_only = date(p.birth_date.year, 1, 1)
+    # No identifier fields at all: v3 moved tax_id / external_id into the
+    # external_identifiers JSONB array, which is simply never copied to
+    # the clone (the column defaults to []). Contacts live in the
+    # relational patient_contacts table and are likewise not cloned.
     return {
         "display_name": pseudonym,
-        "external_id": None,
         "birth_date": birth_year_only.isoformat() if birth_year_only else None,
         "sex": p.sex,
-        "tax_id": None,
         "phone": None,
         "email": None,
         "address": None,
         "blood_type": p.blood_type,
         "allergies": redact_text(p.allergies)[0] or None,
         "notes": redact_text(p.notes)[0] or None,
-        "contacts": [],
     }
 
 
@@ -163,19 +164,16 @@ async def publish_patient_to_opendata(
             managed_by_subject_id=platform_owner,
             self_user_subject_id=None,
             display_name=demographics["display_name"],
-            external_id=demographics["external_id"],
             birth_date=date.fromisoformat(demographics["birth_date"])
             if demographics["birth_date"]
             else None,
             sex=demographics["sex"],
-            tax_id=None,
             phone=None,
             email=None,
             address=None,
             blood_type=demographics["blood_type"],
             allergies=demographics["allergies"],
             notes=demographics["notes"],
-            contacts=demographics["contacts"],
         )
     )
     await db.flush()

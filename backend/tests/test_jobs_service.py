@@ -169,12 +169,16 @@ async def test_enqueue_creates_queued_job(
     session_with_user: tuple[AsyncSession, uuid.UUID],
 ) -> None:
     db, sid = session_with_user
+    # scope_ids are persisted on the row as UUID[] (cross-device job
+    # discovery), so they must be real UUIDs — unlike the free-form
+    # strings compute_idempotency_key hashes.
+    scope_pid = uuid.uuid4()
     res = await enqueue_or_get(
         db,
         kind="fascicolo_export",
         owner_subject_id=sid,
-        canonical_input={"patient_id": "p1"},
-        scope_ids=("p1",),
+        canonical_input={"patient_id": str(scope_pid)},
+        scope_ids=(str(scope_pid),),
     )
     assert isinstance(res, EnqueueResult)
     assert res.deduped is False
@@ -184,6 +188,7 @@ async def test_enqueue_creates_queued_job(
     assert res.job.progress_done == 0
     assert res.job.progress_total is None
     assert res.job.expires_at is not None
+    assert res.job.scope_ids == [scope_pid]
 
 
 @pytest.mark.asyncio

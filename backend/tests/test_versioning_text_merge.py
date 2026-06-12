@@ -358,20 +358,9 @@ class TestSubmitProposalAutoMerge:
             ],
         )
         # Open a consultation branch by writing a no-op-text commit on it.
+        # No consultations row to pre-create since v3: the branch ref is
+        # the consultation's only record at the versioning layer.
         consultation_id = uuid.uuid4()
-        # Pre-create the consultations row that submit_consultation_proposal
-        # wires the proposal back to. We only need the columns that the
-        # proposal/merge code reads.
-        await db.execute(
-            text(
-                "INSERT INTO consultations "
-                "(id, patient_id, author_subject_id, author_kind, "
-                " status, title, created_at, updated_at) "
-                "VALUES (:id, :pid, :sid, 'human', 'submitted', "
-                "  'test consultation', now(), now())"
-            ),
-            {"id": consultation_id, "pid": pid, "sid": sid},
-        )
         # Materialise the consultation branch at main's current head so
         # there is a proper LCA between source and target later on.
         consult_ref = await open_consultation_branch(
