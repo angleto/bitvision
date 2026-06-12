@@ -40,6 +40,7 @@ from bvmcp.tools import folders as folders_tools
 from bvmcp.tools import help as help_tools
 from bvmcp.tools import images as images_tools
 from bvmcp.tools import imaging as imaging_tools
+from bvmcp.tools import inbox as inbox_tools
 from bvmcp.tools import labs as labs_tools
 from bvmcp.tools import metadata_writes as metadata_writes_tools
 from bvmcp.tools import notifications as notifications_tools
@@ -95,6 +96,7 @@ TOOL_MODULES = (
     qna_tools,
     training_tools,
     embeddings_admin_tools,
+    inbox_tools,
 )
 
 

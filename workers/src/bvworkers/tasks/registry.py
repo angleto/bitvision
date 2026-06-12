@@ -29,6 +29,11 @@ from bvworkers.tasks.export_gdpr import export_gdpr_zip
 from bvworkers.tasks.export_patient import export_patient_zip
 from bvworkers.tasks.export_study import export_study_zip
 from bvworkers.tasks.generate_summary import generate_summary
+from bvworkers.tasks.inbox import (
+    inbox_maintenance,
+    process_inbound_email,
+    promote_inbox_item,
+)
 from bvworkers.tasks.ingest_bulk import ingest_bulk_files
 from bvworkers.tasks.ocr import run_document_ocr
 from bvworkers.tasks.pack_entity_objects import pack_entity_objects_task
@@ -79,4 +84,7 @@ FUNCTIONS = [
     dispatch_notification,
     notification_safety_net,
     run_review_checks,
+    process_inbound_email,
+    promote_inbox_item,
+    inbox_maintenance,
 ]

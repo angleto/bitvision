@@ -21,13 +21,14 @@ dependencies = []
 package = false
 
 [tool.uv.workspace]
-members = ["backend", "workers", "crawler", "mcp"]
+members = ["backend", "workers", "crawler", "mcp", "mta"]
 
 [tool.uv.sources]
 bvphoenix = { workspace = true }
 bvworkers = { workspace = true }
 bvcrawler = { workspace = true }
 bvmcp = { workspace = true }
+bvmta = { workspace = true }
 # Pull torch/torchvision from the PyTorch CPU index. The reference
 # production cluster is ARM64 with no NVIDIA GPU, but the default PyPI
 # torch wheels declare the (aarch64-published) nvidia-cu13 CUDA stack

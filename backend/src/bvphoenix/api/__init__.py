@@ -34,7 +34,9 @@ from bvphoenix.api import findings as findings_routes
 from bvphoenix.api import folders as folders_routes
 from bvphoenix.api import gdpr as gdpr_routes
 from bvphoenix.api import history as history_routes
+from bvphoenix.api import inbox as inbox_routes
 from bvphoenix.api import internal_auth as internal_auth_routes
+from bvphoenix.api import internal_inbound_email as internal_inbound_email_routes
 from bvphoenix.api import jobs as jobs_routes
 from bvphoenix.api import llm_stream as llm_stream_routes
 from bvphoenix.api import markers as markers_routes
@@ -118,7 +120,9 @@ api_router.include_router(pathology_routes.router)
 api_router.include_router(gdpr_routes.router)
 api_router.include_router(a2a_routes.router)
 api_router.include_router(ai_assistants_routes.router)
+api_router.include_router(inbox_routes.router)
 api_router.include_router(internal_auth_routes.router)
+api_router.include_router(internal_inbound_email_routes.router)
 api_router.include_router(dicom_upload_routes.router)
 api_router.include_router(display_metadata_routes.router)
 api_router.include_router(segmentations_routes.router)

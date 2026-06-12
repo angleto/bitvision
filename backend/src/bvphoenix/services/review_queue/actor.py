@@ -18,12 +18,17 @@ from __future__ import annotations
 
 import uuid
 from dataclasses import dataclass
-from typing import Literal
+from typing import TYPE_CHECKING, Literal
 
 from fastapi import Request
 
-from bvphoenix.db.models import User
 from bvphoenix.services.agent_context import AgentContext
+
+if TYPE_CHECKING:
+    # Typing-only: consumer models import the store mixin through this
+    # package, so a runtime ``db.models`` import here would close the
+    # circle (db.models.<consumer> → review_queue → actor → db.models).
+    from bvphoenix.db.models import User
 
 ActorKind = Literal["human", "agent", "system"]
 

@@ -59,6 +59,11 @@ PROVENANCE_TARGET_KINDS: tuple[str, ...] = (
     # their lineage here.
     "inbox_item",
     "submission",
+    # Patient inbox capability address (migration 0025): create /
+    # update / revoke of a ``{code}+patient@…`` address is a security-
+    # relevant act on the patient's ingress surface, audited like any
+    # other write.
+    "inbox_address",
 )
 
 PROVENANCE_ACTIVITIES: tuple[str, ...] = (
@@ -79,6 +84,10 @@ PROVENANCE_ACTIVITIES: tuple[str, ...] = (
     "restore",
     "identify",
     "update",
+    # Capability revocation (inbox addresses, migration 0025): distinct
+    # from ``delete`` — the row survives for audit, only the bearer
+    # capability stops working.
+    "revoke",
     # Clinical event lifecycle (migration 0103). FSM transition
     # sub-resources stamp ``transition.<verb>`` on the parent event
     # so the audit chain distinguishes "the row was patched" from

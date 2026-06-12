@@ -100,6 +100,16 @@ CRON_JOBS = [
         minute={1, 6, 11, 16, 21, 26, 31, 36, 41, 46, 51, 56},
         run_at_startup=False,
     ),
+    # Patient inbox recovery + retention sweep (task fbbf5270): re-issue
+    # lost staging/promotion enqueues, re-queue stale auto-check runs,
+    # expire undecided items + purge raw .eml past retention. Each batch
+    # is bounded (100 rows per concern); offset to minute 4 so it never
+    # collides with the other 5-minute crons on the same tick.
+    cron(
+        "bvworkers.tasks.inbox.inbox_maintenance",
+        minute={4, 9, 14, 19, 24, 29, 34, 39, 44, 49, 54, 59},
+        run_at_startup=False,
+    ),
 ]
 
 
