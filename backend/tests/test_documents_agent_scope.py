@@ -143,9 +143,13 @@ async def test_ingest_document_refuses_agent_outside_patient_scope(
     db = _StubSessionForIngest(patient)
 
     # Block downstream side-effects so a leak past the gate is caught.
-    monkeypatch.setattr(docs_module, "record_provenance", lambda *a, **kw: None)
+    # The ingest body lives in services/documents/ingest_blob since the
+    # review-queue refactor — patch the symbols where they are used.
+    from bvphoenix.services.documents import ingest_blob as ingest_blob_module
+
+    monkeypatch.setattr(ingest_blob_module, "record_provenance_event", lambda *a, **kw: None)
     s3_stub = SimpleNamespace(upload_bytes=AsyncMock())
-    monkeypatch.setattr(docs_module, "get_s3_storage", lambda: s3_stub)
+    monkeypatch.setattr(ingest_blob_module, "get_s3_storage", lambda: s3_stub)
 
     body = docs_module.IngestDocumentIn(
         patient_id=_PATIENT_OUT_OF_SCOPE,

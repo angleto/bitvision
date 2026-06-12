@@ -32,6 +32,12 @@ class Settings(BaseSettings):
     s3_encryption: Literal["none", "AES256", "aws:kms"] = Field(default="AES256")
     s3_kms_key_arn: str | None = Field(default=None)
 
+    # Review queue: comma-separated import paths of the consumer modules
+    # that register review profiles — resolved by the generic
+    # ``run_review_checks`` task before looking a profile up by name.
+    # Mirrors backend ``bvphoenix.config.review_profile_modules``.
+    review_profile_modules: str = Field(default="")
+
     # Auto-tag stage-2 toggle. Off by default so the worker runs purely
     # on the deterministic lexicon; flip BVP_AUTOTAG_USE_LLM=1 to call
     # the configured LLM provider on long-form text.

@@ -38,6 +38,7 @@ from bvworkers.tasks.prefetch_series import prefetch_series
 from bvworkers.tasks.purge_documents import purge_expired_documents
 from bvworkers.tasks.registration import register_series
 from bvworkers.tasks.reindex_batch import reindex_batch
+from bvworkers.tasks.review_checks import run_review_checks
 from bvworkers.tasks.segment_auto import segment_auto
 from bvworkers.tasks.segment_interactive import medsam_predict_2d
 from bvworkers.tasks.training_cohort_export import training_cohort_export_zip
@@ -77,4 +78,5 @@ FUNCTIONS = [
     register_series,
     dispatch_notification,
     notification_safety_net,
+    run_review_checks,
 ]

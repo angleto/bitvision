@@ -74,6 +74,19 @@ class Settings(BaseSettings):
     )
     redis_url: str = Field(default="redis://localhost:6379/0")
 
+    # ---- Review queue (services/review_queue) --------------------------
+    # clamd endpoint for the ClamAV auto-check. Empty host ⇒ the check
+    # reports ``error`` (an unscanned item is never treated as clean);
+    # in production it points at the in-cluster ``clamav`` Service.
+    clamd_host: str = Field(default="")
+    clamd_port: int = Field(default=3310)
+    clamd_timeout_s: float = Field(default=60.0)
+    # Comma-separated import paths of the modules that register the
+    # review profiles (consumers of the shared engine). The arq worker
+    # imports them before resolving a profile by name; empty in
+    # deployments where no consumer has landed yet.
+    review_profile_modules: str = Field(default="")
+
     s3_endpoint_url: str = Field(default="http://localhost:9000")
     # Public-facing endpoint used when signing URLs handed to the
     # browser. When empty we reuse ``s3_endpoint_url`` — correct only if
