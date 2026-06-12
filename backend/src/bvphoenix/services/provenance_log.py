@@ -39,6 +39,47 @@ from bvphoenix.db.models import ProvenanceEvent, User
 from bvphoenix.services.agent_context import AgentContext
 
 
+def record_provenance_event(
+    db: AsyncSession,
+    *,
+    target_kind: str,
+    target_id: uuid.UUID,
+    activity: str,
+    agent_kind: str,
+    agent_subject_id: uuid.UUID | None,
+    agent_token_id: uuid.UUID | None = None,
+    agent_assistant_id: uuid.UUID | None = None,
+    diff: dict | None = None,
+    source_kind: str | None = None,
+    source_id: uuid.UUID | None = None,
+) -> ProvenanceEvent:
+    """Append a ``ProvenanceEvent`` row from explicit actor fields.
+
+    Request-less entry point for callers that act outside an HTTP
+    context — arq worker transitions (``agent_kind='system'``) and the
+    review-queue engine, which carries actor identity in a
+    :class:`~bvphoenix.services.review_queue.actor.ReviewActor` instead
+    of ``request.state``. HTTP endpoints should keep calling
+    :func:`record_provenance`, which derives these fields from the
+    request. The table CHECKs still apply: an ``agent`` row must carry a
+    token/assistant id, a ``human`` row must carry the subject.
+    """
+    event = ProvenanceEvent(
+        target_kind=target_kind,
+        target_id=target_id,
+        activity=activity,
+        agent_kind=agent_kind,
+        agent_subject_id=agent_subject_id,
+        agent_token_id=agent_token_id,
+        agent_assistant_id=agent_assistant_id,
+        source_kind=source_kind,
+        source_id=source_id,
+        diff=diff,
+    )
+    db.add(event)
+    return event
+
+
 def record_provenance(
     db: AsyncSession,
     *,
@@ -61,7 +102,8 @@ def record_provenance(
     artefact (e.g. the document a report_content was extracted from).
     """
     ctx = AgentContext.from_request(request)
-    event = ProvenanceEvent(
+    return record_provenance_event(
+        db,
         target_kind=target_kind,
         target_id=target_id,
         activity=activity,
@@ -73,8 +115,6 @@ def record_provenance(
         source_id=source_id,
         diff=diff,
     )
-    db.add(event)
-    return event
 
 
-__all__ = ["record_provenance"]
+__all__ = ["record_provenance", "record_provenance_event"]

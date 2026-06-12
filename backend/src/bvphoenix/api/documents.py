@@ -32,7 +32,6 @@ Endpoints (v3 phase 3g):
 
 from __future__ import annotations
 
-import asyncio
 import uuid
 from typing import Annotated
 
@@ -46,11 +45,13 @@ from bvphoenix.api._http import proxy_s3_object
 from bvphoenix.auth.deps import enforce_agent_patient_scope, public_user, require_user
 from bvphoenix.config import get_settings
 from bvphoenix.db.models import Document, DocumentFile, Patient, User
-from bvphoenix.db.models.folders import Folder, FolderItem
 from bvphoenix.db.session import get_db
 from bvphoenix.middleware.audit_dependency import AuditDep
+from bvphoenix.services.documents.ingest_blob import (
+    DocumentIngestError,
+    ingest_document_blob,
+)
 from bvphoenix.services.download_tokens import resolve_download_user
-from bvphoenix.services.folders import get_or_create_root_folder
 from bvphoenix.services.permissions import (
     DOWNLOAD_DERIVATIVE,
     READ_METADATA,
@@ -58,7 +59,7 @@ from bvphoenix.services.permissions import (
     can_patient,
 )
 from bvphoenix.services.provenance_log import record_provenance
-from bvphoenix.storage import get_s3_storage
+from bvphoenix.services.review_queue.actor import ReviewActor
 
 router = APIRouter(tags=["documents-v3"])
 
@@ -450,9 +451,12 @@ async def ingest_document(
     Either ``content_base64`` or ``text`` must be provided. The
     classifier hints (kind/provenance/authority) default to safe
     catch-all values when the agent does not specify them; the FK
-    constraints reject unknown ids."""
+    constraints reject unknown ids.
+
+    Transport layer only: decode/validate inputs, authorize, then
+    delegate to ``services.documents.ingest_blob.ingest_document_blob``
+    — the same service the review-queue promotion hooks call."""
     import base64
-    import hashlib
     from datetime import date as _date
 
     if not body.content_base64 and not body.text:
@@ -481,10 +485,6 @@ async def ingest_document(
             ) from exc
 
     binary: bytes | None = None
-    sha256: str | None = None
-    s3_key: str | None = None
-    doc_id = uuid.uuid4()
-
     if body.content_base64:
         try:
             binary = base64.b64decode(body.content_base64, validate=True)
@@ -495,82 +495,26 @@ async def ingest_document(
             ) from exc
         if not binary:
             raise HTTPException(status_code=422, detail="content_base64 decoded empty")
-        sha256 = hashlib.sha256(binary).hexdigest()
-        ext = body.filename.rsplit(".", 1)[-1] if "." in body.filename else "bin"
-        s3_key = f"patient-docs/{body.patient_id}/{doc_id}.{ext}"
-        settings = get_settings()
-        storage = get_s3_storage()
-        await asyncio.to_thread(
-            storage.upload_bytes,
-            binary,
-            bucket=settings.s3_bucket_raw,
-            key=s3_key,
+
+    try:
+        doc = await ingest_document_blob(
+            db,
+            patient=patient,
+            actor=ReviewActor.from_request(user, request),
+            uploaded_by_subject_id=user.subject_id,
+            filename=body.filename,
+            binary=binary,
+            text=body.text,
+            content_type=body.content_type,
+            kind_id=body.kind_id,
+            provenance_id=body.provenance_id,
+            authority_id=body.authority_id,
+            title=body.title,
+            document_date=parsed_date,
+            folder_id=body.folder_id,
         )
-
-    doc = Document(
-        id=doc_id,
-        patient_id=body.patient_id,
-        uploaded_by_subject_id=user.subject_id,
-        kind_id=body.kind_id,
-        provenance_id=body.provenance_id,
-        authority_id=body.authority_id,
-        title=body.title or body.filename,
-        text=body.text,
-        file_s3_key=s3_key,
-        file_content_type=body.content_type,
-        document_date=parsed_date,
-        content_sha256=sha256,
-        original_blob_hash=sha256,
-    )
-    db.add(doc)
-    await db.flush()
-
-    # No-orphan invariant: every freshly created document is attached
-    # to a folder in the same transaction. When the caller passes an
-    # explicit ``folder_id`` we use it (after validating it belongs to
-    # the same patient); otherwise the document goes to the patient's
-    # root, materialised by ``services.folders.get_or_create_root_folder``.
-    if body.folder_id is not None:
-        target_folder = (
-            await db.execute(
-                select(Folder).where(
-                    Folder.id == body.folder_id,
-                    Folder.patient_id == patient.id,
-                )
-            )
-        ).scalar_one_or_none()
-        if target_folder is None:
-            raise HTTPException(
-                status_code=422,
-                detail="folder_id must reference a folder of the same patient",
-            )
-    else:
-        target_folder = await get_or_create_root_folder(db, patient)
-
-    db.add(
-        FolderItem(
-            folder_id=target_folder.id,
-            resource_kind="document",
-            resource_id=doc.id,
-        )
-    )
-    await db.flush()
-
-    record_provenance(
-        db,
-        target_kind="document",
-        target_id=doc.id,
-        activity="create",
-        user=user,
-        request=request,
-        diff={
-            "filename": body.filename,
-            "kind_id": body.kind_id,
-            "provenance_id": body.provenance_id,
-            "authority_id": body.authority_id,
-            "size_bytes": len(binary) if binary else 0,
-        },
-    )
+    except DocumentIngestError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
     await db.commit()
     return {
         "document_id": str(doc.id),

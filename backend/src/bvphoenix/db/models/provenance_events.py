@@ -51,6 +51,14 @@ PROVENANCE_TARGET_KINDS: tuple[str, ...] = (
     # patient_tasks. Audit trail target_kind kept distinct so reports
     # can filter clinical vs operational lineage.
     "patient_task",
+    # Review-queue stores (migration 0024). The shared staging engine
+    # (services/review_queue) records every lifecycle transition against
+    # the consumer's own store: ``inbox_item`` for the patient inbound
+    # inbox (fbbf5270), ``submission`` for public contributions
+    # (133349a9). The engine never owns those tables; it only stamps
+    # their lineage here.
+    "inbox_item",
+    "submission",
 )
 
 PROVENANCE_ACTIVITIES: tuple[str, ...] = (
@@ -87,6 +95,19 @@ PROVENANCE_ACTIVITIES: tuple[str, ...] = (
     "attachment.upload",
     "attachment.delete",
     "attachment.promote",
+    # Review-queue lifecycle (migration 0024): one ``transition.<to>``
+    # per state-machine edge taken, mirroring the clinical-event FSM
+    # convention. The target status is the activity suffix; ``from``
+    # lives in the diff.
+    "transition.processing",
+    "transition.needs_review",
+    "transition.blocked",
+    "transition.accepted",
+    "transition.promoting",
+    "transition.promoted",
+    "transition.rejected",
+    "transition.expired",
+    "transition.failed",
 )
 
 PROVENANCE_AGENT_KINDS: tuple[str, ...] = ("human", "agent", "system")

@@ -380,8 +380,27 @@ async def test_care_phase_full_pipeline_no_anthropic(
     # 18 events ⇒ 18 VEVENT blocks.
     assert ics.count("BEGIN:VEVENT") == sum(len(p["events"]) for p in _golden()["phases"])
 
+    # PDF depends on the cairosvg/libcairo pair being usable on the host:
+    # environments without it must get a clean 501, environments with it
+    # (this very dichotomy is what the route implements) a real PDF.
+    def _pdf_renderer_available() -> bool:
+        try:
+            import cairosvg
+
+            cairosvg.svg2pdf(
+                bytestring=b"<svg xmlns='http://www.w3.org/2000/svg' width='8' height='8'/>"
+            )
+            return True
+        except Exception:
+            return False
+
     r = await http.get(f"/api/patients/{pa.id}/care-timeline?format=pdf", headers=auth)
-    assert r.status_code == 501, r.text
+    if _pdf_renderer_available():
+        assert r.status_code == 200, r.text[:200]
+        assert r.headers["content-type"].startswith("application/pdf")
+        assert r.content.startswith(b"%PDF")
+    else:
+        assert r.status_code == 501, r.text
 
     r = await http.get(f"/api/patients/{pa.id}/care-timeline/health", headers=auth)
     assert r.status_code == 200

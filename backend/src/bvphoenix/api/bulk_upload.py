@@ -64,6 +64,14 @@ from bvphoenix.db.models import (
 )
 from bvphoenix.db.session import get_db
 from bvphoenix.services import jobs as jobs_service
+from bvphoenix.services.archive_guards import (
+    MAX_FILE_BYTES,
+    MAX_ISO_BYTES,
+    MAX_ZIP_DEPTH,
+)
+from bvphoenix.services.archive_guards import (
+    is_safe_archive_member_name as _is_safe_archive_member_name,
+)
 from bvphoenix.services.arq_redis import redis_settings
 from bvphoenix.services.iso_extractor import extract_iso
 from bvphoenix.services.permissions import (
@@ -82,49 +90,10 @@ JOB_KIND_BULK_UPLOAD = "bulk_upload"
 router = APIRouter(tags=["bulk-upload"])
 
 
-# Keep per-file payloads bounded so a runaway upload can't eat the whole
-# worker's memory — matches the cap advertised in the task spec (500 MB).
-MAX_FILE_BYTES = 500 * 1024 * 1024
-
-# Hospital DVDs frequently land at 1–4 GiB; lift the per-file cap for
-# ``.iso`` images so the server-side fallback (``services.iso_extractor``)
-# can take a shot at parsing them when the client-side ISO 9660 reader
-# in the browser fails. The cap stays bounded so a malicious upload
-# can't eat the whole worker's disk.
-MAX_ISO_BYTES = 5 * 1024 * 1024 * 1024
-
-# Cap the recursion depth on nested ZIP archives. Two levels is enough
-# for the realistic "archive of studies" use case without opening a
-# zip-bomb amplification vector.
-MAX_ZIP_DEPTH = 2
-
-
-def _is_safe_archive_member_name(name: str) -> bool:
-    """Return True iff ``name`` is safe to use as a relative path below a
-    staging root. Defends against zip-slip (CWE-22): a malicious archive
-    can carry members like ``../../etc/passwd`` or ``/etc/passwd``; while
-    we currently store members as opaque bytes under ``_ingest_jobs/<id>/``
-    (so the OS filesystem never sees them), the worker eventually composes
-    full paths via ``relative_path`` to feed DICOMDIR matching and S3
-    keys. A traversal-laced filename can poison downstream key derivation
-    or, worse, escape into a future writer that does touch the FS.
-    Reject:
-      * empty names
-      * absolute paths (POSIX ``/`` or Windows ``C:`` drive letter)
-      * any path component equal to ``..`` or ``.``
-      * NUL bytes (filesystem terminator surprise)
-      * backslashes treated separately from ``/`` (Windows-style escapes)
-    """
-    if not name:
-        return False
-    if "\x00" in name:
-        return False
-    normalised = name.replace("\\", "/")
-    if normalised.startswith("/"):
-        return False
-    if len(normalised) >= 2 and normalised[1] == ":":
-        return False
-    return all(part not in ("..", ".") for part in normalised.split("/"))
+# Archive safety caps + zip-slip guard live in ``services/archive_guards``
+# (shared with the review-queue staging checks). Symbols are re-imported
+# above under their historical names so the unpackers and the existing
+# tests keep working unchanged.
 
 
 # ---- Internal types ----
