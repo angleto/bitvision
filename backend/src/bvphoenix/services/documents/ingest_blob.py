@@ -31,8 +31,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from bvphoenix.config import get_settings
 from bvphoenix.db.models import Document, Patient
-from bvphoenix.db.models.folders import Folder, FolderItem
-from bvphoenix.services.folders import get_or_create_root_folder
+from bvphoenix.db.models.folders import Folder
+from bvphoenix.services.folders import get_or_create_root_folder, link_resource_to_folder
 from bvphoenix.services.provenance_log import record_provenance_event
 from bvphoenix.services.review_queue.actor import ReviewActor
 from bvphoenix.storage import get_s3_storage
@@ -129,12 +129,11 @@ async def ingest_document_blob(
     else:
         target_folder = await get_or_create_root_folder(db, patient)
 
-    db.add(
-        FolderItem(
-            folder_id=target_folder.id,
-            resource_kind="document",
-            resource_id=doc.id,
-        )
+    await link_resource_to_folder(
+        db,
+        folder_id=target_folder.id,
+        resource_kind="document",
+        resource_id=doc.id,
     )
     await db.flush()
 

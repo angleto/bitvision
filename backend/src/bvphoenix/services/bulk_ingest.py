@@ -29,13 +29,12 @@ from bvphoenix.config import get_settings
 from bvphoenix.db.models import (
     Document,
     Folder,
-    FolderItem,
     Patient,
     Subject,
 )
 from bvphoenix.services.consent_auto import ensure_tier_consents
 from bvphoenix.services.dicom_ingest import DicomIngestor, has_dicm_preamble
-from bvphoenix.services.folders import get_or_create_root_folder
+from bvphoenix.services.folders import get_or_create_root_folder, link_resource_to_folder
 from bvphoenix.storage import get_s3_storage
 
 log = logging.getLogger(__name__)
@@ -553,21 +552,26 @@ async def process_bulk_ingest(
     if target_folder is None and patient is not None:
         target_folder = await get_or_create_root_folder(db, patient)
     if target_folder is not None:
+        # Idempotent linking: ``studies_created`` is built from
+        # ``ingestor.touched_studies`` (Stage 3), which includes studies
+        # *re-touched* by a re-upload — same deterministic study UUID,
+        # already filed in this folder. ``link_resource_to_folder`` makes
+        # the re-link a no-op instead of aborting the whole ingest with a
+        # ``folder_items_pkey`` UniqueViolationError. Same reasoning for a
+        # document re-uploaded into the same folder.
         for s in summary.studies_created:
-            db.add(
-                FolderItem(
-                    folder_id=target_folder.id,
-                    resource_kind="study",
-                    resource_id=uuid.UUID(s.id),
-                )
+            await link_resource_to_folder(
+                db,
+                folder_id=target_folder.id,
+                resource_kind="study",
+                resource_id=uuid.UUID(s.id),
             )
         for d in summary.documents_created:
-            db.add(
-                FolderItem(
-                    folder_id=target_folder.id,
-                    resource_kind="document",
-                    resource_id=uuid.UUID(d.id),
-                )
+            await link_resource_to_folder(
+                db,
+                folder_id=target_folder.id,
+                resource_kind="document",
+                resource_id=uuid.UUID(d.id),
             )
 
     if tier in ("t3", "t4") and summary.studies_created:

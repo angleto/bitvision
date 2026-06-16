@@ -972,15 +972,20 @@ async def restore_document(
         )
     ).scalar_one()
     if folder_count == 0:
-        from bvphoenix.services.folders import get_or_create_root_folder
+        from bvphoenix.services.folders import (
+            get_or_create_root_folder,
+            link_resource_to_folder,
+        )
 
         root = await get_or_create_root_folder(db, patient)
-        db.add(
-            FolderItem(
-                folder_id=root.id,
-                resource_kind="document",
-                resource_id=doc.id,
-            )
+        # Idempotent + atomic: the check-then-add above races a concurrent
+        # restore; ``link_resource_to_folder`` (ON CONFLICT DO NOTHING) is
+        # the no-op the surrounding comment already promised.
+        await link_resource_to_folder(
+            db,
+            folder_id=root.id,
+            resource_kind="document",
+            resource_id=doc.id,
         )
     await db.flush()
     files = (
