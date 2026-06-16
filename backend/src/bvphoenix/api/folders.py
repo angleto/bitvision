@@ -31,6 +31,7 @@ from bvphoenix.db.models import Document, Folder, FolderItem, Grant, Patient, Us
 from bvphoenix.db.models.folders import FOLDER_ITEM_KINDS
 from bvphoenix.db.session import get_db
 from bvphoenix.services.access_levels import level_to_permissions
+from bvphoenix.services.folders import link_resource_to_folder
 
 router = APIRouter(prefix="/folders", tags=["folders"])
 
@@ -533,12 +534,18 @@ async def add_item_to_folder(
     user: Annotated[User, Depends(require_user)],
 ) -> dict:
     folder = await _load_owned_folder(db, folder_id, user, request)
-    item = FolderItem(
-        folder_id=folder.id, resource_kind=body.resource_kind, resource_id=body.resource_id
+    # Idempotent: filing an already-filed resource into the same folder
+    # is a no-op, mirroring ``remove_item_from_folder`` which 204s when
+    # the link is already absent. Avoids a 500 on the common
+    # double-click / retry path.
+    inserted = await link_resource_to_folder(
+        db,
+        folder_id=folder.id,
+        resource_kind=body.resource_kind,
+        resource_id=body.resource_id,
     )
-    db.add(item)
     await db.commit()
-    return {"status": "added"}
+    return {"status": "added" if inserted else "already_present"}
 
 
 @router.delete(

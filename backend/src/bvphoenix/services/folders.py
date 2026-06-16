@@ -26,7 +26,7 @@ from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from bvphoenix.db.models.folders import Folder
+from bvphoenix.db.models.folders import Folder, FolderItem
 from bvphoenix.db.models.patients import Patient
 
 # Sentinel name for the materialised root folder. The row exists only
@@ -93,3 +93,44 @@ async def get_or_create_root_folder(
         ).scalar_one()
 
     return (await db.execute(select(Folder).where(Folder.id == row[0]))).scalar_one()
+
+
+async def link_resource_to_folder(
+    db: AsyncSession,
+    *,
+    folder_id: uuid.UUID,
+    resource_kind: str,
+    resource_id: uuid.UUID,
+) -> bool:
+    """Idempotently link a resource into a folder.
+
+    Folder membership is a *set*, not a multiset: re-linking the same
+    ``(folder_id, resource_kind, resource_id)`` triple is a no-op, never
+    an error. Implemented as ``INSERT ... ON CONFLICT DO NOTHING`` on
+    the ``folder_items_pkey`` composite key.
+
+    This is the single funnel every ingest / re-ingest path must use to
+    file a study or document. A bulk re-upload of an exam re-touches the
+    *same* deterministic study UUID (derived from its StudyInstanceUID),
+    so the study reappears in ``IngestSummary.studies_created`` even
+    though it is already filed. A plain ``db.add(FolderItem(...))`` then
+    aborts the whole ingest transaction with a ``UniqueViolationError``
+    on ``folder_items_pkey`` and the re-upload "fails" although there is
+    nothing new to write. Going through this helper makes the link a
+    no-op in that case.
+
+    Returns ``True`` when a new row was inserted, ``False`` when the link
+    already existed.
+    """
+    stmt = (
+        pg_insert(FolderItem.__table__)
+        .values(
+            folder_id=folder_id,
+            resource_kind=resource_kind,
+            resource_id=resource_id,
+        )
+        .on_conflict_do_nothing(index_elements=["folder_id", "resource_kind", "resource_id"])
+        .returning(FolderItem.__table__.c.folder_id)
+    )
+    row = (await db.execute(stmt)).first()
+    return row is not None

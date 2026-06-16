@@ -588,14 +588,13 @@ async def _persist_iso_archives(
             # resolved to a subfolder so the bundle lands next to its
             # unpacked DICOM tree.
             if target_folder_id is not None:
-                from bvphoenix.db.models import FolderItem
+                from bvphoenix.services.folders import link_resource_to_folder
 
-                db.add(
-                    FolderItem(
-                        folder_id=target_folder_id,
-                        resource_kind="document",
-                        resource_id=doc_id,
-                    )
+                await link_resource_to_folder(
+                    db,
+                    folder_id=target_folder_id,
+                    resource_kind="document",
+                    resource_id=doc_id,
                 )
             await db.commit()
             log.info(
