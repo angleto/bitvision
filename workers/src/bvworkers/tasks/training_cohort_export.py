@@ -14,8 +14,11 @@ ours (multi-patient, synthetic-keyed) because ``_build_export_plan`` is
 single-patient + identifying.
 
 Progress mirrors the study export (a shared counter polled by an async
-task → Job.progress_done). Mid-stream cancel is a follow-up; the Job is
-recoverable cross-session via its scope + arq_job_id.
+task → Job.progress_done). The same poller also honours a mid-stream
+cancel: ``request_cancellation`` flips the Job to ``cancelled`` and the
+streaming thread bails before its next member (``upload_iter`` aborts the
+multipart, so no orphan artifact). The Job is recoverable cross-session
+via its scope + arq_job_id.
 """
 
 from __future__ import annotations
@@ -24,6 +27,7 @@ import asyncio
 import contextlib
 import json
 import logging
+import threading
 import uuid
 from datetime import UTC, datetime
 from typing import Any
@@ -41,6 +45,19 @@ from stream_zip import stream_zip
 from bvworkers.config import get_settings
 
 logger = logging.getLogger(__name__)
+
+
+class _ExportCancelledError(Exception):
+    """Raised by the streaming core when the Job was cancelled mid-stream.
+
+    Cooperative cancel: ``request_cancellation`` flips the Job row to
+    ``cancelled`` immediately; the progress poller below reads that at its
+    next tick and trips the shared flag, and the blob generator bails before
+    the next member. The half-written S3 multipart is aborted by
+    ``upload_iter`` (it aborts on any generator exception, so no orphan part
+    is left), and the worker returns ``cancelled`` without touching the
+    already-terminal Job status.
+    """
 
 
 def _filters(q: dict[str, Any]) -> dict[str, Any]:
@@ -67,19 +84,28 @@ def _stream_cohort_sync(
     bucket: str,
     key: str,
     progress_q: list[int],
+    cancel: threading.Event,
 ) -> int:
     """Sync core: fetch each blob (DICOM de-id'd, masks raw), zip-stream
-    into the S3 multipart sink. O(part_size) memory."""
+    into the S3 multipart sink. O(part_size) memory.
+
+    ``cancel`` is checked before each member (and before the trailing
+    labels.json): once the poller trips it, the generator raises
+    ``_ExportCancelledError`` so ``upload_iter`` aborts the multipart cleanly."""
     storage = get_s3_storage()
 
     def _members():  # type: ignore[no-untyped-def]
         for item in work:
+            if cancel.is_set():
+                raise _ExportCancelledError
             body = _fetch_blob_bytes(
                 storage, item["bucket"], item["key"], deidentify=(item["kind"] == "dicom")
             )
             # DICOM + mask blobs are already-incompressible binary → STORE.
             yield _bytes_member(item["name"], body, compress=False)
             progress_q[0] += 1
+        if cancel.is_set():
+            raise _ExportCancelledError
         # Coded labels manifest → DEFLATE (text).
         yield _bytes_member("labels.json", labels_bytes, compress=True)
         progress_q[0] += 1
@@ -104,6 +130,7 @@ async def _stream_cohort(
     shared progress counter to the Job."""
     progress_q = [0]
     stop = asyncio.Event()
+    cancel = threading.Event()
 
     async def _poll() -> None:
         while not stop.is_set():
@@ -111,6 +138,14 @@ async def _stream_cohort(
             try:
                 async with AsyncSession(engine, expire_on_commit=False) as ps:
                     await set_current_subject(ps, SERVICE_SUBJECT)
+                    # Cooperative cancel: a concurrent request_cancellation
+                    # flips the Job to ``cancelled``; trip the shared flag so
+                    # the streaming thread bails before its next member.
+                    job = await jobs_service.get_job(ps, job_id)
+                    if job.status == "cancelled":
+                        cancel.set()
+                        stop.set()
+                        break
                     await jobs_service.update_progress(
                         ps,
                         job_id,
@@ -125,7 +160,13 @@ async def _stream_cohort(
     poller = asyncio.create_task(_poll())
     try:
         return await asyncio.to_thread(
-            _stream_cohort_sync, work, labels_bytes, bucket=bucket, key=key, progress_q=progress_q
+            _stream_cohort_sync,
+            work,
+            labels_bytes,
+            bucket=bucket,
+            key=key,
+            progress_q=progress_q,
+            cancel=cancel,
         )
     finally:
         stop.set()
@@ -198,6 +239,12 @@ async def training_cohort_export_zip(
             "findings": len(rows),
             "size_bytes": size,
         }
+    except _ExportCancelledError:
+        # The Job is already terminal ('cancelled', set by request_cancellation);
+        # upload_iter aborted the multipart so there is no orphan artifact. Do
+        # NOT mark succeeded/failed — that would clobber the cancelled status.
+        logger.info("training cohort export %s cancelled mid-stream", job_id)
+        return {"status": "cancelled", "job_id": job_id}
     except Exception as exc:
         logger.exception("training cohort export failed for job %s", job_id)
         try:
