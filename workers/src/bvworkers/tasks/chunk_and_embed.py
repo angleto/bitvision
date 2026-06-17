@@ -495,6 +495,19 @@ async def _persist_chunks_and_embed(
             except Exception:
                 logger.exception("failed to enqueue embed jobs for chunk %s", cid)
 
+    # Coarse whole-document vector (target_kind='document'): one row per
+    # active model, mirroring the per-chunk loop above but with the full
+    # body. /search/semantic's document arm reads these; without them only
+    # the chunk arm is populated. A document has no synchronous text (OCR is
+    # async), so this post-OCR pass IS its on-write embed — patient and
+    # report_content embed synchronously on their API writes instead.
+    if redis is not None and specs and source_kind == "document":
+        try:
+            for spec in specs:
+                await redis.enqueue_job(spec.arq_task, "document", str(source_id), body)
+        except Exception:
+            logger.exception("failed to enqueue coarse document embed for %s", source_id)
+
     return {
         "status": "chunked",
         "source_kind": source_kind,

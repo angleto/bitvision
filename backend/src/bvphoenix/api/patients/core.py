@@ -11,6 +11,7 @@ from fastapi import APIRouter
 
 from bvphoenix.api.patients import _shared  # for runtime access
 from bvphoenix.api.patients._shared import *  # noqa: F403
+from bvphoenix.services.text_embedding import enqueue_text_embed, patient_embed_text
 
 router = APIRouter()
 
@@ -231,6 +232,9 @@ async def create_patient(
         )
     await db.commit()
     await db.refresh(patient)
+    await enqueue_text_embed(
+        db, target_kind="patient", target_id=patient.id, text=patient_embed_text(patient)
+    )
     contacts = await _load_patient_contacts(db, patient.id)
     return _patient_out(patient, user=user, contacts=contacts)
 
@@ -473,6 +477,9 @@ async def update_patient(
     )
     await db.commit()
     await db.refresh(patient)
+    await enqueue_text_embed(
+        db, target_kind="patient", target_id=patient.id, text=patient_embed_text(patient)
+    )
 
     new_etag = commit.commit_hash.hex()
 
