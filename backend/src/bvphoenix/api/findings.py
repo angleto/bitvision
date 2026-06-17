@@ -71,6 +71,7 @@ from bvphoenix.middleware.audit_dependency import AuditDep
 from bvphoenix.middleware.idempotency import IdempotencyContext, idempotent
 from bvphoenix.services.etag import enforce_optional_if_match, format_etag
 from bvphoenix.services.permissions import apply_scope_filter, visible_studies_filter
+from bvphoenix.services.text_embedding import enqueue_text_embed
 
 router = APIRouter(tags=["findings"])
 
@@ -519,9 +520,10 @@ def _finding_embed_text(
 
 
 async def _enqueue_finding_embed(db: AsyncSession, finding: Finding) -> None:
-    """Best-effort: embed the finding's text under target_kind='finding'
-    (active MiniLM model) so it joins /search/semantic. Mirrors the
-    document OCR enqueue: a failure here must never break the write."""
+    """Best-effort: embed the finding's text under target_kind='finding' on
+    every active text model (MiniLM today, and BGE-M3 once it is activated)
+    so it joins /search/semantic. Mirrors the document OCR enqueue: a
+    failure here must never break the write."""
     try:
         type_display = (
             await db.execute(
@@ -544,16 +546,7 @@ async def _enqueue_finding_embed(db: AsyncSession, finding: Finding) -> None:
         )
         if not text_value:
             return
-        from arq import create_pool
-
-        from bvphoenix.config import get_settings
-        from bvphoenix.services.arq_redis import redis_settings
-
-        redis = await create_pool(redis_settings(get_settings().redis_url))
-        try:
-            await redis.enqueue_job("embed_text_ml", "finding", str(finding.id), text_value)
-        finally:
-            await redis.close()
+        await enqueue_text_embed(db, target_kind="finding", target_id=finding.id, text=text_value)
     except Exception:  # pragma: no cover — best-effort, never break the write
         logging.getLogger(__name__).exception("finding embed enqueue failed for %s", finding.id)
 

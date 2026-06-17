@@ -64,6 +64,7 @@ from bvphoenix.services.permissions import (
     can_patient,
 )
 from bvphoenix.services.provenance_log import record_provenance
+from bvphoenix.services.text_embedding import enqueue_text_embed, report_content_embed_text
 
 router = APIRouter(tags=["report-contents"])
 
@@ -552,6 +553,9 @@ async def create_report_content(
     )
     await db.commit()
     await db.refresh(rc)
+    await enqueue_text_embed(
+        db, target_kind="report_content", target_id=rc.id, text=report_content_embed_text(rc)
+    )
     out = _to_out(rc)
     request.state.response_etag = out.etag
     return out
@@ -640,6 +644,9 @@ async def update_report_content(
     )
     await db.commit()
     await db.refresh(rc)
+    await enqueue_text_embed(
+        db, target_kind="report_content", target_id=rc.id, text=report_content_embed_text(rc)
+    )
     out = _to_out(rc)
     request.state.response_etag = out.etag
     return out
@@ -1099,6 +1106,9 @@ async def supersede_report_content(
     )
     await db.commit()
     await db.refresh(new)
+    await enqueue_text_embed(
+        db, target_kind="report_content", target_id=new.id, text=report_content_embed_text(new)
+    )
     out = _to_out(new)
     request.state.response_etag = out.etag
     return out

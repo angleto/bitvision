@@ -33,6 +33,7 @@ ALLOWED_TARGET_KINDS: frozenset[str] = frozenset(
     {
         "series",
         "report",
+        "report_content",
         "annotation",
         "consultation",
         "document",
