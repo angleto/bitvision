@@ -38,6 +38,7 @@ from bvphoenix.api import inbox as inbox_routes
 from bvphoenix.api import internal_auth as internal_auth_routes
 from bvphoenix.api import internal_inbound_email as internal_inbound_email_routes
 from bvphoenix.api import jobs as jobs_routes
+from bvphoenix.api import lesion_tracks as lesion_tracks_routes
 from bvphoenix.api import llm_stream as llm_stream_routes
 from bvphoenix.api import markers as markers_routes
 from bvphoenix.api import me as me_routes
@@ -143,6 +144,7 @@ api_router.include_router(duc_routes.router)
 api_router.include_router(payouts_routes.router)
 api_router.include_router(markers_routes.router)
 api_router.include_router(findings_routes.router)
+api_router.include_router(lesion_tracks_routes.router)
 api_router.include_router(training_exports_routes.router)
 api_router.include_router(app_settings_routes.router)
 api_router.include_router(admin_users_routes.router)
