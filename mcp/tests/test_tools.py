@@ -630,6 +630,7 @@ EXPECTED_TOOL_NAMES = {
     "restore_lesion_track",
     "add_finding_to_track",
     "remove_finding_from_track",
+    "propagate_lesion",
     # --- Training cohort export (P5) ---
     "export_training_manifest",
     "export_training_cohort_bundle",

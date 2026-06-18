@@ -341,6 +341,9 @@ TOOL_SCOPE: dict[str, str] = {
     "restore_lesion_track": "findings:write",
     "add_finding_to_track": "findings:write",
     "remove_finding_from_track": "findings:write",
+    # Propagation triggers an expensive worker but its consequential effect
+    # is a medical Finding write, so it is gated on findings:write.
+    "propagate_lesion": "findings:write",
     "export_training_manifest": "datasets:read",
     "export_training_cohort_bundle": "datasets:export",
     "write_clinical_note": "annotations:write",

@@ -122,6 +122,27 @@ async def test_get_lesion_trajectory_is_a_get() -> None:
     assert json.loads(result) == payload
 
 
+async def test_propagate_lesion_forwards_body_and_dry_run() -> None:
+    tid = "t-1"
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.method == "POST"
+        assert request.url.path == f"/api/lesion-tracks/{tid}/propagate"
+        assert request.url.params.get("dry_run") == "true"
+        body = json.loads(request.content)
+        assert body["followup_series_id"] == "s-2"
+        assert body["refine"] is False
+        _assert_auth(request)
+        return _json_response({"status": "dry-run", "track_id": tid})
+
+    with mock_backend(handler):
+        result = await lt_tools.handle(
+            "propagate_lesion",
+            {"track_id": tid, "followup_series_id": "s-2", "refine": False, "dry_run": True},
+        )
+    assert json.loads(result)["status"] == "dry-run"
+
+
 async def test_delete_lesion_track_sends_if_match_and_reason() -> None:
     tid = "t-1"
 
