@@ -171,6 +171,21 @@ async def get_display_metadata(
     if not rows_inst:
         raise HTTPException(status_code=409, detail="series has no instances yet")
 
+    # Capture the series columns we still need, then RELEASE the pooled DB
+    # connection BEFORE the S3 header fan-out below. Each header is a ranged
+    # S3 GET through the (currently bandwidth-limited) egress gateway; for an
+    # N-instance series that is N reads taking seconds-to-minutes, and holding
+    # the connection across it drains the pool under even light concurrency
+    # (the viewer fetches display-metadata for every series of a study),
+    # surfacing as `QueuePool limit ... TimeoutError` 500s here AND on sibling
+    # endpoints (/series, /jobs) that then cannot get a connection. The rest
+    # of the handler only processes the fetched headers — no further DB
+    # access. (Underlying S3 latency is tracked in Flow e4b9234b.)
+    series_id_val = series.id
+    series_modality = (series.modality or "").upper()
+    series_instance_count = int(series.received_instance_count or 0)
+    await db.close()
+
     storage = get_s3_storage()
     sem = asyncio.Semaphore(_SUBSTACK_SCAN_CONCURRENCY)
 
@@ -220,7 +235,7 @@ async def get_display_metadata(
     # PET-specific enrichment. SUV factors come straight from the
     # header tags; we don't touch pixels here. For non-PT modalities
     # the factor stays None.
-    is_pet = (series.modality or "").upper() == "PT"
+    is_pet = series_modality == "PT"
     suv_factor_bw: float | None = None
     patient_weight_kg: float | None = None
     radionuclide: str | None = None
@@ -256,8 +271,8 @@ async def get_display_metadata(
     # immutable per series — short cache to absorb HUD repaint flurries.
     response.headers["cache-control"] = "public, max-age=86400"
     return DisplayMetadata(
-        series_id=series.id,
-        instance_count=int(series.received_instance_count or 0),
+        series_id=series_id_val,
+        instance_count=series_instance_count,
         is_pet=is_pet,
         suv_factor_bw=suv_factor_bw,
         patient_weight_kg=patient_weight_kg,
