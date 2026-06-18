@@ -919,3 +919,126 @@ async def get_lesion_track_trajectory(
         )
     traj = compute_trajectory(tps)
     return TrajectoryOut(**traj)
+
+
+# ---------------------------------------------------------------------------
+# Propagation (semi-automatic re-measure on a follow-up study)
+# ---------------------------------------------------------------------------
+
+
+class PropagateIn(BaseModel):
+    followup_series_id: uuid.UUID
+    refine: bool = True
+
+
+@router.post("/lesion-tracks/{track_id}/propagate")
+async def propagate_lesion_endpoint(
+    request: Request,
+    track_id: uuid.UUID,
+    body: PropagateIn,
+    db: Annotated[AsyncSession, Depends(get_db)],
+    user: Annotated[User, Depends(require_user)],
+    audit: AuditDep,
+    dry_run: bool = Query(False, description="Validate the request without enqueueing."),
+) -> dict:
+    """Propagate the track's baseline lesion onto a follow-up series: a
+    worker registers the two studies, warps the baseline mask onto the
+    follow-up, re-segments on the follow-up's real voxels, and records a
+    new (system-authored, candidate) Finding + timepoint. Returns the job.
+
+    The follow-up series must belong to the same patient (else 422, before
+    the worker), and the baseline finding must carry a segmentation mask.
+    """
+    from arq import create_pool as _create_pool
+
+    from bvphoenix.config import get_settings
+    from bvphoenix.db.models import FindingGeometry, ImagingStudy, Segmentation, Series
+    from bvphoenix.services import jobs as jobs_service
+    from bvphoenix.services.arq_redis import redis_settings as _redis_settings
+
+    t = await _track_for_write(db, request, user, track_id)
+
+    fu = (
+        await db.execute(
+            select(Series, ImagingStudy)
+            .join(ImagingStudy, ImagingStudy.id == Series.study_id)
+            .where(Series.id == body.followup_series_id)
+        )
+    ).first()
+    if fu is None:
+        raise HTTPException(status_code=404, detail="follow-up series not found")
+    _fu_series, fu_study = fu
+    if fu_study.patient_id != t.patient_id:
+        raise HTTPException(
+            status_code=422, detail="follow-up series does not belong to this patient"
+        )
+
+    base_point = (
+        await db.execute(
+            select(LesionTrackPoint).where(
+                LesionTrackPoint.lesion_track_id == t.id,
+                LesionTrackPoint.is_baseline.is_(True),
+            )
+        )
+    ).scalar_one_or_none()
+    if base_point is None:
+        raise HTTPException(
+            status_code=422, detail="track has no baseline timepoint to propagate from"
+        )
+    has_mask = (
+        await db.execute(
+            select(FindingGeometry.id)
+            .join(Segmentation, Segmentation.id == FindingGeometry.segmentation_id)
+            .where(
+                FindingGeometry.finding_id == base_point.finding_id,
+                FindingGeometry.role == "mask",
+            )
+        )
+    ).scalar_one_or_none()
+    if has_mask is None:
+        raise HTTPException(
+            status_code=422,
+            detail="baseline finding has no segmentation mask; segment the baseline lesion first",
+        )
+
+    if dry_run:
+        return {
+            "status": "dry-run",
+            "track_id": str(t.id),
+            "followup_series_id": str(body.followup_series_id),
+            "refine": body.refine,
+        }
+
+    job_result = await jobs_service.enqueue_or_get(
+        db,
+        kind="propagate_lesion",
+        owner_subject_id=user.subject_id,
+        canonical_input={
+            "track_id": str(t.id),
+            "followup_series_id": str(body.followup_series_id),
+            "refine": body.refine,
+        },
+        scope_ids=[str(t.id)],
+    )
+    if not job_result.deduped:
+        settings = get_settings()
+        redis = await _create_pool(_redis_settings(settings.redis_url))
+        handle = await redis.enqueue_job(
+            "propagate_lesion",
+            str(t.id),
+            str(body.followup_series_id),
+            body.refine,
+            str(job_result.job.id),
+        )
+        await redis.close()
+        if handle is not None:
+            await jobs_service.set_arq_job_id(db, job_result.job.id, handle.job_id)
+    await db.commit()
+    await audit.log(
+        action="lesion_track_propagate",
+        actor_subject_id=user.subject_id,
+        resource_kind="lesion_track",
+        resource_id=t.id,
+        metadata={"followup_series_id": str(body.followup_series_id), "refine": body.refine},
+    )
+    return {"status": "queued", "job_id": str(job_result.job.id), "track_id": str(t.id)}

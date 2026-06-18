@@ -40,6 +40,7 @@ from bvworkers.tasks.pack_entity_objects import pack_entity_objects_task
 from bvworkers.tasks.pack_volume import pack_volume
 from bvworkers.tasks.ping import ping
 from bvworkers.tasks.prefetch_series import prefetch_series
+from bvworkers.tasks.propagate_lesion import propagate_lesion
 from bvworkers.tasks.purge_documents import purge_expired_documents
 from bvworkers.tasks.registration import register_series
 from bvworkers.tasks.reindex_batch import reindex_batch
@@ -81,6 +82,7 @@ FUNCTIONS = [
     training_cohort_export_zip,
     ingest_bulk_files,
     register_series,
+    propagate_lesion,
     dispatch_notification,
     notification_safety_net,
     run_review_checks,

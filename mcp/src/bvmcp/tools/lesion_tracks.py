@@ -285,6 +285,40 @@ TOOLS: list[Tool] = [
             "required": ["track_id", "point_id"],
         },
     ),
+    Tool(
+        name="propagate_lesion",
+        annotations=ToolAnnotations(
+            title="Propagate lesion to a follow-up",
+            readOnlyHint=False,
+            destructiveHint=False,
+            idempotentHint=False,
+            openWorldHint=False,
+        ),
+        description=(
+            "Semi-automatic follow-up measurement: a worker registers the "
+            "track's baseline study to the follow-up series, warps the "
+            "baseline lesion mask onto the follow-up, re-segments on the "
+            "follow-up's real voxels, and records a new (system-authored, "
+            "candidate) Finding + timepoint — so you can see whether the "
+            "tumour grew. The baseline finding must carry a segmentation "
+            "mask, and the follow-up series must be the same patient's. "
+            "Returns the job; read the result with get_lesion_trajectory. "
+            "Pass ``dry_run=true`` to validate without enqueueing. " + _APPROVAL_NOTE
+        ),
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "track_id": {"type": "string"},
+                "followup_series_id": {"type": "string"},
+                "refine": {
+                    "type": "boolean",
+                    "description": "Re-segment on the follow-up (default); else warp-only.",
+                },
+                "dry_run": {"type": "boolean"},
+            },
+            "required": ["track_id", "followup_series_id"],
+        },
+    ),
 ]
 
 
@@ -434,6 +468,24 @@ async def _remove_finding_from_track(args: dict[str, Any]) -> str:
     return json.dumps({"status": "removed", "http_status": code})
 
 
+async def _propagate_lesion(args: dict[str, Any]) -> str:
+    body: dict[str, Any] = {"followup_series_id": args["followup_series_id"]}
+    if args.get("refine") is not None:
+        body["refine"] = args["refine"]
+    params: dict[str, Any] = {}
+    if args.get("dry_run"):
+        params["dry_run"] = "true"
+    try:
+        payload, _headers = await api_post_with_headers(
+            f"/api/lesion-tracks/{args['track_id']}/propagate",
+            json=body,
+            params=params or None,
+        )
+    except httpx.HTTPStatusError as exc:
+        return format_http_error(exc)
+    return json.dumps(payload, indent=2, ensure_ascii=False)
+
+
 _DISPATCH = {
     "list_lesion_tracks": _list_lesion_tracks,
     "get_lesion_track": _get_lesion_track,
@@ -445,6 +497,7 @@ _DISPATCH = {
     "restore_lesion_track": _restore_lesion_track,
     "add_finding_to_track": _add_finding_to_track,
     "remove_finding_from_track": _remove_finding_from_track,
+    "propagate_lesion": _propagate_lesion,
 }
 
 
