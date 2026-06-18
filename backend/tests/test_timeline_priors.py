@@ -46,11 +46,11 @@ def _client_as(session: AsyncSession, user) -> AsyncClient:
     return AsyncClient(transport=ASGITransport(app=app), base_url="http://test")
 
 
+@skip_if_no_db
 @pytest.mark.asyncio
 async def test_timeline_studies_survive_section_filter_when_crowded(
     db_session: AsyncSession, make_user, make_study
 ) -> None:
-    skip_if_no_db()
     owner = await make_user()
     patient = Patient(
         id=uuid.uuid4(),
