@@ -35,7 +35,7 @@ import uuid
 from dataclasses import dataclass, field
 from typing import Any
 
-from sqlalchemy import exists, select
+from sqlalchemy import String, exists, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from bvphoenix.api.findings import _apply_structured_filters
@@ -195,7 +195,9 @@ async def select_cohort(
     consent_exists = (
         exists()
         .where(TrainingConsent.study_id == Finding.study_id)
-        .where(TrainingConsent.tier == ImagingStudy.contribution_tier)
+        # contribution_tier is a PG enum; tier is varchar — cast the enum to
+        # text so PG has a varchar = varchar operator (no implicit cast exists).
+        .where(TrainingConsent.tier == ImagingStudy.contribution_tier.cast(String))
         .where(TrainingConsent.revoked_at.is_(None))
     )
 
@@ -318,12 +320,17 @@ async def cohort_blob_plan(
 ) -> list[dict[str, Any]]:
     """Enumerate the cohort's image + mask blobs, named by SYNTHETIC ids.
 
-    Returns work items ``{kind, name, bucket, key}`` where ``name`` is a
-    synthetic, de-identified path (``study-0001/series-01/img-0001.dcm`` /
-    ``.../masks/<label>.bin``) — never a real study / series / instance
+    Returns work items ``{kind, name, bucket, key, study_id}`` where ``name``
+    is a synthetic, de-identified path (``study-0001/series-01/img-0001.dcm``
+    / ``.../masks/<label>.bin``) — never a real study / series / instance
     UUID. ``kind`` drives the worker's per-blob de-id (DICOM scrubbed;
     masks are headerless raw uint8, no PHI). The byte fetch happens in the
     worker; this is the (DB-only) plan.
+
+    Each item also carries the real ``study_id`` (a UUID) for worker-side
+    ledger attribution (per-study bytes + content hash for the dataset
+    producer). It is NEVER serialized into the artifact — only ``name``
+    reaches the ZIP — so this does not weaken the de-identification.
     """
     work: list[dict[str, Any]] = []
     for study_id, syn in study_syn.items():
@@ -358,6 +365,7 @@ async def cohort_blob_plan(
                             "name": f"{syn}/series-{k:02d}/img-{j:04d}.dcm",
                             "bucket": inst.s3_bucket,
                             "key": inst.s3_key,
+                            "study_id": study_id,
                         }
                     )
             seg_rows = (
@@ -373,6 +381,36 @@ async def cohort_blob_plan(
                             "name": f"{syn}/series-{k:02d}/masks/{seg.label}.bin",
                             "bucket": seg.s3_bucket,
                             "key": seg.s3_key,
+                            "study_id": study_id,
                         }
                     )
     return work
+
+
+async def resolve_cohort_contributors(
+    db: AsyncSession, study_ids: list[uuid.UUID]
+) -> dict[uuid.UUID, uuid.UUID]:
+    """Map each cohort study to its contributor subject.
+
+    The contributor is the user holding the active (non-revoked) training
+    consent at the study's contribution tier — the same consent
+    :func:`select_cohort` gated on, so every selected study resolves. A
+    consent revoked in the race window between selection and this call simply
+    drops out: that study gets no contributor, its ``DatasetStudy`` row
+    carries a NULL ``contributor_subject_id`` and earns no payout weight.
+    """
+    if not study_ids:
+        return {}
+    rows = (
+        await db.execute(
+            select(TrainingConsent.study_id, TrainingConsent.user_subject_id)
+            .join(ImagingStudy, ImagingStudy.id == TrainingConsent.study_id)
+            .where(
+                TrainingConsent.study_id.in_(study_ids),
+                # Enum (contribution_tier) vs varchar (tier): cast to text.
+                TrainingConsent.tier == ImagingStudy.contribution_tier.cast(String),
+                TrainingConsent.revoked_at.is_(None),
+            )
+        )
+    ).all()
+    return {row[0]: row[1] for row in rows}

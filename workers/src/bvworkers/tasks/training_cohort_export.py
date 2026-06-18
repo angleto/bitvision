@@ -13,18 +13,29 @@ from ``services.patient_export`` (stream-zip member tuples +
 ours (multi-patient, synthetic-keyed) because ``_build_export_plan`` is
 single-patient + identifying.
 
+On success it also MATERIALIZES the cohort as a standalone, reusable
+Dataset (Flow task a5c3f73e, Option 3): a ``licensed_datasets`` row
+(``status='open'``) plus one ``dataset_studies`` row per study, carrying the
+contributor (the study's active training consent) and the per-study
+de-identified byte count + content hash accumulated while streaming. A
+license can later bind this dataset (``training_licenses.dataset_id``) and
+``services.contributor_payouts.assemble_payouts`` splits revenue by those
+per-study bytes. The standalone manifest object backs
+``licensed_datasets.manifest_s3_key``.
+
 Progress mirrors the study export (a shared counter polled by an async
 task → Job.progress_done). The same poller also honours a mid-stream
 cancel: ``request_cancellation`` flips the Job to ``cancelled`` and the
 streaming thread bails before its next member (``upload_iter`` aborts the
-multipart, so no orphan artifact). The Job is recoverable cross-session
-via its scope + arq_job_id.
+multipart, so no orphan artifact); a cancelled run never materializes a
+dataset. The Job is recoverable cross-session via its scope + arq_job_id.
 """
 
 from __future__ import annotations
 
 import asyncio
 import contextlib
+import hashlib
 import json
 import logging
 import threading
@@ -32,7 +43,7 @@ import uuid
 from datetime import UTC, datetime
 from typing import Any
 
-from bvphoenix.db.models import User
+from bvphoenix.db.models import DatasetStudy, LicensedDataset, User
 from bvphoenix.db.session import SERVICE_SUBJECT, set_current_subject
 from bvphoenix.services import jobs as jobs_service
 from bvphoenix.services import k_anonymity, training_cohort
@@ -85,14 +96,21 @@ def _stream_cohort_sync(
     key: str,
     progress_q: list[int],
     cancel: threading.Event,
-) -> int:
+) -> tuple[int, dict[uuid.UUID, dict[str, Any]]]:
     """Sync core: fetch each blob (DICOM de-id'd, masks raw), zip-stream
     into the S3 multipart sink. O(part_size) memory.
+
+    Accumulates per-study de-identified byte count + a running SHA-256 as it
+    streams (keyed on the work item's real ``study_id``) so the dataset
+    producer can write one ``DatasetStudy`` per study with an accurate
+    ``size_bytes`` (the payout weight) and ``content_sha256``. Returns
+    ``(total_size_bytes, {study_id: {size_bytes, content_sha256}})``.
 
     ``cancel`` is checked before each member (and before the trailing
     labels.json): once the poller trips it, the generator raises
     ``_ExportCancelledError`` so ``upload_iter`` aborts the multipart cleanly."""
     storage = get_s3_storage()
+    per_study: dict[uuid.UUID, dict[str, Any]] = {}
 
     def _members():  # type: ignore[no-untyped-def]
         for item in work:
@@ -101,6 +119,11 @@ def _stream_cohort_sync(
             body = _fetch_blob_bytes(
                 storage, item["bucket"], item["key"], deidentify=(item["kind"] == "dicom")
             )
+            sid = item.get("study_id")
+            if sid is not None:
+                stat = per_study.setdefault(sid, {"size": 0, "hash": hashlib.sha256()})
+                stat["size"] += len(body)
+                stat["hash"].update(body)
             # DICOM + mask blobs are already-incompressible binary → STORE.
             yield _bytes_member(item["name"], body, compress=False)
             progress_q[0] += 1
@@ -113,7 +136,11 @@ def _stream_cohort_sync(
     result = storage.upload_iter(
         stream_zip(_members()), bucket=bucket, key=key, content_type="application/zip"
     )
-    return result.size_bytes
+    stats = {
+        sid: {"size_bytes": s["size"], "content_sha256": s["hash"].hexdigest()}
+        for sid, s in per_study.items()
+    }
+    return result.size_bytes, stats
 
 
 async def _stream_cohort(
@@ -125,9 +152,10 @@ async def _stream_cohort(
     bucket: str,
     key: str,
     total: int,
-) -> int:
+) -> tuple[int, dict[uuid.UUID, dict[str, Any]]]:
     """Run the sync stream in a thread while an async poller publishes the
-    shared progress counter to the Job."""
+    shared progress counter to the Job. Returns the streamed size plus the
+    per-study byte/hash stats the dataset producer needs."""
     progress_q = [0]
     stop = asyncio.Event()
     cancel = threading.Event()
@@ -225,19 +253,62 @@ async def training_cohort_export_zip(
         total = len(work) + 1  # + labels.json
         bucket = settings.s3_bucket_derivatives
         key = f"exports/training/{job_id}/cohort.zip"
-        size = await _stream_cohort(
+        size, per_study_stats = await _stream_cohort(
             engine, jid, work, labels_bytes, bucket=bucket, key=key, total=total
         )
 
+        # Materialize the standalone Dataset (Option 3): the manifest gets its
+        # own S3 object (the ZIP is the bundle, but licensed_datasets.manifest_s3_*
+        # must point at a real object), then the ledger rows so a license can
+        # later bind this cohort and assemble_payouts can split by per-study
+        # bytes. Empty cohorts never reach here (k-anonymity would have failed).
+        manifest_key = f"exports/training/{job_id}/labels.json"
+        await asyncio.to_thread(
+            lambda: get_s3_storage().upload_bytes(labels_bytes, bucket=bucket, key=manifest_key)
+        )
+        manifest_hash = hashlib.sha256(labels_bytes).hexdigest()
+        empty_sha = hashlib.sha256(b"").hexdigest()
+
         async with AsyncSession(engine, expire_on_commit=False) as db:
             await set_current_subject(db, SERVICE_SUBJECT)
+            study_ids = list(study_syn.keys())
+            contributors = await training_cohort.resolve_cohort_contributors(db, study_ids)
+            dataset = LicensedDataset(
+                status="open",
+                manifest_hash=manifest_hash,
+                study_count=len(study_ids),
+                contributor_count=len({c for c in contributors.values() if c is not None}),
+                k_anon=min(kanon.values()) if kanon else 1,
+                manifest_s3_bucket=bucket,
+                manifest_s3_key=manifest_key,
+            )
+            db.add(dataset)
+            await db.flush()
+            for sid in study_ids:
+                stat = per_study_stats.get(sid)
+                db.add(
+                    DatasetStudy(
+                        dataset_id=dataset.id,
+                        study_id=sid,
+                        contributor_subject_id=contributors.get(sid),
+                        # The study's anonymized artifact lives inside the cohort
+                        # ZIP; size/hash are per-study (payout weight + integrity),
+                        # accumulated while streaming.
+                        anonymized_s3_bucket=bucket,
+                        anonymized_s3_key=key,
+                        content_sha256=stat["content_sha256"] if stat else empty_sha,
+                        size_bytes=stat["size_bytes"] if stat else 0,
+                    )
+                )
             await jobs_service.mark_succeeded(db, jid, result_uri=f"s3://{bucket}/{key}")
             await db.commit()
+            dataset_id = str(dataset.id)
         return {
             "status": "ok",
             "studies": len(study_syn),
             "findings": len(rows),
             "size_bytes": size,
+            "dataset_id": dataset_id,
         }
     except _ExportCancelledError:
         # The Job is already terminal ('cancelled', set by request_cancellation);
