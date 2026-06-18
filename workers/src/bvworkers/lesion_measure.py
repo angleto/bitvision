@@ -24,6 +24,7 @@ def refine_mask_on_image(
     *,
     dilate_mm: float = 8.0,
     threshold: float | None = None,
+    max_shell_above: float = 0.2,
 ) -> Any:
     """Re-segment a lesion on ``image`` (the follow-up) using ``seed_mask``
     (the baseline mask warped into the follow-up frame) as the seed.
@@ -35,6 +36,21 @@ def refine_mask_on_image(
     own ``mean - std`` intensity (works for a high-contrast lesion such as
     a lung nodule; pass an explicit value, or use a learned segmenter, for
     soft-tissue). Returns the warped seed unchanged if nothing is found.
+
+    **Soft-tissue leak guard.** Intensity thresholding cannot separate a
+    soft-tissue mass (e.g. a pleural/mediastinal tumour) from the chest
+    wall or mediastinum it abuts: they share the lesion's HU, so the
+    threshold region grows across the connected tissue and over-segments
+    (observed +60-130 % on a real RIDER mass). We detect this from the
+    *outward growth shell* ``dilate(seed) \\ seed``: if more than
+    ``max_shell_above`` of it sits above the threshold, the boundary is not
+    intensity-defined there, so we return the registered prior (``seed``)
+    unchanged rather than leak. A crisp lesion/background edge (lung nodule
+    in air) leaves the shell almost entirely below threshold (~0.08 in
+    calibration) and refines normally; a soft-tissue mass measures ~0.31.
+    Shrinkage (treatment response) is unaffected — it is inward, not in the
+    shell. Pass ``max_shell_above=1.0`` to disable the gate (e.g. when an
+    explicit ``threshold`` is supplied for a known high-contrast target).
     """
     import numpy as np
     import SimpleITK as sitk  # noqa: N813
@@ -51,6 +67,15 @@ def refine_mask_on_image(
 
     radius = [max(1, round(dilate_mm / s)) for s in seed.GetSpacing()]
     region = sitk.BinaryDilate(seed, radius)
+
+    # Soft-tissue leak guard: bail to the registered prior when intensity
+    # does not define the lesion boundary in the growth shell.
+    shell_arr = sitk.GetArrayFromImage(sitk.And(region, sitk.Not(seed))).astype(bool)
+    if shell_arr.any():
+        shell_above = float((sitk.GetArrayFromImage(img)[shell_arr] >= threshold).mean())
+        if shell_above > max_shell_above:
+            return seed
+
     candidate = sitk.And(
         sitk.BinaryThreshold(
             img, lowerThreshold=threshold, upperThreshold=1e30, insideValue=1, outsideValue=0
