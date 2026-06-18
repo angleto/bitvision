@@ -378,6 +378,123 @@ def embed(
     click.echo("Run an Arq worker with the `ai` extra to process the queue.")
 
 
+# Volume-geometry backfill ----------------------------------------------
+# Migration 0009 added Derivative.geometry WITHOUT a backfill, so volumes
+# packed before it carry geometry IS NULL — the viewer falls back to an
+# identity frame and cross-study registration can't run in true patient
+# space (LPS), which the longitudinal tumour-comparison feature needs.
+# Re-running pack_volume recomputes geometry from the sorted DICOM and
+# rewrites the (identical) blob; the task is idempotent.
+
+
+def _geometry_candidate_ids(
+    session: Session,
+    *,
+    patient_id: uuid.UUID | None,
+    only_missing: bool,
+) -> list[uuid.UUID]:
+    where = ["d.kind = 'volume_f32'", "d.stack_index = 0"]
+    params: dict[str, object] = {}
+    if only_missing:
+        where.append("d.geometry IS NULL")
+    if patient_id is not None:
+        where.append("st.patient_id = :pid")
+        params["pid"] = patient_id
+    sql = (
+        "SELECT DISTINCT s.id FROM series s "
+        "JOIN imaging_studies st ON st.id = s.study_id "
+        "JOIN derivatives d ON d.series_id = s.id "
+        "WHERE " + " AND ".join(where) + " ORDER BY s.id"
+    )
+    rows = session.execute(text(sql), params).all()
+    return [uuid.UUID(str(r[0])) for r in rows]
+
+
+async def _enqueue_pack(ids: list[uuid.UUID]) -> int:
+    settings = get_settings()
+    redis = await create_pool(redis_settings(settings.redis_url))
+    try:
+        count = 0
+        for sid in ids:
+            await redis.enqueue_job("pack_volume", str(sid))
+            count += 1
+        return count
+    finally:
+        await redis.close()
+
+
+@main.command("geometry")
+@click.option(
+    "--patient",
+    "patient",
+    default=None,
+    help="Patient UUID. Mutually exclusive with --all.",
+)
+@click.option(
+    "--all",
+    "all_patients",
+    is_flag=True,
+    default=False,
+    help="Backfill volume geometry for every patient. Use with care on large datasets.",
+)
+@click.option(
+    "--only-missing/--all-volumes",
+    "only_missing",
+    default=True,
+    show_default=True,
+    help="Only volumes with geometry IS NULL (default), or re-pack every primary volume.",
+)
+@click.option(
+    "--dry-run",
+    is_flag=True,
+    help="Count candidate series and print the plan without enqueueing.",
+)
+def geometry(
+    patient: str | None,
+    all_patients: bool,
+    only_missing: bool,
+    dry_run: bool,
+) -> None:
+    """Re-pack volumes whose ``Derivative.geometry`` is NULL so cross-study
+    registration runs in true patient space (LPS).
+
+    Enqueues ``pack_volume`` (idempotent) for each candidate series so the
+    geometry is recomputed from the sorted DICOM. Requires an Arq worker
+    running to process the queue.
+    """
+    if (patient is None) == (not all_patients):
+        click.echo("specify exactly one of --patient <id> or --all", err=True)
+        sys.exit(2)
+
+    patient_uuid: uuid.UUID | None = None
+    if patient is not None:
+        try:
+            patient_uuid = uuid.UUID(patient)
+        except ValueError:
+            click.echo(f"--patient must be a UUID, got {patient!r}", err=True)
+            sys.exit(2)
+
+    engine = _engine()
+    with Session(engine) as session:
+        ids = _geometry_candidate_ids(session, patient_id=patient_uuid, only_missing=only_missing)
+
+    scope = f"patient {patient_uuid}" if patient_uuid else "ALL patients"
+    click.echo(f"scope            : {scope}")
+    click.echo(f"only-missing     : {only_missing}")
+    click.echo(f"series candidates: {len(ids)}")
+
+    if dry_run:
+        click.echo("DRY RUN — no jobs enqueued.")
+        return
+    if not ids:
+        click.echo("nothing to do")
+        return
+
+    n = asyncio.run(_enqueue_pack(ids))
+    click.echo(f"enqueued pack_volume: {n} jobs")
+    click.echo("Run an Arq worker to process the queue.")
+
+
 # Text-chunk embedding backfill -----------------------------------------
 # Replaces the ad-hoc one-off snippet used to backfill the 122 document
 # chunks. The model -> {arq_task, store_table} routing lives on the
