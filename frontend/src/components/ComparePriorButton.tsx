@@ -36,7 +36,14 @@ export default function ComparePriorButton({ patientId, currentStudyId, currentS
     if (next && priors === null) {
       setErr(null);
       try {
-        const items = await patientsApi.timeline(patientId);
+        // Scope to studies: the unscoped timeline mixes in markers /
+        // documents / reports, sorts all by date and truncates to the
+        // default page, so a data-rich patient with OLD studies has its
+        // priors crowded out (every prior dropped -> false "no priors").
+        const items = await patientsApi.timeline(patientId, {
+          section: "studies",
+          limit: 200,
+        });
         const list: Prior[] = items
           .filter((it) => it.type === "study")
           .map((it) => ({
