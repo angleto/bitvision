@@ -303,6 +303,27 @@ sources:
       - D1-0019
       - D1-0020
 
+  # ---- TCIA/RIDER Lung CT (longitudinal, GT SEG) -----------------
+  # Same-day repeat ("coffee-break" test-retest) thoracic CT with
+  # radiologist tumour segmentations — the reference reproducibility
+  # set for therapy-response measurement. Subject RIDER-1129164940
+  # offers 100 series; the longitudinal-comparison golden ingests only
+  # the test/retest CT pair + their ground-truth SEG via --only-series.
+  # CC-BY 3.0.
+  - collection: TCIA/RIDER Lung CT
+    adapter: tcia
+    license_spdx: CC-BY-3.0
+    license_url: https://creativecommons.org/licenses/by/3.0/
+    citation_required: true
+    citation_text: >-
+      Zhao B, Schwartz LH, Kris MG. Data from RIDER_Lung CT. The Cancer
+      Imaging Archive. doi:10.7937/K9/TCIA.2015.U1X8A5NR. Zhao B, James LP,
+      Moskowitz CS, et al. Evaluating variability in tumor measurements
+      from same-day repeat CT scans of patients with non-small cell lung
+      cancer. Radiology. 2009;252(1):263-272. doi:10.1148/radiol.2522081593
+    subjects:
+      - RIDER-1129164940
+
   # ---- OsiriX educational samples (DROPPED 2026-05-20) -----------
   # Pixmeo migrated the BRAINIX/MANIX/PHENIX/MAGIX downloads behind
   # a Zendesk SSO ("download-premium.php") gate; the direct ZIP URLs

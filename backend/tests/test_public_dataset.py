@@ -368,3 +368,43 @@ def test_platform_owner_subject_autocreated_on_fresh_db(
     finally:
         _cleanup_collection(sync_session, collection)
         sync_session.close()
+
+
+def test_adapter_tcia_only_series_allowlist(tmp_path: Path, monkeypatch) -> None:
+    """``--only-series`` restricts the tcia fetch to the allow-listed UIDs.
+
+    Pure adapter test (no DB / no network): the getSeries listing and the
+    per-series getImage download are monkeypatched, so we assert that only
+    the requested SeriesInstanceUID is fetched and that a requested-but-not-
+    offered UID is silently skipped rather than fatal.
+    """
+    import zipfile
+
+    from bvphoenix.cli import public_import as pi
+
+    offered = ["uid-A", "uid-B", "uid-C"]
+
+    def fake_json(client, url, *, what):
+        return [{"SeriesInstanceUID": u} for u in offered]
+
+    fetched: list[str] = []
+
+    def fake_get(client, url, out_path, *, what):
+        fetched.append(url)
+        with zipfile.ZipFile(out_path, "w") as zf:
+            zf.writestr("img.dcm", b"DUMMY")
+
+    monkeypatch.setattr(pi, "_http_get_json_with_retry", fake_json)
+    monkeypatch.setattr(pi, "_http_get_with_retry", fake_get)
+
+    subject_dir = pi._adapter_tcia(
+        None,
+        collection="TCIA/RIDER Lung CT",
+        subject_id="RIDER-X",
+        workdir=tmp_path,
+        keep_series={"uid-B", "uid-NOT-OFFERED"},
+    )
+
+    assert subject_dir is not None
+    assert sorted(p.name for p in subject_dir.iterdir()) == ["uid-B"]
+    assert len(fetched) == 1 and "uid-B" in fetched[0]
