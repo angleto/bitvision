@@ -170,9 +170,7 @@ async def propagate_lesion(
             if fu_series is None:
                 return await _fail(db, track_id, jid, "no_series", "follow-up series not found")
             fu_study = (
-                await db.execute(
-                    select(ImagingStudy).where(ImagingStudy.id == fu_series.study_id)
-                )
+                await db.execute(select(ImagingStudy).where(ImagingStudy.id == fu_series.study_id))
             ).scalar_one_or_none()
             if fu_study is None or fu_study.patient_id != track.patient_id:
                 return await _fail(
@@ -225,18 +223,17 @@ async def propagate_lesion(
                 kind="rigid",
                 status="succeeded",
                 result_meta=reg_meta,
-                requested_by_subject_id=SERVICE_SUBJECT,
+                # System-authored: the actor is the worker, not a subject row.
+                # ``SERVICE_SUBJECT`` is the RLS principal string, not a UUID;
+                # the subject FK is nullable and provenance is carried by the
+                # status/result_meta, so this stays null.
+                requested_by_subject_id=None,
                 finished_at=datetime.now(UTC),
             )
             db.add(reg)
             await db.flush()
             reg_key = f"registrations/{reg.id}.tfm"
-            storage.put_object(
-                bucket=settings.s3_bucket_versioning,
-                key=reg_key,
-                data=tfm_bytes,
-                content_type="application/octet-stream",
-            )
+            storage.upload_bytes(tfm_bytes, bucket=settings.s3_bucket_versioning, key=reg_key)
             await db.execute(
                 update(Registration)
                 .where(Registration.id == reg.id)
@@ -251,12 +248,7 @@ async def propagate_lesion(
                 .astype(np.uint8)
                 .tobytes()
             )
-            storage.put_object(
-                bucket=settings.s3_bucket_derivatives,
-                key=seg_key,
-                data=mask_bytes,
-                content_type="application/octet-stream",
-            )
+            storage.upload_bytes(mask_bytes, bucket=settings.s3_bucket_derivatives, key=seg_key)
             new_seg = Segmentation(
                 series_id=fu_series_id,
                 producer="propagated",
@@ -269,7 +261,9 @@ async def propagate_lesion(
                 patient_id=track.patient_id,
                 author_kind="system",
                 model_id=PROPAGATION_MODEL_ID,
-                created_by_subject_id=SERVICE_SUBJECT,
+                # System-authored mask; ``author_kind`` carries provenance and
+                # the subject FK is nullable (SERVICE_SUBJECT is not a UUID).
+                created_by_subject_id=None,
             )
             db.add(new_seg)
             await db.flush()
@@ -298,7 +292,9 @@ async def propagate_lesion(
                 segmentation_id=new_seg.id,
                 registration_id=reg.id,
                 timepoint_date=fu_study.study_date,
-                subject_id=SERVICE_SUBJECT,
+                # System-authored finding; persist_propagated_finding accepts
+                # ``subject_id=None`` and stamps author_kind='system'.
+                subject_id=None,
             )
             result = {
                 "status": "succeeded",
@@ -310,9 +306,7 @@ async def propagate_lesion(
                 "baseline_volume_ml": baseline.volume_ml,
             }
             if jid is not None:
-                await jobs_service.mark_succeeded(
-                    db, jid, result_uri=f"finding:{finding.id}"
-                )
+                await jobs_service.mark_succeeded(db, jid, result_uri=f"finding:{finding.id}")
             await db.commit()
             return result
     finally:

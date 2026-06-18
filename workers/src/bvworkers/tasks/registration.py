@@ -257,12 +257,7 @@ async def register_series(
             storage = get_s3_storage()
             bucket = settings.s3_bucket_versioning
             key = f"registrations/{rid}.tfm"
-            storage.put_object(
-                bucket=bucket,
-                key=key,
-                data=tfm_bytes,
-                content_type="application/octet-stream",
-            )
+            storage.upload_bytes(tfm_bytes, bucket=bucket, key=key)
 
             await db.execute(
                 update(Registration)
