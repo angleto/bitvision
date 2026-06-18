@@ -9,7 +9,7 @@ from typing import Any
 
 import pytest
 
-from bvphoenix.db.models import DUCRequest, TrainingLicense
+from bvphoenix.db.models import DUCRequest, LicensedDataset, TrainingLicense
 from bvphoenix.services.training_licenses import (
     TrainingLicenseError,
     sign_license,
@@ -44,6 +44,7 @@ def _make_license(
     *,
     status: str = "approved",
     duc_id: uuid.UUID | None = None,
+    dataset_id: uuid.UUID | None = None,
 ) -> TrainingLicense:
     row = TrainingLicense(
         licensee_name="ACME Labs",
@@ -55,8 +56,23 @@ def _make_license(
     row.id = uuid.uuid4()
     row.status = status
     row.duc_request_id = duc_id
+    row.dataset_id = dataset_id
     row.signed_at = None
     return row
+
+
+def _make_dataset(status: str = "open") -> LicensedDataset:
+    ds = LicensedDataset(
+        manifest_hash="a" * 64,
+        study_count=3,
+        contributor_count=2,
+        k_anon=5,
+        manifest_s3_bucket="b",
+        manifest_s3_key="k",
+    )
+    ds.id = uuid.uuid4()
+    ds.status = status
+    return ds
 
 
 def _make_duc_request(status: str = "approved") -> DUCRequest:
@@ -151,3 +167,45 @@ async def test_refuses_when_duc_request_was_rejected() -> None:
     db = _Session(responses=[lic, duc])
     with pytest.raises(TrainingLicenseError, match="rejected"):
         await sign_license(db, license_id=lic.id)
+
+
+@pytest.mark.asyncio
+async def test_signing_freezes_bound_open_dataset() -> None:
+    # Option 3: a signed deal fixes the cohort into an immutable snapshot.
+    duc = _make_duc_request(status="approved")
+    ds = _make_dataset(status="open")
+    lic = _make_license(status="approved", duc_id=duc.id, dataset_id=ds.id)
+    db = _Session(responses=[lic, duc, ds])  # license, DUC, dataset
+    out = await sign_license(db, license_id=lic.id)
+    assert out.status == "signed"
+    assert ds.status == "frozen"
+    assert db.flushed == 1
+
+
+@pytest.mark.asyncio
+async def test_signing_refuses_stale_dataset() -> None:
+    # Sovereignty gate: a contributor revoked consent while the dataset was
+    # open, so it must not be sold — sign is refused, nothing is mutated.
+    duc = _make_duc_request(status="approved")
+    ds = _make_dataset(status="stale")
+    lic = _make_license(status="approved", duc_id=duc.id, dataset_id=ds.id)
+    db = _Session(responses=[lic, duc, ds])
+    with pytest.raises(TrainingLicenseError, match="stale"):
+        await sign_license(db, license_id=lic.id)
+    assert lic.status == "approved"
+    assert ds.status == "stale"
+    assert db.flushed == 0
+
+
+@pytest.mark.asyncio
+async def test_signing_allows_already_frozen_dataset() -> None:
+    # One dataset can back several deals: a prior signed license already
+    # froze it, and a second deal over the same immutable snapshot is fine.
+    duc = _make_duc_request(status="approved")
+    ds = _make_dataset(status="frozen")
+    lic = _make_license(status="approved", duc_id=duc.id, dataset_id=ds.id)
+    db = _Session(responses=[lic, duc, ds])
+    out = await sign_license(db, license_id=lic.id)
+    assert out.status == "signed"
+    assert ds.status == "frozen"
+    assert db.flushed == 1

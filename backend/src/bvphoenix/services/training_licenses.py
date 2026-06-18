@@ -23,7 +23,7 @@ from datetime import UTC, datetime
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from bvphoenix.db.models import DUCRequest, TrainingLicense
+from bvphoenix.db.models import DUCRequest, LicensedDataset, TrainingLicense
 
 
 class TrainingLicenseError(RuntimeError):
@@ -58,9 +58,12 @@ async def sign_license(
       of band, the DUC row still has to have run the vote.
 
     On success, ``status`` becomes ``signed`` and ``signed_at`` is
-    stamped with ``datetime.now(UTC)``. The row is ``flush``ed; the
-    caller owns the commit so audit logging and other side-effects
-    can land in the same transaction.
+    stamped with ``datetime.now(UTC)``; the bound dataset (if any) flips
+    ``open`` -> ``frozen`` (Option 3: a signed deal fixes an immutable
+    snapshot). A dataset that went ``stale`` (a contributor revoked consent
+    while it was open) cannot be signed — rebuild it first. The row is
+    ``flush``ed; the caller owns the commit so audit logging and other
+    side-effects can land in the same transaction.
     """
     license_ = (
         await db.execute(select(TrainingLicense).where(TrainingLicense.id == license_id))
@@ -100,8 +103,30 @@ async def sign_license(
             f"linked DUC request is in status '{duc.status}'; committee has not approved the deal"
         )
 
+    # Validate the bound dataset BEFORE mutating (all preconditions first).
+    # Signing freezes the dataset into an immutable snapshot. A 'stale'
+    # dataset (a contributor revoked consent while it was open) must not be
+    # sold — rebuild it first. A dataset already 'frozen' by an earlier
+    # signed deal is fine: one dataset can back several licenses (Option 3).
+    dataset = None
+    if license_.dataset_id is not None:
+        dataset = (
+            await db.execute(
+                select(LicensedDataset).where(LicensedDataset.id == license_.dataset_id)
+            )
+        ).scalar_one_or_none()
+        if dataset is None:
+            raise TrainingLicenseError("linked dataset is missing; cannot sign")
+        if dataset.status == "stale":
+            raise TrainingLicenseError(
+                "linked dataset is stale (a contributor revoked consent); "
+                "rebuild the dataset before signing"
+            )
+
     license_.status = "signed"
     license_.signed_at = datetime.now(UTC)
+    if dataset is not None and dataset.status == "open":
+        dataset.status = "frozen"  # signed deal -> immutable snapshot
     await db.flush()
     return license_
 
