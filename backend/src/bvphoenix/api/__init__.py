@@ -58,6 +58,7 @@ from bvphoenix.api import proposals as proposals_routes
 from bvphoenix.api import provenance as provenance_routes
 from bvphoenix.api import qna as qna_routes
 from bvphoenix.api import report_contents as report_contents_routes
+from bvphoenix.api import response_assessments as response_assessments_routes
 from bvphoenix.api import search as search_routes
 from bvphoenix.api import search_chunks as search_chunks_routes
 from bvphoenix.api import search_hybrid as search_hybrid_routes
@@ -145,6 +146,7 @@ api_router.include_router(payouts_routes.router)
 api_router.include_router(markers_routes.router)
 api_router.include_router(findings_routes.router)
 api_router.include_router(lesion_tracks_routes.router)
+api_router.include_router(response_assessments_routes.router)
 api_router.include_router(training_exports_routes.router)
 api_router.include_router(app_settings_routes.router)
 api_router.include_router(admin_users_routes.router)

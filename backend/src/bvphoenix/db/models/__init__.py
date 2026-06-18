@@ -140,6 +140,10 @@ from bvphoenix.db.models.report_contents import (
     ReportContent,
     ReportContentCitation,
 )
+from bvphoenix.db.models.response_assessments import (
+    ResponseAssessment,
+    ResponseAssessmentRevision,
+)
 from bvphoenix.db.models.revoked_tokens import RevokedToken
 from bvphoenix.db.models.segmentations import SEGMENTATION_PRODUCERS, Segmentation
 from bvphoenix.db.models.sharing import ShareLink
@@ -308,6 +312,8 @@ __all__ = [
     "ReindexJob",
     "ReportContent",
     "ReportContentCitation",
+    "ResponseAssessment",
+    "ResponseAssessmentRevision",
     "RevokedToken",
     "Segmentation",
     "Series",
