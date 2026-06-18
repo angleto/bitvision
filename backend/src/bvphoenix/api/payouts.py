@@ -26,6 +26,7 @@ from bvphoenix.middleware.audit_dependency import AuditDep
 from bvphoenix.services.contributor_payouts import (
     PayoutAssemblyError,
     assemble_payouts,
+    list_user_datasets,
     list_user_payouts,
 )
 
@@ -65,6 +66,42 @@ async def my_payouts(
             bytes_contributed=int(r.bytes_contributed),
             status=r.status,
             paid_at=r.paid_at.isoformat() if r.paid_at else None,
+            created_at=r.created_at.isoformat(),
+        )
+        for r in rows
+    ]
+
+
+class MyDatasetOut(BaseModel):
+    dataset_id: str
+    status: str
+    my_study_count: int
+    study_count: int
+    contributor_count: int
+    tiers: list[str]
+    created_at: str
+
+
+@router.get("/me/datasets", response_model=list[MyDatasetOut])
+async def my_datasets(
+    user: Annotated[User, Depends(require_user)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> list[MyDatasetOut]:
+    """Datasets that bundled the caller's studies — the data-sovereignty view.
+
+    Aggregate + storage-isolated: dataset id (not study / patient ids),
+    status (open / frozen / stale), the tiers you contributed at, how many of
+    your studies are in each, and the dataset totals. No bucket / key /
+    manifest location / study id is ever exposed."""
+    rows = await list_user_datasets(db, user_subject_id=user.subject_id)
+    return [
+        MyDatasetOut(
+            dataset_id=str(r.dataset_id),
+            status=r.status,
+            my_study_count=r.my_study_count,
+            study_count=r.study_count,
+            contributor_count=r.contributor_count,
+            tiers=r.tiers,
             created_at=r.created_at.isoformat(),
         )
         for r in rows

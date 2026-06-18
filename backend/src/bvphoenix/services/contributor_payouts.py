@@ -33,13 +33,16 @@ from __future__ import annotations
 import logging
 import uuid
 from dataclasses import dataclass
+from datetime import datetime
 
-from sqlalchemy import func, select
+from sqlalchemy import String, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from bvphoenix.db.models import (
     ContributorPayout,
     DatasetStudy,
+    ImagingStudy,
+    LicensedDataset,
     TrainingLicense,
 )
 
@@ -186,10 +189,83 @@ async def list_user_payouts(
     )
 
 
+@dataclass(frozen=True, slots=True)
+class UserDatasetView:
+    """One row of a contributor's "my data in datasets" view.
+
+    Deliberately storage-isolated: it carries the dataset's own id (not a
+    patient/study UUID), its lifecycle status, the tiers of the caller's
+    studies in it, and aggregate counts — never a bucket, S3 key, manifest
+    location, or any study/patient identifier.
+    """
+
+    dataset_id: uuid.UUID
+    status: str
+    my_study_count: int
+    study_count: int
+    contributor_count: int
+    tiers: list[str]
+    created_at: datetime
+
+
+async def list_user_datasets(
+    db: AsyncSession, *, user_subject_id: uuid.UUID
+) -> list[UserDatasetView]:
+    """Every dataset that bundled at least one of the user's studies.
+
+    The sovereignty view behind ``GET /api/me/datasets``: a contributor can
+    see where their data went (dataset id + status open/frozen/stale), the
+    tiers they contributed at, how many of their studies are in each dataset,
+    and the dataset's totals — with NO study/patient ids or storage locations
+    (the join to ``imaging_studies`` stays server-side). Scoped to the
+    caller's own ``contributor_subject_id``; most recent first.
+    """
+    rows = (
+        await db.execute(
+            select(
+                LicensedDataset.id,
+                LicensedDataset.status,
+                LicensedDataset.study_count,
+                LicensedDataset.contributor_count,
+                LicensedDataset.created_at,
+                func.count(func.distinct(DatasetStudy.study_id)).label("my_study_count"),
+                func.array_agg(func.distinct(ImagingStudy.contribution_tier.cast(String))).label(
+                    "tiers"
+                ),
+            )
+            .join(DatasetStudy, DatasetStudy.dataset_id == LicensedDataset.id)
+            .join(ImagingStudy, ImagingStudy.id == DatasetStudy.study_id)
+            .where(DatasetStudy.contributor_subject_id == user_subject_id)
+            .group_by(
+                LicensedDataset.id,
+                LicensedDataset.status,
+                LicensedDataset.study_count,
+                LicensedDataset.contributor_count,
+                LicensedDataset.created_at,
+            )
+            .order_by(LicensedDataset.created_at.desc())
+        )
+    ).all()
+    return [
+        UserDatasetView(
+            dataset_id=r.id,
+            status=r.status,
+            my_study_count=int(r.my_study_count),
+            study_count=int(r.study_count),
+            contributor_count=int(r.contributor_count),
+            tiers=sorted(t for t in (r.tiers or []) if t),
+            created_at=r.created_at,
+        )
+        for r in rows
+    ]
+
+
 __all__ = [
     "CONTRIBUTOR_POOL_FRACTION",
     "AssemblySummary",
     "PayoutAssemblyError",
+    "UserDatasetView",
     "assemble_payouts",
+    "list_user_datasets",
     "list_user_payouts",
 ]

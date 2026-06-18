@@ -17,7 +17,7 @@ from typing import Any
 import httpx
 from mcp.types import Tool, ToolAnnotations
 
-from bvmcp.tools.client import api_post_with_headers, format_http_error
+from bvmcp.tools.client import api_get, api_post_with_headers, format_http_error
 
 TOOLS: list[Tool] = [
     Tool(
@@ -111,6 +111,26 @@ TOOLS: list[Tool] = [
             },
         },
     ),
+    Tool(
+        name="list_my_datasets",
+        annotations=ToolAnnotations(
+            title="List my data in training datasets",
+            readOnlyHint=True,
+            idempotentHint=True,
+            openWorldHint=False,
+        ),
+        description=(
+            "List the training datasets that bundled your studies — the "
+            "data-sovereignty view. Per dataset: its id, status (open / "
+            "frozen / stale), the tiers you contributed at, how many of your "
+            "studies are in it, and the dataset totals (studies, "
+            "contributors). Aggregate + storage-isolated: no patient / study "
+            "id, bucket, or key is returned. A 'stale' dataset means a "
+            "contributor revoked consent, so it must be rebuilt before it can "
+            "be licensed."
+        ),
+        inputSchema={"type": "object", "properties": {}},
+    ),
 ]
 
 
@@ -132,9 +152,19 @@ async def _export_training_cohort_bundle(args: dict[str, Any]) -> str:
     return json.dumps(payload, indent=2, ensure_ascii=False)
 
 
+async def _list_my_datasets(_args: dict[str, Any]) -> str:
+    try:
+        payload = await api_get("/api/me/datasets")
+    except httpx.HTTPStatusError as exc:
+        return format_http_error(exc)
+    return json.dumps(payload, indent=2, ensure_ascii=False)
+
+
 async def handle(name: str, arguments: dict[str, Any]) -> str:
     if name == "export_training_manifest":
         return await _export_training_manifest(arguments)
     if name == "export_training_cohort_bundle":
         return await _export_training_cohort_bundle(arguments)
+    if name == "list_my_datasets":
+        return await _list_my_datasets(arguments)
     return f"Error: unknown tool '{name}' in training module"

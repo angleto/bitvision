@@ -643,6 +643,7 @@ EXPECTED_TOOL_NAMES = {
     # --- Training cohort export (P5) ---
     "export_training_manifest",
     "export_training_cohort_bundle",
+    "list_my_datasets",
     # --- Sprint 3.5 — agent-driven tag + metadata writes ---
     "add_tag_to_study",
     "remove_tag_from_study",
