@@ -22,7 +22,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from bvphoenix.auth import require_admin
-from bvphoenix.db.models import DUCMember, DUCRequest, TrainingLicense, User
+from bvphoenix.db.models import DUCMember, DUCRequest, LicensedDataset, TrainingLicense, User
 from bvphoenix.db.session import get_db
 from bvphoenix.middleware.audit_dependency import AuditDep
 from bvphoenix.services.duc import DUCError, record_vote, submit_request
@@ -172,6 +172,7 @@ class LicenseOut(BaseModel):
     licensee_name: str
     status: str
     duc_request_id: str | None
+    dataset_id: str | None
     signed_at: str | None
 
 
@@ -181,8 +182,69 @@ def _license_out(row: TrainingLicense) -> LicenseOut:
         licensee_name=row.licensee_name,
         status=row.status,
         duc_request_id=(str(row.duc_request_id) if row.duc_request_id else None),
+        dataset_id=(str(row.dataset_id) if row.dataset_id else None),
         signed_at=row.signed_at.isoformat() if row.signed_at else None,
     )
+
+
+class LicenseCreateIn(BaseModel):
+    licensee_name: str = Field(min_length=1, max_length=255)
+    licensee_email: str = Field(min_length=3, max_length=320)
+    price_usd_cents: int = Field(ge=0)
+    term_months: int = Field(default=12, gt=0)
+    dataset_id: uuid.UUID | None = Field(
+        default=None,
+        description="The open (or already-frozen) dataset this deal grants.",
+    )
+
+
+@router.post(
+    "/licenses",
+    response_model=LicenseOut,
+    status_code=201,
+    summary="Create a draft training license, optionally bound to a dataset",
+)
+async def create_training_license(
+    body: LicenseCreateIn,
+    admin: Annotated[User, Depends(require_admin)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+    audit: AuditDep,
+) -> LicenseOut:
+    """Create a ``draft`` training license, optionally bound to a Dataset via
+    ``dataset_id`` — the frozen cohort this deal will grant. Signing later
+    freezes an ``open`` dataset; a ``stale`` dataset (a contributor revoked
+    consent) cannot be licensed and is refused here with 409."""
+    if body.dataset_id is not None:
+        dataset = (
+            await db.execute(select(LicensedDataset).where(LicensedDataset.id == body.dataset_id))
+        ).scalar_one_or_none()
+        if dataset is None:
+            raise HTTPException(status_code=404, detail="dataset not found")
+        if dataset.status == "stale":
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    "dataset is stale (a contributor revoked consent); rebuild it before licensing"
+                ),
+            )
+    lic = TrainingLicense(
+        licensee_name=body.licensee_name,
+        licensee_email=body.licensee_email,
+        price_usd_cents=body.price_usd_cents,
+        term_months=body.term_months,
+        dataset_id=body.dataset_id,
+    )
+    db.add(lic)
+    await db.flush()
+    await db.commit()
+    await audit.log(
+        action="training_license.created",
+        actor_subject_id=admin.subject_id,
+        resource_kind="training_license",
+        resource_id=lic.id,
+        metadata={"dataset_id": str(body.dataset_id) if body.dataset_id else None},
+    )
+    return _license_out(lic)
 
 
 @router.post(
