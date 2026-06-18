@@ -6,7 +6,14 @@
 
 import { useEffect, useState } from "react";
 
-import { ApiError, type Consent, downloadJobResult, gdprApi } from "@/lib/api";
+import {
+  ApiError,
+  type Consent,
+  type MyDataset,
+  downloadJobResult,
+  gdprApi,
+  myDataApi,
+} from "@/lib/api";
 import { jobsStorage } from "@/lib/jobs";
 import { useJob } from "@/lib/useJob";
 
@@ -55,6 +62,7 @@ export default function PrivacySettingsPage() {
   const [erasureConfirm, setErasureConfirm] = useState(false);
   const [erasureReason, setErasureReason] = useState("");
   const [notice, setNotice] = useState<string | null>(null);
+  const [datasets, setDatasets] = useState<MyDataset[] | null>(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -66,6 +74,23 @@ export default function PrivacySettingsPage() {
         if (!cancelled) setErr(e instanceof ApiError ? e.message : "load failed");
       }
     })();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  // Best-effort: a datasets failure (e.g. the endpoint is not yet deployed)
+  // must not block the consents / export / erasure surface above.
+  useEffect(() => {
+    let cancelled = false;
+    myDataApi
+      .datasets()
+      .then((ds) => {
+        if (!cancelled) setDatasets(ds);
+      })
+      .catch(() => {
+        if (!cancelled) setDatasets([]);
+      });
     return () => {
       cancelled = true;
     };
@@ -222,6 +247,46 @@ export default function PrivacySettingsPage() {
             </div>
           );
         })}
+      </section>
+
+      <section style={{ marginTop: "2rem" }}>
+        <h2>My data in datasets</h2>
+        <p className="meta">
+          Where your donated studies ended up. Aggregate only — no study, image, or storage location
+          is shown. A dataset is <strong>open</strong> until a license over it is signed (
+          <strong>frozen</strong>); it turns <strong>stale</strong> if you revoke a contribution, so
+          it must be rebuilt before it can be licensed.
+        </p>
+        {datasets === null && <p className="meta">Loading datasets…</p>}
+        {datasets !== null && datasets.length === 0 && (
+          <p className="meta">None of your studies are in a training dataset yet.</p>
+        )}
+        {datasets !== null && datasets.length > 0 && (
+          <table style={{ width: "100%", fontSize: "0.9rem" }}>
+            <thead>
+              <tr>
+                <th style={{ textAlign: "left" }}>Dataset</th>
+                <th style={{ textAlign: "left" }}>Status</th>
+                <th style={{ textAlign: "left" }}>Tiers</th>
+                <th style={{ textAlign: "right" }}>My studies</th>
+                <th style={{ textAlign: "right" }}>Total studies</th>
+                <th style={{ textAlign: "right" }}>Contributors</th>
+              </tr>
+            </thead>
+            <tbody>
+              {datasets.map((d) => (
+                <tr key={d.dataset_id}>
+                  <td title={d.dataset_id}>{d.dataset_id.slice(0, 8)}</td>
+                  <td>{d.status}</td>
+                  <td>{d.tiers.join(", ")}</td>
+                  <td style={{ textAlign: "right" }}>{d.my_study_count}</td>
+                  <td style={{ textAlign: "right" }}>{d.study_count}</td>
+                  <td style={{ textAlign: "right" }}>{d.contributor_count}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        )}
       </section>
 
       <section style={{ marginTop: "2rem" }}>

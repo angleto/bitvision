@@ -2953,6 +2953,24 @@ export const transparencyApi = {
   },
 };
 
+// "My data in datasets" — the contributor-sovereignty view (a5c3f73e).
+// Aggregate + storage-isolated: no study/patient id or storage location.
+export interface MyDataset {
+  dataset_id: string;
+  status: "open" | "frozen" | "stale";
+  my_study_count: number;
+  study_count: number;
+  contributor_count: number;
+  tiers: string[];
+  created_at: string;
+}
+
+export const myDataApi = {
+  datasets(): Promise<MyDataset[]> {
+    return request<MyDataset[]>("/api/me/datasets");
+  },
+};
+
 // ---------------------------------------------------------------------------
 // BYOK (F7.1) — user-supplied LLM API keys.
 // ---------------------------------------------------------------------------
