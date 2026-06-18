@@ -107,10 +107,32 @@ def warp_bbox_lps(bbox_lps: dict, transform: Any) -> dict:
     return {"min": pts.min(axis=0).tolist(), "max": pts.max(axis=0).tolist()}
 
 
+def transform_to_lps_affine(transform: Any) -> list[list[float]]:
+    """Sample any affine (rigid included) SimpleITK transform into a 4x4
+    homogeneous LPS matrix ``M`` such that ``out = M @ [in; 1]``. Robust:
+    built by transforming the origin + 3 basis vectors, so it needs no
+    parameter extraction (only valid as a global map for affine kinds —
+    not for a deformable field)."""
+    import numpy as np
+
+    origin = np.array(transform.TransformPoint((0.0, 0.0, 0.0)))
+    cols = [
+        np.array(transform.TransformPoint(e)) - origin
+        for e in ((1.0, 0.0, 0.0), (0.0, 1.0, 0.0), (0.0, 0.0, 1.0))
+    ]
+    a = np.array(cols).T  # columns are the images of the basis vectors
+    m = np.eye(4)
+    m[:3, :3] = a
+    m[:3, 3] = origin
+    return m.tolist()
+
+
 def rigid_register(fixed: Any, moving: Any) -> tuple[Any, dict[str, Any]]:
     """Rigid (6-DOF Euler) registration: Mattes mutual information +
     regular-step gradient descent, geometry-centred init. Returns the
-    transform mapping ``moving`` onto ``fixed`` and a metrics dict."""
+    transform mapping ``moving`` onto ``fixed`` and a metrics dict (the
+    dict carries ``lps_matrix``, the 4x4 fixed→moving LPS map the viewer
+    uses to synchronise crosshairs across two studies)."""
     import SimpleITK as sitk  # noqa: N813
 
     fixed_f = sitk.Cast(fixed, sitk.sitkFloat32)
@@ -142,6 +164,8 @@ def rigid_register(fixed: Any, moving: Any) -> tuple[Any, dict[str, Any]]:
         "rigid_metric": float(reg.GetMetricValue()),
         "rigid_iterations": int(reg.GetOptimizerIteration()),
         "rigid_metric_name": "MattesMutualInformation",
+        "lps_matrix": transform_to_lps_affine(transform),
+        "lps_maps": "fixed_to_moving",
     }
     return transform, meta
 
