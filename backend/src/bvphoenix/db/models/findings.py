@@ -278,6 +278,10 @@ class Finding(Base):
             + ")",
             name="ck_findings_laterality",
         ),
+        # Composite-FK target for lesion_track_points(patient_id, finding_id):
+        # guarantees a track point can only reference a finding of the same
+        # patient (cross-patient link inexpressible at the DDL level).
+        UniqueConstraint("patient_id", "id", name="uq_findings_patient_id"),
         Index("ix_findings_patient", "patient_id"),
         Index("ix_findings_study", "study_id"),
         Index("ix_findings_type", "finding_type_id"),

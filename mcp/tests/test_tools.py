@@ -619,6 +619,17 @@ EXPECTED_TOOL_NAMES = {
     "delete_finding",
     "restore_finding",
     "add_finding_geometry",
+    # --- Lesion tracks — longitudinal lesion follow-up ---
+    "list_lesion_tracks",
+    "get_lesion_track",
+    "get_lesion_trajectory",
+    "get_lesion_track_revisions",
+    "create_lesion_track",
+    "update_lesion_track",
+    "delete_lesion_track",
+    "restore_lesion_track",
+    "add_finding_to_track",
+    "remove_finding_from_track",
     # --- Training cohort export (P5) ---
     "export_training_manifest",
     "export_training_cohort_bundle",

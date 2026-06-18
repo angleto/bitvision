@@ -71,6 +71,11 @@ from bvphoenix.db.models.inbox import (
     PatientInboxAddress,
 )
 from bvphoenix.db.models.jobs import Job
+from bvphoenix.db.models.lesion_tracks import (
+    LesionTrack,
+    LesionTrackPoint,
+    LesionTrackRevision,
+)
 from bvphoenix.db.models.llm_rate_cards import (
     PROVIDERS as LLM_PROVIDERS,
 )
@@ -277,6 +282,9 @@ __all__ = [
     "Instance",
     "Job",
     "LLMRateCard",
+    "LesionTrack",
+    "LesionTrackPoint",
+    "LesionTrackRevision",
     "LicensedDataset",
     "ManifestEntry",
     "Marker",

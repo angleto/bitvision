@@ -42,6 +42,7 @@ from bvmcp.tools import images as images_tools
 from bvmcp.tools import imaging as imaging_tools
 from bvmcp.tools import inbox as inbox_tools
 from bvmcp.tools import labs as labs_tools
+from bvmcp.tools import lesion_tracks as lesion_tracks_tools
 from bvmcp.tools import metadata_writes as metadata_writes_tools
 from bvmcp.tools import notifications as notifications_tools
 from bvmcp.tools import patient_tasks as patient_tasks_tools
@@ -79,6 +80,7 @@ TOOL_MODULES = (
     labs_tools,
     imaging_tools,
     findings_tools,
+    lesion_tracks_tools,
     segmentations_tools,
     sharing_tools,
     calendar_subscriptions_tools,
