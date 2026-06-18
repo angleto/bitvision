@@ -74,6 +74,39 @@ def build_sitk_image_from_packed(packed: bytes, geometry: dict | None) -> Any:
     return img
 
 
+def warp_mask(mask: Any, transform: Any, reference: Any) -> Any:
+    """Resample a label ``mask`` (in the moving/baseline frame) onto the
+    ``reference`` grid (the fixed/follow-up frame) using ``transform`` from
+    ``register_pair(fixed=follow_up, moving=baseline)``. Nearest-neighbour
+    so labels stay integral. The result is the baseline lesion placed in the
+    follow-up frame — the seed for re-measuring the follow-up."""
+    import SimpleITK as sitk  # noqa: N813
+
+    return sitk.Resample(
+        mask, reference, transform, sitk.sitkNearestNeighbor, 0.0, mask.GetPixelID()
+    )
+
+
+def warp_bbox_lps(bbox_lps: dict, transform: Any) -> dict:
+    """Map a world-space (LPS) AABB from the baseline frame into the
+    follow-up frame. ``transform`` maps follow-up→baseline (the
+    ``register_pair`` output), so its inverse maps baseline→follow-up; all
+    8 corners are transformed and re-bounded (correct for any rotation).
+    Requires an invertible transform (use the rigid kind)."""
+    import numpy as np
+
+    inv = transform.GetInverse()
+    mn, mx = bbox_lps["min"], bbox_lps["max"]
+    corners = [
+        (float(x), float(y), float(z))
+        for x in (mn[0], mx[0])
+        for y in (mn[1], mx[1])
+        for z in (mn[2], mx[2])
+    ]
+    pts = np.array([inv.TransformPoint(c) for c in corners])
+    return {"min": pts.min(axis=0).tolist(), "max": pts.max(axis=0).tolist()}
+
+
 def rigid_register(fixed: Any, moving: Any) -> tuple[Any, dict[str, Any]]:
     """Rigid (6-DOF Euler) registration: Mattes mutual information +
     regular-step gradient descent, geometry-centred init. Returns the
