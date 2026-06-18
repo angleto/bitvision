@@ -147,3 +147,34 @@ def test_refine_recovers_grown_volume_from_baseline_seed() -> None:
     # Recovers the TRUE follow-up volume (within 10%), well above the seed.
     assert abs(vol_refined - vol_follow_true) / vol_follow_true < 0.1
     assert vol_refined > vol_base * 1.2
+
+
+def test_refine_leak_guard_keeps_prior_for_soft_tissue() -> None:
+    """Soft-tissue leak guard: a lesion embedded in same-HU tissue (a mass
+    abutting chest wall / mediastinum) has no intensity-defined boundary, so
+    the threshold region-grow would leak across the connected tissue. The
+    guard detects the non-discriminative growth shell and returns the
+    registered prior instead. Disabling it (``max_shell_above=1.0``)
+    reproduces the leak — the bug a real RIDER mass surfaced."""
+    shape = (40, 80, 80)
+    arr = np.full(shape, -1000.0, dtype=np.float32)
+    # A large soft-tissue block (HU 40); the lesion sits fully inside it so
+    # the whole growth shell is same-HU tissue (no boundary contrast).
+    arr[2:38, 10:70, 10:70] = 40.0
+    img = sitk.GetImageFromArray(arr)
+    img.SetSpacing((1.0, 1.0, 1.0))
+
+    zz = np.arange(40)[:, None, None]
+    yy = np.arange(80)[None, :, None]
+    xx = np.arange(80)[None, None, :]
+    sph = (zz - 20) ** 2 + (yy - 40) ** 2 + (xx - 40) ** 2 <= 8**2
+    seed = sitk.GetImageFromArray(sph.astype(np.uint8))
+    seed.CopyInformation(img)
+
+    v_seed = measure_mask(seed)["volume_ml"]
+    # Default gate: non-discriminative shell -> fall back to the prior.
+    v_guarded = measure_mask(refine_mask_on_image(seed, img))["volume_ml"]
+    assert abs(v_guarded - v_seed) < 1e-6
+    # Gate disabled: the region-grow leaks across the connected tissue.
+    v_leaked = measure_mask(refine_mask_on_image(seed, img, max_shell_above=1.0))["volume_ml"]
+    assert v_leaked > v_seed * 2.0
