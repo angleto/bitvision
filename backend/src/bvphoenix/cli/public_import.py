@@ -233,6 +233,7 @@ def _adapter_tcia(
     subject_id: str,
     workdir: Path,
     skip_series: set[str] | None = None,
+    keep_series: set[str] | None = None,
 ) -> Path | None:
     """Fetch one TCIA subject's worth of DICOMs.
 
@@ -247,8 +248,16 @@ def _adapter_tcia(
     point of the optimisation. Returns the subject's root directory, or
     ``None`` when every series the subject offers is already imported (no
     download performed, nothing to scan).
+
+    ``keep_series``, when non-empty, restricts the fetch to exactly those
+    SeriesInstanceUIDs (an allow-list). A subject like a longitudinal TCIA
+    case can carry 100+ series across many reconstructions/SEG/RTSTRUCT;
+    targeted ingest (one CT pair + its ground-truth SEG) would otherwise
+    pull and pack the whole subject. Requested UIDs the subject does not
+    offer are reported and skipped, not fatal.
     """
     skip_series = skip_series or set()
+    keep_series = keep_series or set()
     # Strip the leading "TCIA/" namespace the manifest uses so it's
     # explicit which collection lives where.
     tcia_collection = collection.split("/", 1)[1] if "/" in collection else collection
@@ -264,6 +273,16 @@ def _adapter_tcia(
             f"TCIA: no series for collection={tcia_collection!r} subject={subject_id!r}"
         )
 
+    if keep_series:
+        offered = {e.get("SeriesInstanceUID") for e in series_list}
+        missing = keep_series - offered
+        if missing:
+            click.echo(
+                f"    --only-series: {len(missing)} requested UID(s) not offered by "
+                f"{subject_id}, skipped: {', '.join(sorted(missing))}",
+                err=True,
+            )
+
     subject_dir = workdir / subject_id
     subject_dir.mkdir(parents=True, exist_ok=True)
     fetched = 0
@@ -271,6 +290,8 @@ def _adapter_tcia(
     for entry in series_list:
         series_uid = entry.get("SeriesInstanceUID")
         if not series_uid:
+            continue
+        if keep_series and series_uid not in keep_series:
             continue
         if series_uid in skip_series:
             skipped += 1
@@ -336,6 +357,17 @@ def _adapter_osirix_zip(
     ),
 )
 @click.option(
+    "--only-series",
+    "only_series",
+    multiple=True,
+    help=(
+        "Restrict the tcia adapter to specific SeriesInstanceUIDs (allow-list, "
+        "repeatable). Applies within every selected subject. Lets you ingest a "
+        "targeted slice of a large subject (e.g. one CT pair + its ground-truth "
+        "SEG) instead of all 100+ series. Ignored by the osirix_zip adapter."
+    ),
+)
+@click.option(
     "--dry-run",
     is_flag=True,
     help="Download + scan but do not write to S3 or DB.",
@@ -359,6 +391,7 @@ def _adapter_osirix_zip(
 def main(
     manifest_path: Path,
     only: tuple[str, ...],
+    only_series: tuple[str, ...],
     dry_run: bool,
     continue_on_error: bool,
     reimport_existing: bool,
@@ -368,6 +401,7 @@ def main(
     storage, bucket = storage_target()
 
     only_set = set(only)
+    keep_series = set(only_series)
     engine = create_engine(settings.database_url_sync, future=True)
 
     total_subjects = sum(len(s.subjects) for s in sources)
@@ -410,6 +444,7 @@ def main(
                             subject_id=subj.identifier,
                             workdir=workdir,
                             skip_series=skip_series,
+                            keep_series=keep_series,
                         )
                     elif src.adapter == "osirix_zip":
                         # OsiriX ships one ZIP per subject; there is no
