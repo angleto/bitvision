@@ -145,6 +145,14 @@ export interface MPRLayoutHandle {
     sourceSeriesId: string,
     voxel: [number, number, number],
   ) => boolean;
+  /** Current crosshair position as a world-space (LPS) point, or null if
+   *  the volume is not cached. Used to synchronise two studies whose frames
+   *  differ: read the world point here, map it through a registration
+   *  transform, then ``setCrosshairWorld`` on the other pane. */
+  getCrosshairWorld?: (ijk?: [number, number, number]) => [number, number, number] | null;
+  /** Move the crosshair to a world-space (LPS) point (converted to the
+   *  primary volume's IJK). Returns ``true`` on success. */
+  setCrosshairWorld?: (world: [number, number, number]) => boolean;
   /** Re-apply the percentile-based auto-WL to the fusion volume. The
    *  layout runs this on mount; exposing it here lets the SUV "Auto"
    *  button restore the fusion's window without forcing the user to
