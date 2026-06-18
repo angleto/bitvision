@@ -2,8 +2,8 @@
 
 Same stub-session pattern as the DUC / credits tests. The responses
 queue is keyed to the service's read order: license lookup,
-existing-payout count, licensed-dataset lookup, contributions
-aggregate."""
+existing-payout count, contributions aggregate. The dataset is reached
+via ``TrainingLicense.dataset_id`` (Option 3), not a separate lookup."""
 
 from __future__ import annotations
 
@@ -14,7 +14,6 @@ import pytest
 
 from bvphoenix.db.models import (
     ContributorPayout,
-    LicensedDataset,
     TrainingLicense,
 )
 from bvphoenix.services import contributor_payouts as svc
@@ -55,7 +54,9 @@ class _Session:
         self.flushed += 1
 
 
-def _license(*, price_cents: int = 10_000, status: str = "signed") -> TrainingLicense:
+def _license(
+    *, price_cents: int = 10_000, status: str = "signed", with_dataset: bool = True
+) -> TrainingLicense:
     lic = TrainingLicense(
         licensee_name="Test",
         licensee_email="x@example",
@@ -63,21 +64,8 @@ def _license(*, price_cents: int = 10_000, status: str = "signed") -> TrainingLi
     )
     lic.id = uuid.uuid4()
     lic.status = status
+    lic.dataset_id = uuid.uuid4() if with_dataset else None
     return lic
-
-
-def _dataset(*, license_id: uuid.UUID) -> LicensedDataset:
-    d = LicensedDataset(
-        license_id=license_id,
-        manifest_hash="a" * 64,
-        study_count=10,
-        contributor_count=2,
-        k_anon=5,
-        manifest_s3_bucket="x",
-        manifest_s3_key="y",
-    )
-    d.id = uuid.uuid4()
-    return d
 
 
 @pytest.mark.asyncio
@@ -108,13 +96,12 @@ async def test_assemble_refuses_replay() -> None:
 @pytest.mark.asyncio
 async def test_assemble_splits_50_50_by_bytes() -> None:
     lic = _license(price_cents=10_000)  # $100
-    ds = _dataset(license_id=lic.id)
     alice = uuid.uuid4()
     bob = uuid.uuid4()
     # alice contributed 75%, bob 25% of the bytes
     contributions = [(alice, 7_500), (bob, 2_500)]
-    # responses: license, existing count (0), dataset, contributions
-    db = _Session(responses=[[lic], [0], [ds], contributions])
+    # responses: license, existing count (0), contributions
+    db = _Session(responses=[[lic], [0], contributions])
     summary = await svc.assemble_payouts(db, license_id=lic.id)
 
     assert summary.pool_cents == 5_000  # 50% of $100
@@ -134,8 +121,7 @@ async def test_assemble_splits_50_50_by_bytes() -> None:
 @pytest.mark.asyncio
 async def test_assemble_handles_no_contributors() -> None:
     lic = _license(price_cents=10_000)
-    ds = _dataset(license_id=lic.id)
-    db = _Session(responses=[[lic], [0], [ds], []])  # no contributions
+    db = _Session(responses=[[lic], [0], []])  # no contributions
     summary = await svc.assemble_payouts(db, license_id=lic.id)
     assert summary.payouts_created == 0
     assert summary.contributor_count == 0
@@ -144,9 +130,9 @@ async def test_assemble_handles_no_contributors() -> None:
 
 
 @pytest.mark.asyncio
-async def test_assemble_without_dataset_row_raises() -> None:
-    lic = _license()
-    db = _Session(responses=[[lic], [0], []])  # no dataset
+async def test_assemble_without_dataset_bound_raises() -> None:
+    lic = _license(with_dataset=False)  # dataset_id is None
+    db = _Session(responses=[[lic], [0]])  # license, count; contributions never reached
     with pytest.raises(svc.PayoutAssemblyError):
         await svc.assemble_payouts(db, license_id=lic.id)
 
@@ -156,12 +142,11 @@ async def test_integer_rounding_leftover_goes_to_platform() -> None:
     """A 3-way split of a prime-ish pool leaves crumbs: verify the
     platform absorbs them so SUM(rows) + platform = price."""
     lic = _license(price_cents=1000)  # $10
-    ds = _dataset(license_id=lic.id)
     # 3 contributors with equal bytes → pool=500, each = 500//3 = 166.
     # Sum = 498; platform gets 502 (500 + leftover 2).
     contributors = [uuid.uuid4() for _ in range(3)]
     contributions = [(c, 100) for c in contributors]
-    db = _Session(responses=[[lic], [0], [ds], contributions])
+    db = _Session(responses=[[lic], [0], contributions])
     summary = await svc.assemble_payouts(db, license_id=lic.id)
     assert summary.payouts_created == 3
     total_paid = sum(r.amount_cents for r in db.added)

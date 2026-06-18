@@ -2,8 +2,11 @@
 
 Three tables covering the aggregate-assembly workflow:
 
-* :class:`TrainingLicense` — commercial deal + lifecycle status.
-* :class:`LicensedDataset` — assembled dataset tied to a licence.
+* :class:`TrainingLicense` — commercial deal + lifecycle status; points at
+  the frozen cohort it grants via ``dataset_id``.
+* :class:`LicensedDataset` — a standalone, reusable anonymized cohort (the
+  "Dataset"); ``status`` tracks open / frozen / stale. One dataset can back
+  many licenses (Option 3, Flow task a5c3f73e).
 * :class:`DatasetStudy` — membership join: which study went into
   which dataset, with the anonymised S3 location and the
   contributor at assembly time (for the F10.4 revenue share).
@@ -11,8 +14,9 @@ Three tables covering the aggregate-assembly workflow:
 F10.2 (k-anonymity ≥ 5 enforcement) is the guard that populates
 ``LicensedDataset.k_anon`` at assembly time. F10.3 wires the DUC
 workflow into ``TrainingLicense.duc_request_id``. F10.4 reads
-``DatasetStudy.contributor_subject_id`` and ``LicensedDataset.license
-→ price_usd_cents`` to compute the 50/50 payout split.
+``DatasetStudy.contributor_subject_id`` (reached via
+``TrainingLicense.dataset_id``) and the license's ``price_usd_cents`` to
+compute the 50/50 payout split.
 """
 
 from __future__ import annotations
@@ -56,6 +60,14 @@ class TrainingLicense(Base):
     term_months: Mapped[int] = mapped_column(Integer, nullable=False, server_default="12")
     status: Mapped[str] = mapped_column(String(16), nullable=False, server_default="draft")
     duc_request_id: Mapped[uuid.UUID | None] = mapped_column(PG_UUID(as_uuid=True))
+    # The frozen cohort this license grants (Option 3: the Dataset is
+    # standalone and reusable; the grant lives here, not on the dataset).
+    # RESTRICT so a licensed dataset cannot be deleted out from under a
+    # live license.
+    dataset_id: Mapped[uuid.UUID | None] = mapped_column(
+        PG_UUID(as_uuid=True),
+        ForeignKey("licensed_datasets.id", ondelete="RESTRICT"),
+    )
     signed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
@@ -72,6 +84,7 @@ class TrainingLicense(Base):
         CheckConstraint("price_usd_cents >= 0", name="ck_training_licenses_price_nonneg"),
         CheckConstraint("term_months > 0", name="ck_training_licenses_term_positive"),
         Index("ix_training_licenses_status", "status"),
+        Index("ix_training_licenses_dataset", "dataset_id"),
     )
 
 
@@ -79,11 +92,11 @@ class LicensedDataset(Base):
     __tablename__ = "licensed_datasets"
 
     id: Mapped[uuid.UUID] = uuid_pk()
-    license_id: Mapped[uuid.UUID] = mapped_column(
-        PG_UUID(as_uuid=True),
-        ForeignKey("training_licenses.id", ondelete="CASCADE"),
-        nullable=False,
-    )
+    # open   = mutable cohort, no signed license yet;
+    # frozen = a license over it was signed (immutable snapshot);
+    # stale  = a contributing consent was revoked while open, so it must be
+    #          rebuilt before it can be licensed.
+    status: Mapped[str] = mapped_column(String(16), nullable=False, server_default="open")
     manifest_hash: Mapped[str] = mapped_column(String(64), nullable=False)
     study_count: Mapped[int] = mapped_column(Integer, nullable=False)
     contributor_count: Mapped[int] = mapped_column(Integer, nullable=False)
@@ -101,7 +114,10 @@ class LicensedDataset(Base):
             name="ck_licensed_datasets_contributor_count",
         ),
         CheckConstraint("k_anon >= 1", name="ck_licensed_datasets_k_anon"),
-        Index("ix_licensed_datasets_license", "license_id"),
+        CheckConstraint(
+            "status IN ('open','frozen','stale')",
+            name="ck_licensed_datasets_status",
+        ),
     )
 
 
