@@ -52,6 +52,13 @@
       "sameFrame": "Aligned (same frame)",
       "registered": "Aligned (registration)",
       "unaligned": "Not aligned"
+    },
+    "selectSeries": "Select series to compare",
+    "plane": {
+      "axial": "axial",
+      "coronal": "coronal",
+      "sagittal": "sagittal",
+      "oblique": "oblique"
     }
   },
   "modal": {

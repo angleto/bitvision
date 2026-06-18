@@ -1,6 +1,7 @@
 "use client";
 
 import { ApiError, patientsApi, studiesApi } from "@/lib/api";
+import { bestMatchSeries } from "@/lib/seriesMatch";
 import { useTranslations } from "next-intl";
 import { useRouter } from "next/navigation";
 import { useState } from "react";
@@ -66,14 +67,20 @@ export default function ComparePriorButton({ patientId, currentStudyId, currentS
     setResolving(true);
     setErr(null);
     try {
-      const detail = await studiesApi.detail(priorStudyId);
-      const ct =
-        detail.series.find((s) => (s.modality ?? "").toUpperCase() === "CT") ?? detail.series[0];
-      if (!ct) {
+      const [detail, reference] = await Promise.all([
+        studiesApi.detail(priorStudyId),
+        studiesApi.series(currentSeriesId),
+      ]);
+      // Medically-sensible default: same modality, closest description to the
+      // current series — NOT just "the first CT". The follow-up viewer's
+      // per-pane selector lets the user refine either side (e.g. pick the
+      // portal-venous axial of both contrast CTs).
+      const baseline = bestMatchSeries(detail.series, reference) ?? detail.series[0];
+      if (!baseline) {
         setErr(t("noPriors"));
         return;
       }
-      router.push(`/viewer/followup?baseline=${ct.id}&followup=${currentSeriesId}`);
+      router.push(`/viewer/followup?baseline=${baseline.id}&followup=${currentSeriesId}`);
     } catch (e) {
       setErr(e instanceof ApiError ? e.message : "load failed");
     } finally {

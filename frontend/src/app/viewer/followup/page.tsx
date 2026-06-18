@@ -11,6 +11,7 @@ import type { MPRLayoutHandle } from "@/components/MPRLayoutTypes";
 import type { VolumeData } from "@/components/VolumeViewer";
 import { type Mat4, type Vec3, applyAffine, invertAffine, isMat4 } from "@/lib/affine";
 import { ApiError, type Series, fetchVolume, registrationsApi, studiesApi } from "@/lib/api";
+import { type PrimaryPlane, seriesOptionLabel } from "@/lib/seriesMatch";
 import { useTranslations } from "next-intl";
 import dynamic from "next/dynamic";
 import Link from "next/link";
@@ -71,6 +72,66 @@ function useSeriesPane(seriesId: string | null): PaneState {
   return pane;
 }
 
+// Resolves the SIBLING series of the study a pane is showing, so the pane can
+// offer a series selector. Keyed on the study (not the series) so switching
+// series within the same study does not refetch the list. Acquisition plane is
+// resolved per series for medical labeling/matching (progressive; a per-series
+// failure degrades to "unknown" rather than blocking the picker).
+function useStudySeries(seriesId: string | null): {
+  list: Series[];
+  planeOf: (id: string) => PrimaryPlane | null;
+} {
+  const [studyId, setStudyId] = useState<string | null>(null);
+  const [list, setList] = useState<Series[]>([]);
+  const [planes, setPlanes] = useState<Record<string, PrimaryPlane>>({});
+
+  useEffect(() => {
+    if (!seriesId) return;
+    let cancelled = false;
+    void (async () => {
+      try {
+        const s = await studiesApi.series(seriesId);
+        if (!cancelled) setStudyId(s.study_id);
+      } catch {
+        /* the pane surfaces its own load error */
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [seriesId]);
+
+  useEffect(() => {
+    if (!studyId) return;
+    let cancelled = false;
+    void (async () => {
+      try {
+        const detail = await studiesApi.detail(studyId);
+        if (cancelled) return;
+        setList(detail.series);
+        const entries = await Promise.all(
+          detail.series.map(async (s) => {
+            try {
+              const dm = await studiesApi.displayMetadata(s.id);
+              return [s.id, dm.primary_plane] as const;
+            } catch {
+              return [s.id, "unknown" as PrimaryPlane] as const;
+            }
+          }),
+        );
+        if (!cancelled) setPlanes(Object.fromEntries(entries));
+      } catch {
+        /* selector just won't populate */
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [studyId]);
+
+  return { list, planeOf: (id) => planes[id] ?? null };
+}
+
 export default function FollowupComparePage() {
   return (
     <Suspense
@@ -88,11 +149,17 @@ export default function FollowupComparePage() {
 function FollowupCompareInner() {
   const t = useTranslations("compare");
   const search = useSearchParams();
-  const baselineId = search.get("baseline") ?? search.getAll("s")[0] ?? null;
-  const followupId = search.get("followup") ?? search.getAll("s")[1] ?? null;
+  const [baselineId, setBaselineId] = useState<string | null>(
+    () => search.get("baseline") ?? search.getAll("s")[0] ?? null,
+  );
+  const [followupId, setFollowupId] = useState<string | null>(
+    () => search.get("followup") ?? search.getAll("s")[1] ?? null,
+  );
 
   const base = useSeriesPane(baselineId);
   const follow = useSeriesPane(followupId);
+  const baseStudy = useStudySeries(baselineId);
+  const followStudy = useStudySeries(followupId);
 
   const baseRef = useRef<MPRLayoutHandle | null>(null);
   const followRef = useRef<MPRLayoutHandle | null>(null);
@@ -102,6 +169,36 @@ function FollowupCompareInner() {
   const [matrix, setMatrix] = useState<Mat4 | null>(null);
   const [aligning, setAligning] = useState(false);
   const [alignErr, setAlignErr] = useState<string | null>(null);
+
+  // Keep the URL in sync (shareable / survives refresh) without remounting:
+  // after load, component state — not the URL — is the source of truth.
+  function syncUrl(b: string | null, f: string | null) {
+    if (typeof window === "undefined") return;
+    const qs = new URLSearchParams();
+    if (b) qs.set("baseline", b);
+    if (f) qs.set("followup", f);
+    window.history.replaceState(null, "", `${window.location.pathname}?${qs.toString()}`);
+  }
+  // Picking a different series on either side invalidates the previous rigid
+  // registration, so drop the matrix; the pane reloads and sameFoR / Align
+  // recompute for the new pair.
+  function pickBaseline(id: string) {
+    if (!id || id === baselineId) return;
+    setBaselineId(id);
+    setMatrix(null);
+    setAlignErr(null);
+    syncUrl(id, followupId);
+  }
+  function pickFollowup(id: string) {
+    if (!id || id === followupId) return;
+    setFollowupId(id);
+    setMatrix(null);
+    setAlignErr(null);
+    syncUrl(baselineId, id);
+  }
+  function planeLabel(p: PrimaryPlane | null): string | null {
+    return p && p !== "unknown" ? t(`plane.${p}`) : null;
+  }
 
   const sameFoR = useMemo(() => {
     const a = base.volume?.frameOfReferenceUid;
@@ -239,6 +336,9 @@ function FollowupCompareInner() {
             label: t("baseline"),
             other: followRef,
             map: mapBaseToFollow,
+            study: baseStudy,
+            selectedId: baselineId,
+            onPick: pickBaseline,
           },
           {
             pane: follow,
@@ -246,8 +346,11 @@ function FollowupCompareInner() {
             label: t("followup"),
             other: baseRef,
             map: mapFollowToBase,
+            study: followStudy,
+            selectedId: followupId,
+            onPick: pickFollowup,
           },
-        ].map(({ pane, ref, label, other, map }) => (
+        ].map(({ pane, ref, label, other, map, study, selectedId, onPick }) => (
           <div
             key={label}
             style={{
@@ -261,6 +364,9 @@ function FollowupCompareInner() {
           >
             <div
               style={{
+                display: "flex",
+                alignItems: "center",
+                gap: 6,
                 padding: "0.25rem 0.5rem",
                 fontSize: "0.78rem",
                 color: "#cbd5e1",
@@ -268,8 +374,36 @@ function FollowupCompareInner() {
                 borderBottom: "1px solid #1a1f2b",
               }}
             >
-              {label}
-              {pane.series?.series_description ? ` · ${pane.series.series_description}` : ""}
+              <span style={{ color: "#94a3b8", whiteSpace: "nowrap" }}>{label}</span>
+              {study.list.length > 0 ? (
+                <select
+                  aria-label={t("selectSeries")}
+                  value={selectedId ?? ""}
+                  onChange={(e) => onPick(e.target.value)}
+                  style={{
+                    flex: 1,
+                    minWidth: 0,
+                    background: "#0b0e13",
+                    color: "#e6ecf3",
+                    border: "1px solid #1a1f2b",
+                    borderRadius: 6,
+                    padding: "2px 6px",
+                    fontSize: "0.76rem",
+                  }}
+                >
+                  {study.list.map((s) => (
+                    <option key={s.id} value={s.id}>
+                      {seriesOptionLabel(s, planeLabel(study.planeOf(s.id)))}
+                    </option>
+                  ))}
+                </select>
+              ) : (
+                <span
+                  style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}
+                >
+                  {pane.series?.series_description ?? "…"}
+                </span>
+              )}
             </div>
             {pane.err ? (
               <div className="error" style={{ padding: "1rem" }}>
