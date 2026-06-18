@@ -103,6 +103,38 @@ async def _series_volume(db: AsyncSession, *, series_id: uuid.UUID, settings) ->
     return img
 
 
+async def _load_series_image(db: AsyncSession, *, series_id: uuid.UUID, settings) -> object | None:
+    """Load a series as a SimpleITK image in **true patient space (LPS)**.
+
+    Prefers the packed ``volume_f32`` derivative + its stored geometry
+    (origin / direction / spacing), so the registration transform is
+    LPS→LPS and honours orientation, gantry tilt and slice ordering. Falls
+    back to re-stacking DICOM in index space only when the series has not
+    been packed yet (legacy / not-yet-warmed) — a degraded but working path.
+    """
+    from bvphoenix.db.models import Derivative
+    from bvphoenix.services.volumes import DERIVATIVE_FORMAT, DERIVATIVE_KIND
+    from bvphoenix.storage import get_s3_storage
+
+    from bvworkers.registration_core import build_sitk_image_from_packed
+
+    deriv = (
+        await db.execute(
+            select(Derivative).where(
+                Derivative.series_id == series_id,
+                Derivative.kind == DERIVATIVE_KIND,
+                Derivative.format == DERIVATIVE_FORMAT,
+                Derivative.stack_index == 0,
+            )
+        )
+    ).scalar_one_or_none()
+    if deriv is not None:
+        storage = get_s3_storage()
+        packed = storage.get_object_bytes(bucket=deriv.s3_bucket, key=deriv.s3_key)
+        return build_sitk_image_from_packed(packed, deriv.geometry)
+    return await _series_volume(db, series_id=series_id, settings=settings)
+
+
 @with_safety_net("register_series")
 async def register_series(
     ctx: dict,  # type: ignore[type-arg]
@@ -168,8 +200,8 @@ async def register_series(
                 await db.commit()
                 return {"status": "error", "reason": "unsupported_kind"}
 
-            fixed = await _series_volume(db, series_id=reg.fixed_series_id, settings=settings)
-            moving = await _series_volume(db, series_id=reg.moving_series_id, settings=settings)
+            fixed = await _load_series_image(db, series_id=reg.fixed_series_id, settings=settings)
+            moving = await _load_series_image(db, series_id=reg.moving_series_id, settings=settings)
             if fixed is None or moving is None:
                 msg = "fixed or moving series cannot be stacked"
                 await db.execute(
@@ -188,34 +220,15 @@ async def register_series(
                 await db.commit()
                 return {"status": "error", "reason": "stack_failed"}
 
-            # Cast to a common float pixel type so the metric is
-            # well-defined across CT (Hounsfield) and MR (signal).
-            fixed_f = sitk.Cast(fixed, sitk.sitkFloat32)
-            moving_f = sitk.Cast(moving, sitk.sitkFloat32)
-
-            initial = sitk.CenteredTransformInitializer(
-                fixed_f,
-                moving_f,
-                sitk.Euler3DTransform(),
-                sitk.CenteredTransformInitializerFilter.GEOMETRY,
-            )
-
-            registration = sitk.ImageRegistrationMethod()
-            registration.SetMetricAsMattesMutualInformation(numberOfHistogramBins=50)
-            registration.SetMetricSamplingStrategy(registration.RANDOM)
-            registration.SetMetricSamplingPercentage(0.10)
-            registration.SetInterpolator(sitk.sitkLinear)
-            registration.SetOptimizerAsRegularStepGradientDescent(
-                learningRate=1.0,
-                minStep=1e-4,
-                numberOfIterations=100,
-            )
-            registration.SetInitialTransform(initial, inPlace=False)
+            # Rigid (+ optional demons) recipe, extracted to a pure module so
+            # it is unit-testable and reusable by lesion propagation. Both
+            # images are already in true patient space (LPS) when packed.
+            from bvworkers.registration_core import register_pair
 
             try:
-                rigid_transform = registration.Execute(fixed_f, moving_f)
+                final_transform, result_meta = register_pair(fixed, moving, reg.kind)
             except RuntimeError as exc:
-                msg = f"SimpleITK rigid registration failed: {exc}"
+                msg = f"SimpleITK registration failed: {exc}"
                 await db.execute(
                     update(Registration)
                     .where(Registration.id == rid)
@@ -231,70 +244,6 @@ async def register_series(
                     )
                 await db.commit()
                 return {"status": "error", "reason": "sitk_failed"}
-
-            rigid_metric = registration.GetMetricValue()
-            rigid_iter = registration.GetOptimizerIteration()
-            result_meta: dict[str, Any] = {
-                "kind": reg.kind,
-                "rigid_metric": float(rigid_metric),
-                "rigid_iterations": int(rigid_iter),
-                "rigid_metric_name": "MattesMutualInformation",
-            }
-            final_transform: Any = rigid_transform
-
-            if reg.kind == "demons":
-                # Resample moving onto the fixed grid using the rigid
-                # transform, so demons sees two volumes that already
-                # share orientation/spacing/origin. Demons assumes the
-                # input grids are aligned voxel-wise.
-                moving_resampled = sitk.Resample(
-                    moving_f,
-                    fixed_f,
-                    rigid_transform,
-                    sitk.sitkLinear,
-                    0.0,
-                    moving_f.GetPixelID(),
-                )
-
-                demons = sitk.FastSymmetricForcesDemonsRegistrationFilter()
-                demons.SetNumberOfIterations(50)
-                demons.SetStandardDeviations(1.5)
-                try:
-                    displacement_field = demons.Execute(fixed_f, moving_resampled)
-                except RuntimeError as exc:
-                    msg = f"SimpleITK demons failed: {exc}"
-                    await db.execute(
-                        update(Registration)
-                        .where(Registration.id == rid)
-                        .values(
-                            status="failed",
-                            error=msg,
-                            finished_at=datetime.now(UTC),
-                        )
-                    )
-                    if reg.job_id is not None:
-                        await jobs_service.mark_failed(
-                            db, reg.job_id, error={"code": "demons_failed", "message": msg}
-                        )
-                    await db.commit()
-                    return {"status": "error", "reason": "demons_failed"}
-
-                demons_metric = float(demons.GetMetric())
-                demons_iter = int(demons.GetElapsedIterations())
-                displacement_transform = sitk.DisplacementFieldTransform(displacement_field)
-
-                composite = sitk.CompositeTransform([rigid_transform, displacement_transform])
-                final_transform = composite
-
-                result_meta.update(
-                    {
-                        "demons_metric": demons_metric,
-                        "demons_iterations": demons_iter,
-                        "demons_metric_name": "MeanSquaredDifference",
-                        "demons_filter": "FastSymmetricForcesDemons",
-                        "demons_std_deviations": 1.5,
-                    }
-                )
 
             # Save the transform to a tempfile then upload.
             import tempfile
