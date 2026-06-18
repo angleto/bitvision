@@ -67,6 +67,26 @@ async def create_registration(
     if not await can(db, user=user, action=READ_PIXELS, study=moving_study):
         raise _problem(403, "forbidden", "READ_PIXELS denied on moving series")
 
+    # Same-patient guard. Cross-STUDY registration of one patient's
+    # baseline vs follow-up is the whole point; registering two DIFFERENT
+    # patients' series is forbidden — a cross-patient spatial transform
+    # is exactly where a measurement could be mis-attributed. (Mirrors the
+    # platform's cross-patient-impossible invariant; CI security test in
+    # tests/test_registration_same_patient.py.)
+    if fixed_study.patient_id is None or moving_study.patient_id is None:
+        raise _problem(
+            422,
+            "no_patient",
+            "both series must belong to a patient to be registered",
+        )
+    if fixed_study.patient_id != moving_study.patient_id:
+        raise _problem(
+            422,
+            "cross_patient",
+            "cross-patient registration is not allowed: the fixed and moving "
+            "series belong to different patients",
+        )
+
     reg = Registration(
         fixed_series_id=fixed_series.id,
         moving_series_id=moving_series.id,
