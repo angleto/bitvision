@@ -344,6 +344,15 @@ TOOL_SCOPE: dict[str, str] = {
     # Propagation triggers an expensive worker but its consequential effect
     # is a medical Finding write, so it is gated on findings:write.
     "propagate_lesion": "findings:write",
+    # Response assessments (RECIST roll-up over the findings layer).
+    "list_response_assessments": "findings:read",
+    "get_response_assessment": "findings:read",
+    "get_response_assessment_revisions": "findings:read",
+    "compute_response_assessment": "findings:write",
+    "recompute_response_assessment": "findings:write",
+    "update_response_assessment": "findings:write",
+    "delete_response_assessment": "findings:write",
+    "restore_response_assessment": "findings:write",
     "export_training_manifest": "datasets:read",
     "export_training_cohort_bundle": "datasets:export",
     "write_clinical_note": "annotations:write",

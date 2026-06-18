@@ -631,6 +631,15 @@ EXPECTED_TOOL_NAMES = {
     "add_finding_to_track",
     "remove_finding_from_track",
     "propagate_lesion",
+    # --- Response assessments (RECIST roll-up) ---
+    "list_response_assessments",
+    "get_response_assessment",
+    "get_response_assessment_revisions",
+    "compute_response_assessment",
+    "recompute_response_assessment",
+    "update_response_assessment",
+    "delete_response_assessment",
+    "restore_response_assessment",
     # --- Training cohort export (P5) ---
     "export_training_manifest",
     "export_training_cohort_bundle",

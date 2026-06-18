@@ -51,6 +51,7 @@ from bvmcp.tools import patients as patients_tools
 from bvmcp.tools import provenance as provenance_tools
 from bvmcp.tools import qna as qna_tools
 from bvmcp.tools import report_contents as report_contents_tools
+from bvmcp.tools import response_assessments as response_assessments_tools
 from bvmcp.tools import search as search_tools
 from bvmcp.tools import search_advanced as search_advanced_tools
 from bvmcp.tools import segmentations as segmentations_tools
@@ -81,6 +82,7 @@ TOOL_MODULES = (
     imaging_tools,
     findings_tools,
     lesion_tracks_tools,
+    response_assessments_tools,
     segmentations_tools,
     sharing_tools,
     calendar_subscriptions_tools,
