@@ -30,6 +30,9 @@ export default function LesionTracksPanel({ patientId, followupSeriesId }: Props
   const [err, setErr] = useState<string | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
+  const [creating, setCreating] = useState(false);
+  const [newLabel, setNewLabel] = useState("");
+  const [createBusy, setCreateBusy] = useState(false);
 
   useEffect(() => {
     let cancelled = false;
@@ -77,9 +80,67 @@ export default function LesionTracksPanel({ patientId, followupSeriesId }: Props
     }
   }
 
+  async function createTrack() {
+    const label = newLabel.trim();
+    if (!label) return;
+    setCreateBusy(true);
+    try {
+      const created = await lesionTracksApi.create(patientId, { label });
+      setTracks((prev) => [created, ...(prev ?? [])]);
+      setNewLabel("");
+      setCreating(false);
+    } catch (e) {
+      setNotice(e instanceof ApiError ? e.message : "create failed");
+    } finally {
+      setCreateBusy(false);
+    }
+  }
+
   return (
     <section className="card" aria-label={t("title")}>
-      <h3 style={{ margin: "0 0 var(--bv-s-2, 0.5rem)" }}>{t("title")}</h3>
+      <div
+        style={{
+          display: "flex",
+          alignItems: "center",
+          justifyContent: "space-between",
+          gap: "var(--bv-s-2, 0.5rem)",
+          marginBottom: "var(--bv-s-2, 0.5rem)",
+        }}
+      >
+        <h3 style={{ margin: 0 }}>{t("title")}</h3>
+        <button type="button" className="ghost" onClick={() => setCreating((v) => !v)}>
+          {creating ? t("cancel") : t("newLesion")}
+        </button>
+      </div>
+      {creating && (
+        <div
+          style={{
+            display: "flex",
+            gap: "var(--bv-s-2, 0.5rem)",
+            marginBottom: "var(--bv-s-2, 0.5rem)",
+          }}
+        >
+          <input
+            type="text"
+            value={newLabel}
+            placeholder={t("labelPlaceholder")}
+            aria-label={t("labelPlaceholder")}
+            onChange={(e) => setNewLabel(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === "Enter") void createTrack();
+            }}
+            style={{ flex: 1 }}
+          />
+          <button
+            type="button"
+            className="ghost"
+            disabled={createBusy || !newLabel.trim()}
+            onClick={() => void createTrack()}
+          >
+            {createBusy ? t("creating") : t("create")}
+          </button>
+        </div>
+      )}
       {err && <p className="error">{err}</p>}
       {notice && <p className="meta">{notice}</p>}
       {!tracks && !err && <p className="meta">{t("loading")}</p>}

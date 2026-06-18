@@ -9,6 +9,7 @@ import { useTranslations } from "next-intl";
 import Link from "next/link";
 import { useEffect, useRef, useState } from "react";
 
+import ComparePriorButton from "@/components/ComparePriorButton";
 import ContextualBackLink from "@/components/ContextualBackLink";
 import LesionTracksPanel from "@/components/LesionTracksPanel";
 import LicenseBadge from "@/components/LicenseBadge";
@@ -360,6 +361,15 @@ export default function StudyDetailContent({ studyId, initialStudy }: Props) {
               >
                 Compare follow-up →
               </Link>
+              {study.patient_id && (
+                <ComparePriorButton
+                  patientId={study.patient_id}
+                  currentStudyId={studyId}
+                  currentSeriesId={
+                    study.series.find((s) => (s.modality ?? "").toUpperCase() === "CT")?.id
+                  }
+                />
+              )}
             </div>
           </div>
         );

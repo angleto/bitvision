@@ -9,7 +9,15 @@
     "volumeChange": "Variazione di volume vs baseline",
     "propagate": "Propaga al follow-up",
     "propagating": "Propagazione…",
-    "propagateQueued": "Propagazione avviata per {label}"
+    "propagateQueued": "Propagazione avviata per {label}",
+    "newLesion": "+ Nuova lesione",
+    "cancel": "Annulla",
+    "labelPlaceholder": "Nome lesione (es. nodulo LSD)",
+    "create": "Crea",
+    "creating": "Creazione…",
+    "comparePrior": "Confronta con prior",
+    "noPriors": "Nessun esame precedente.",
+    "priorOf": "{date} · {desc}"
   },
   "response": {
     "title": "Risposta tumorale (RECIST)",

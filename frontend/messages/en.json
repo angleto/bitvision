@@ -9,7 +9,15 @@
     "volumeChange": "Volume change vs baseline",
     "propagate": "Propagate to follow-up",
     "propagating": "Propagating…",
-    "propagateQueued": "Propagation started for {label}"
+    "propagateQueued": "Propagation started for {label}",
+    "newLesion": "+ New lesion",
+    "cancel": "Cancel",
+    "labelPlaceholder": "Lesion name (e.g. RUL nodule)",
+    "create": "Create",
+    "creating": "Creating…",
+    "comparePrior": "Compare with prior",
+    "noPriors": "No prior imaging studies.",
+    "priorOf": "{date} · {desc}"
   },
   "response": {
     "title": "Tumour response (RECIST)",
