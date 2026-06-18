@@ -18,6 +18,58 @@ from __future__ import annotations
 from typing import Any
 
 
+def refine_mask_on_image(
+    seed_mask: Any,
+    image: Any,
+    *,
+    dilate_mm: float = 8.0,
+    threshold: float | None = None,
+) -> Any:
+    """Re-segment a lesion on ``image`` (the follow-up) using ``seed_mask``
+    (the baseline mask warped into the follow-up frame) as the seed.
+
+    The measurement is then computed on the FOLLOW-UP's real voxels, not
+    the warped baseline — so it captures genuine growth/shrinkage. Method:
+    intensity-threshold within a dilation of the seed, keep the connected
+    component that overlaps the seed. ``threshold`` defaults to the seed's
+    own ``mean - std`` intensity (works for a high-contrast lesion such as
+    a lung nodule; pass an explicit value, or use a learned segmenter, for
+    soft-tissue). Returns the warped seed unchanged if nothing is found.
+    """
+    import numpy as np
+    import SimpleITK as sitk  # noqa: N813
+
+    seed = sitk.Cast(seed_mask > 0, sitk.sitkUInt8)
+    img = sitk.Cast(image, sitk.sitkFloat32)
+
+    seed_arr = sitk.GetArrayFromImage(seed).astype(bool)
+    if not seed_arr.any():
+        return seed
+    if threshold is None:
+        vals = sitk.GetArrayFromImage(img)[seed_arr]
+        threshold = float(vals.mean() - vals.std())
+
+    radius = [max(1, round(dilate_mm / s)) for s in seed.GetSpacing()]
+    region = sitk.BinaryDilate(seed, radius)
+    candidate = sitk.And(
+        sitk.BinaryThreshold(
+            img, lowerThreshold=threshold, upperThreshold=1e30, insideValue=1, outsideValue=0
+        ),
+        region,
+    )
+    cc = sitk.ConnectedComponent(candidate)
+    cc_arr = sitk.GetArrayFromImage(cc)
+    labels_in_seed = cc_arr[seed_arr]
+    labels_in_seed = labels_in_seed[labels_in_seed > 0]
+    if labels_in_seed.size == 0:
+        return seed
+    values, counts = np.unique(labels_in_seed, return_counts=True)
+    keep = int(values[counts.argmax()])
+    refined = sitk.GetImageFromArray((cc_arr == keep).astype(np.uint8))
+    refined.CopyInformation(seed)
+    return refined
+
+
 def measure_mask(mask: Any) -> dict[str, Any]:
     """Measure the foreground of a binary/label ``mask`` image. Returns
     ``volume_ml``, ``longest_diameter_mm``, ``n_voxels`` and ``bbox_lps``
