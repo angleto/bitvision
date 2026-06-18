@@ -16,7 +16,11 @@ import numpy as np
 import SimpleITK as sitk  # noqa: N813
 from bvphoenix.services.volumes import HEADER_STRUCT
 
-from bvworkers.registration_core import build_sitk_image_from_packed, register_pair
+from bvworkers.registration_core import (
+    build_sitk_image_from_packed,
+    register_pair,
+    transform_to_lps_affine,
+)
 
 
 def _packed(arr: np.ndarray, *, sx: float, sy: float, sz: float) -> bytes:
@@ -109,6 +113,27 @@ def test_register_pair_rigid_recovers_known_shift() -> None:
     assert rmse_after < rmse_before * 0.5, (
         f"rigid did not align: {rmse_before:.1f} -> {rmse_after:.1f}"
     )
+
+
+def test_transform_to_lps_affine_translation() -> None:
+    tx = sitk.TranslationTransform(3, (4.0, -3.0, 2.0))
+    m = transform_to_lps_affine(tx)
+    assert m[0][:3] == [1.0, 0.0, 0.0]
+    assert m[1][:3] == [0.0, 1.0, 0.0]
+    assert m[2][:3] == [0.0, 0.0, 1.0]
+    assert [m[0][3], m[1][3], m[2][3]] == [4.0, -3.0, 2.0]
+    assert m[3] == [0.0, 0.0, 0.0, 1.0]
+
+
+def test_register_pair_rigid_meta_carries_lps_matrix() -> None:
+    fixed = _phantom()
+    shift = sitk.TranslationTransform(3, (4.0, -3.0, 4.0))
+    moving = sitk.Resample(fixed, fixed, shift, sitk.sitkLinear, -1000.0, fixed.GetPixelID())
+    _t, meta = register_pair(fixed, moving, "rigid")
+    assert meta["lps_maps"] == "fixed_to_moving"
+    m = meta["lps_matrix"]
+    assert len(m) == 4 and len(m[0]) == 4
+    assert m[3] == [0.0, 0.0, 0.0, 1.0]
 
 
 def test_register_pair_rejects_unknown_kind() -> None:
