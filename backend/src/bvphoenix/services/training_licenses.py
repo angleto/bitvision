@@ -20,10 +20,10 @@ from __future__ import annotations
 import uuid
 from datetime import UTC, datetime
 
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from bvphoenix.db.models import DUCRequest, LicensedDataset, TrainingLicense
+from bvphoenix.db.models import DatasetStudy, DUCRequest, LicensedDataset, TrainingLicense
 
 
 class TrainingLicenseError(RuntimeError):
@@ -131,4 +131,41 @@ async def sign_license(
     return license_
 
 
-__all__ = ["TrainingLicenseError", "sign_license"]
+async def stale_open_datasets_for_study(db: AsyncSession, study_id: uuid.UUID) -> list[uuid.UUID]:
+    """Mark every ``open`` dataset that contains ``study_id`` as ``stale``.
+
+    Called when a contributor revokes training consent for a study (Option 3
+    revoke propagation): an open dataset holding that study now carries
+    revoked data and must be rebuilt before it can be licensed — the sign
+    gate refuses a stale dataset, so revoked data can never be sold. Frozen
+    datasets are immutable snapshots already delivered under a signed license
+    and are left untouched; ``select_cohort`` already excludes the revoked
+    study from every future build. Returns the affected dataset ids so the
+    caller can audit-log them (the ``open`` -> ``stale`` transition is itself
+    the durable, queryable audit record).
+    """
+    ds_ids = list(
+        (
+            await db.execute(
+                select(LicensedDataset.id)
+                .join(DatasetStudy, DatasetStudy.dataset_id == LicensedDataset.id)
+                .where(
+                    DatasetStudy.study_id == study_id,
+                    LicensedDataset.status == "open",
+                )
+            )
+        )
+        .scalars()
+        .all()
+    )
+    if ds_ids:
+        await db.execute(
+            update(LicensedDataset)
+            .where(LicensedDataset.id.in_(ds_ids), LicensedDataset.status == "open")
+            .values(status="stale")
+        )
+        await db.flush()
+    return ds_ids
+
+
+__all__ = ["TrainingLicenseError", "sign_license", "stale_open_datasets_for_study"]
