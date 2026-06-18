@@ -40,7 +40,6 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from bvphoenix.db.models import (
     ContributorPayout,
     DatasetStudy,
-    LicensedDataset,
     TrainingLicense,
 )
 
@@ -91,7 +90,7 @@ async def assemble_payouts(db: AsyncSession, *, license_id: uuid.UUID) -> Assemb
     Pre-conditions:
 
     * The licence must exist and be in status ``signed``.
-    * A ``licensed_datasets`` row must reference it.
+    * The licence must have a dataset bound (``dataset_id`` not null).
     * No ``contributor_payouts`` row may already exist for the
       licence (idempotency guard).
 
@@ -123,13 +122,10 @@ async def assemble_payouts(db: AsyncSession, *, license_id: uuid.UUID) -> Assemb
             f"license {license_id} already has {existing} payout rows — refusing to replay"
         )
 
-    dataset = (
-        await db.execute(select(LicensedDataset).where(LicensedDataset.license_id == license_id))
-    ).scalar_one_or_none()
-    if dataset is None:
-        raise PayoutAssemblyError(f"license {license_id} has no licensed_datasets row")
+    if license_.dataset_id is None:
+        raise PayoutAssemblyError(f"license {license_id} has no dataset bound (dataset_id is null)")
 
-    contributions = await _bytes_by_contributor(db, dataset.id)
+    contributions = await _bytes_by_contributor(db, license_.dataset_id)
     total_bytes = sum(b for _, b in contributions)
     pool_cents = int(license_.price_usd_cents * CONTRIBUTOR_POOL_FRACTION)
 
