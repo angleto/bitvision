@@ -1,4 +1,51 @@
 {
+  "lesionTracks": {
+    "title": "Lesioni seguite",
+    "loading": "Caricamento…",
+    "empty": "Nessuna lesione seguita.",
+    "uncoded": "non codificata",
+    "timepoints": "{n, plural, one {# timepoint} other {# timepoint}}",
+    "trendAria": "Andamento del volume per {label}",
+    "volumeChange": "Variazione di volume vs baseline",
+    "propagate": "Propaga al follow-up",
+    "propagating": "Propagazione…",
+    "propagateQueued": "Propagazione avviata per {label}"
+  },
+  "response": {
+    "title": "Risposta tumorale (RECIST)",
+    "criterion": "Criterio",
+    "targetSum": "Somma target",
+    "baseline": "baseline",
+    "newLesions": "nuove lesioni",
+    "recompute": "Ricalcola",
+    "compute": "Calcola risposta",
+    "working": "Elaborazione…",
+    "noneYet": "Nessuna valutazione per questo esame.",
+    "category": {
+      "CR": "Risposta completa",
+      "PR": "Risposta parziale",
+      "SD": "Malattia stabile",
+      "PD": "Malattia in progressione",
+      "NE": "Non valutabile"
+    }
+  },
+  "compare": {
+    "title": "Confronta con follow-up",
+    "sync": "Crosshair sincronizzato",
+    "baseline": "Baseline",
+    "followup": "Follow-up",
+    "pickHint": "Apri da un esame: scegli una TAC precedente e l'esame attuale per confrontarli affiancati.",
+    "alignButton": "Allinea",
+    "aligning": "Allineamento…",
+    "noMatrix": "L'allineamento non ha prodotto una trasformazione.",
+    "alignFailed": "Allineamento fallito.",
+    "alignTimeout": "L'allineamento sta impiegando troppo; riprova tra poco.",
+    "align": {
+      "sameFrame": "Allineato (stesso frame)",
+      "registered": "Allineato (registrazione)",
+      "unaligned": "Non allineato"
+    }
+  },
   "modal": {
     "ok": "OK",
     "cancel": "Annulla"

@@ -1,4 +1,51 @@
 {
+  "lesionTracks": {
+    "title": "Tracked lesions",
+    "loading": "Loading…",
+    "empty": "No tracked lesions yet.",
+    "uncoded": "uncoded",
+    "timepoints": "{n, plural, one {# timepoint} other {# timepoints}}",
+    "trendAria": "Volume trend for {label}",
+    "volumeChange": "Volume change vs baseline",
+    "propagate": "Propagate to follow-up",
+    "propagating": "Propagating…",
+    "propagateQueued": "Propagation started for {label}"
+  },
+  "response": {
+    "title": "Tumour response (RECIST)",
+    "criterion": "Criterion",
+    "targetSum": "Target sum",
+    "baseline": "baseline",
+    "newLesions": "new lesions",
+    "recompute": "Recompute",
+    "compute": "Compute response",
+    "working": "Working…",
+    "noneYet": "No assessment yet for this study.",
+    "category": {
+      "CR": "Complete response",
+      "PR": "Partial response",
+      "SD": "Stable disease",
+      "PD": "Progressive disease",
+      "NE": "Not evaluable"
+    }
+  },
+  "compare": {
+    "title": "Compare with follow-up",
+    "sync": "Sync crosshair",
+    "baseline": "Baseline",
+    "followup": "Follow-up",
+    "pickHint": "Open from a study: pick a prior CT and the current study to compare them side by side.",
+    "alignButton": "Align",
+    "aligning": "Aligning…",
+    "noMatrix": "Alignment produced no transform.",
+    "alignFailed": "Alignment failed.",
+    "alignTimeout": "Alignment is taking too long; try again shortly.",
+    "align": {
+      "sameFrame": "Aligned (same frame)",
+      "registered": "Aligned (registration)",
+      "unaligned": "Not aligned"
+    }
+  },
   "modal": {
     "ok": "OK",
     "cancel": "Cancel"

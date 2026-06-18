@@ -10,10 +10,12 @@ import Link from "next/link";
 import { useEffect, useRef, useState } from "react";
 
 import ContextualBackLink from "@/components/ContextualBackLink";
+import LesionTracksPanel from "@/components/LesionTracksPanel";
 import LicenseBadge from "@/components/LicenseBadge";
 import NotesPanel from "@/components/NotesPanel";
 import ReportUploadDialog from "@/components/ReportUploadDialog";
 import ReportsList, { type ReportsListHandle } from "@/components/ReportsList";
+import ResponseAssessmentCard from "@/components/ResponseAssessmentCard";
 import SendStudyButton from "@/components/SendStudyButton";
 import SeriesPreview from "@/components/SeriesPreview";
 import ShareDialog from "@/components/ShareDialog";
@@ -245,6 +247,11 @@ export default function StudyDetailContent({ studyId, initialStudy }: Props) {
           .slice(0, 4)
           .map((id) => `s=${id}`)
           .join("&")}`;
+        const compareIds = Array.from(selectedSeriesIds).slice(0, 2);
+        const compareUrl =
+          compareIds.length === 2
+            ? `/viewer/followup?baseline=${compareIds[0]}&followup=${compareIds[1]}`
+            : "#";
         return (
           <div
             style={{
@@ -336,10 +343,44 @@ export default function StudyDetailContent({ studyId, initialStudy }: Props) {
               >
                 Open as multi-series →
               </Link>
+              <Link
+                href={compareUrl}
+                style={{
+                  fontSize: "0.82rem",
+                  padding: "0.3rem 0.8rem",
+                  borderRadius: 6,
+                  border: "1px solid var(--bv-card-border, #d0d5dd)",
+                  color: "inherit",
+                  background: "transparent",
+                  textDecoration: "none",
+                  opacity: compareIds.length === 2 ? 1 : 0.45,
+                  pointerEvents: compareIds.length === 2 ? "auto" : "none",
+                }}
+                title="Compare two series side-by-side with a synchronised crosshair (baseline vs follow-up)"
+              >
+                Compare follow-up →
+              </Link>
             </div>
           </div>
         );
       })()}
+      {study.patient_id && (
+        <div
+          style={{
+            display: "grid",
+            gap: "var(--bv-s-3, 0.75rem)",
+            marginBottom: "var(--bv-s-3, 0.75rem)",
+          }}
+        >
+          <ResponseAssessmentCard patientId={study.patient_id} currentStudyId={studyId} />
+          <LesionTracksPanel
+            patientId={study.patient_id}
+            followupSeriesId={
+              study.series.find((s) => (s.modality ?? "").toUpperCase() === "CT")?.id
+            }
+          />
+        </div>
+      )}
       <div className="series-grid">
         {study.series.map((s) => {
           const checked = selectedSeriesIds.has(s.id);

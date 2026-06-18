@@ -2821,6 +2821,38 @@ const CornerstoneMPRLayout = forwardRef<MPRLayoutHandle, ExtendedProps>(
             return false;
           }
         },
+        getCrosshairWorld: (ijk) => {
+          const src = ijk ?? crosshair;
+          const vol = cs.cache.getVolume(volumeId) as unknown as
+            | { imageData?: { indexToWorld?: (i: cs.Types.Point3) => cs.Types.Point3 } }
+            | undefined;
+          const img = vol?.imageData;
+          if (!img?.indexToWorld) return null;
+          try {
+            const w = img.indexToWorld([src[0], src[1], src[2]]);
+            return [w[0], w[1], w[2]];
+          } catch {
+            return null;
+          }
+        },
+        setCrosshairWorld: (world) => {
+          const vol = cs.cache.getVolume(volumeId) as unknown as
+            | { imageData?: { worldToIndex?: (w: cs.Types.Point3) => cs.Types.Point3 } }
+            | undefined;
+          const img = vol?.imageData;
+          if (!img?.worldToIndex) return false;
+          try {
+            const idx = img.worldToIndex([world[0], world[1], world[2]]);
+            updateCrosshair([
+              Math.max(0, Math.round(idx[0])),
+              Math.max(0, Math.round(idx[1])),
+              Math.max(0, Math.round(idx[2])),
+            ]);
+            return true;
+          } catch {
+            return false;
+          }
+        },
         resetWL: () => {
           setWC(defaultWC);
           setWW(defaultWW);

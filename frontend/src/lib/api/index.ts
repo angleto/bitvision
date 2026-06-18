@@ -4131,3 +4131,230 @@ export const versionApi = {
     return request<BuildInfo>("/api/version");
   },
 };
+
+// ---------------------------------------------------------------------------
+// Longitudinal tumour comparison: lesion tracks, response assessments,
+// registrations.
+// ---------------------------------------------------------------------------
+
+function _idemHeaders(): Headers {
+  const h = new Headers();
+  h.set("idempotency-key", crypto.randomUUID());
+  return h;
+}
+
+function _ifMatchHeaders(etag?: string): Headers | undefined {
+  if (!etag) return undefined;
+  const h = new Headers();
+  h.set("if-match", `"${etag}"`);
+  return h;
+}
+
+export type LesionTrackPointKind = "human" | "agent" | "system";
+
+export interface LesionTrackPoint {
+  id: string;
+  finding_id: string;
+  is_baseline: boolean;
+  timepoint_date: string | null;
+  registration_id: string | null;
+  linked_by_kind: LesionTrackPointKind;
+  confidence: number | null;
+  created_at: string;
+}
+
+export type RecistRole = "target" | "non_target" | "new" | "not_evaluable";
+
+export interface LesionTrack {
+  id: string;
+  patient_id: string;
+  label: string;
+  anatomy_site_id: string | null;
+  anatomy: string | null;
+  laterality: string | null;
+  finding_type_id: string | null;
+  type: string | null;
+  recist_role: RecistRole | null;
+  status: "active" | "resolved" | "retracted";
+  description: string | null;
+  author_subject_id: string | null;
+  author_kind: "human" | "agent" | "system";
+  model_id: string | null;
+  provider: string | null;
+  etag: string;
+  deleted_at: string | null;
+  created_at: string;
+  updated_at: string;
+  points: LesionTrackPoint[];
+}
+
+export type GrowthDirection = "increase" | "decrease" | "stable" | "unknown";
+
+export interface TrajectoryTimepoint {
+  point_id: string;
+  finding_id: string;
+  measured_on: string | null;
+  is_baseline: boolean;
+  volume_ml: number | null;
+  longest_diameter_mm: number | null;
+  short_axis_mm: number | null;
+  suv_max: number | null;
+  delta_from_baseline: Record<string, number | null> | null;
+  delta_from_previous: Record<string, number | null> | null;
+  direction: GrowthDirection;
+}
+
+export interface LesionTrajectory {
+  baseline: Record<string, unknown> | null;
+  latest: Record<string, unknown> | null;
+  timepoints: TrajectoryTimepoint[];
+  summary: {
+    n_timepoints: number;
+    span_days: number | null;
+    volume_pct_change_total: number | null;
+    diameter_pct_change_total: number | null;
+    doubling_time_days: number | null;
+    overall_direction: GrowthDirection;
+  } | null;
+}
+
+export interface LesionTrackCreateInput {
+  label: string;
+  type?: string;
+  anatomy?: string;
+  laterality?: string;
+  recist_role?: RecistRole;
+  status?: string;
+  description?: string;
+  baseline_finding_id?: string;
+}
+
+export const lesionTracksApi = {
+  list: (patientId: string, params: Record<string, QSValue> = {}) =>
+    request<LesionTrack[]>(`/api/patients/${patientId}/lesion-tracks${qs(params)}`),
+  get: (id: string) => request<LesionTrack>(`/api/lesion-tracks/${id}`),
+  create: (patientId: string, input: LesionTrackCreateInput) =>
+    request<LesionTrack>(`/api/patients/${patientId}/lesion-tracks`, {
+      method: "POST",
+      json: input,
+      headers: _idemHeaders(),
+    }),
+  update: (id: string, input: Record<string, unknown>, etag?: string) =>
+    request<LesionTrack>(`/api/lesion-tracks/${id}`, {
+      method: "PATCH",
+      json: input,
+      headers: _ifMatchHeaders(etag),
+    }),
+  remove: (id: string, etag?: string) =>
+    request<void>(`/api/lesion-tracks/${id}`, {
+      method: "DELETE",
+      headers: _ifMatchHeaders(etag),
+    }),
+  addPoint: (
+    id: string,
+    input: { finding_id: string; is_baseline?: boolean; registration_id?: string },
+  ) => request<LesionTrack>(`/api/lesion-tracks/${id}/points`, { method: "POST", json: input }),
+  removePoint: (id: string, pointId: string) =>
+    request<void>(`/api/lesion-tracks/${id}/points/${pointId}`, { method: "DELETE" }),
+  trajectory: (id: string) => request<LesionTrajectory>(`/api/lesion-tracks/${id}/trajectory`),
+  propagate: (id: string, input: { followup_series_id: string; refine?: boolean }) =>
+    request<{ status: string; job_id?: string; track_id: string }>(
+      `/api/lesion-tracks/${id}/propagate`,
+      { method: "POST", json: input },
+    ),
+};
+
+export type ResponseCategory = "CR" | "PR" | "SD" | "PD" | "NE";
+
+export interface ResponseAssessment {
+  id: string;
+  patient_id: string;
+  assessment_date: string | null;
+  baseline_study_id: string | null;
+  current_study_id: string | null;
+  criterion: "recist_1_1" | "volumetric" | "percist";
+  target_sum_mm: number | null;
+  baseline_sum_mm: number | null;
+  nadir_sum_mm: number | null;
+  target_sum_pct_change: number | null;
+  volume_total_ml: number | null;
+  volume_pct_change: number | null;
+  category: ResponseCategory;
+  new_lesions: boolean;
+  non_target_status: string | null;
+  basis: Record<string, unknown> | null;
+  notes: string | null;
+  author_subject_id: string | null;
+  author_kind: "human" | "agent" | "system";
+  model_id: string | null;
+  provider: string | null;
+  etag: string;
+  deleted_at: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export const responseAssessmentsApi = {
+  list: (patientId: string, params: Record<string, QSValue> = {}) =>
+    request<ResponseAssessment[]>(`/api/patients/${patientId}/response-assessments${qs(params)}`),
+  get: (id: string) => request<ResponseAssessment>(`/api/response-assessments/${id}`),
+  create: (
+    patientId: string,
+    input: {
+      current_study_id: string;
+      baseline_study_id?: string;
+      criterion?: string;
+      notes?: string;
+    },
+  ) =>
+    request<ResponseAssessment>(`/api/patients/${patientId}/response-assessments`, {
+      method: "POST",
+      json: input,
+      headers: _idemHeaders(),
+    }),
+  recompute: (id: string) =>
+    request<ResponseAssessment>(`/api/response-assessments/${id}/recompute`, {
+      method: "POST",
+      json: {},
+    }),
+  update: (id: string, input: Record<string, unknown>, etag?: string) =>
+    request<ResponseAssessment>(`/api/response-assessments/${id}`, {
+      method: "PATCH",
+      json: input,
+      headers: _ifMatchHeaders(etag),
+    }),
+  remove: (id: string, etag?: string) =>
+    request<void>(`/api/response-assessments/${id}`, {
+      method: "DELETE",
+      headers: _ifMatchHeaders(etag),
+    }),
+};
+
+export interface Registration {
+  id: string;
+  fixed_series_id: string;
+  moving_series_id: string;
+  kind: "rigid" | "demons";
+  status: "queued" | "running" | "succeeded" | "failed" | "cancelled";
+  job_id: string | null;
+  download_url: string | null;
+  // ``result_meta.lps_matrix`` is the 4x4 fixed→moving LPS map (rigid only),
+  // used to synchronise crosshairs across two studies.
+  result_meta: { lps_matrix?: number[][]; lps_maps?: string } & Record<string, unknown>;
+  error: string | null;
+  created_at: string;
+  finished_at: string | null;
+}
+
+export const registrationsApi = {
+  create: (input: {
+    fixed_series_id: string;
+    moving_series_id: string;
+    kind?: "rigid" | "demons";
+  }) =>
+    request<Registration>("/api/registrations", {
+      method: "POST",
+      json: { kind: "rigid", ...input },
+    }),
+  get: (id: string) => request<Registration>(`/api/registrations/${id}`),
+};
