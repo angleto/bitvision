@@ -21,7 +21,7 @@ import numpy as np
 import SimpleITK as sitk  # noqa: N813
 from bvphoenix.services.lesion_tracks import TrackTimepoint, compute_trajectory
 
-from bvworkers.lesion_measure import measure_mask
+from bvworkers.lesion_measure import measure_mask, refine_mask_on_image
 from bvworkers.registration_core import register_pair, warp_mask
 
 SHAPE = (24, 96, 96)  # (nz, ny, nx), isotropic 1 mm → radius_mm == radius_vox
@@ -126,3 +126,24 @@ def test_growth_phantom_register_warp_measure_trajectory() -> None:
     )
     assert traj["summary"]["overall_direction"] == "increase"
     assert abs(traj["summary"]["volume_pct_change_total"] - 20.0) < 5.0
+
+
+def test_refine_recovers_grown_volume_from_baseline_seed() -> None:
+    """The 'semi-automatic re-measure' claim: warping the baseline mask onto
+    the follow-up and refining on the follow-up's real voxels recovers the
+    GROWN lesion volume, not the baseline seed size."""
+    growth = 1.4  # +40%, clearly above the seed
+    r_follow = 10.0 * growth ** (1.0 / 3.0)
+    base_img, base_mask = _scene(sphere_r=10.0)
+    follow_img, follow_mask = _scene(offset=(2, 3, -1), sphere_r=r_follow)
+
+    transform, _meta = register_pair(follow_img, base_img, "rigid")
+    warped_seed = warp_mask(base_mask, transform, follow_img)
+    refined = refine_mask_on_image(warped_seed, follow_img)
+
+    vol_refined = measure_mask(refined)["volume_ml"]
+    vol_follow_true = measure_mask(follow_mask)["volume_ml"]
+    vol_base = measure_mask(base_mask)["volume_ml"]
+    # Recovers the TRUE follow-up volume (within 10%), well above the seed.
+    assert abs(vol_refined - vol_follow_true) / vol_follow_true < 0.1
+    assert vol_refined > vol_base * 1.2
