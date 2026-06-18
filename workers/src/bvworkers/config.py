@@ -25,6 +25,10 @@ class Settings(BaseSettings):
     s3_secret_key: str = Field(default="bvphoenix-dev-secret")
     s3_bucket_raw: str = Field(default="bvphoenix-raw")
     s3_bucket_derivatives: str = Field(default="bvphoenix-derivatives")
+    # Versioned-artifact bucket (registration transforms, etc.). Mirrors
+    # bvphoenix.config; the register_series and propagate_lesion workers
+    # write the rigid ``.tfm`` here, so it must exist on the worker Settings.
+    s3_bucket_versioning: str = Field(default="bvphoenix-versioning")
 
     # Match backend config — workers write derivatives and must honour the
     # same SSE policy. See backend ``bvphoenix.config`` for the source of
