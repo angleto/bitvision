@@ -52,6 +52,13 @@
       "sameFrame": "Allineato (stesso frame)",
       "registered": "Allineato (registrazione)",
       "unaligned": "Non allineato"
+    },
+    "selectSeries": "Scegli la serie da confrontare",
+    "plane": {
+      "axial": "assiale",
+      "coronal": "coronale",
+      "sagittal": "sagittale",
+      "oblique": "obliqua"
     }
   },
   "modal": {
