@@ -203,11 +203,19 @@ async def revoke_tier_consent_for_study(
             row.revoke_reason = reason
 
     await db.flush()
+    # Propagate the revoke into the dataset ledger: any OPEN dataset that
+    # already bundled this study now holds revoked data and must be rebuilt
+    # before it can be licensed (Option 3 sovereignty gate; the sign gate
+    # refuses a stale dataset). Local import to avoid a service-layer cycle.
+    from bvphoenix.services.training_licenses import stale_open_datasets_for_study
+
+    staled = await stale_open_datasets_for_study(db, study_id)
     logger.info(
-        "training_consent.revoked user=%s study=%s rows=%d",
+        "training_consent.revoked user=%s study=%s rows=%d staled_datasets=%d",
         user_subject_id,
         study_id,
         len(rows),
+        len(staled),
     )
     return rows
 
