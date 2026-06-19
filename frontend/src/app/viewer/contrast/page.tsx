@@ -934,7 +934,7 @@ function ContrastViewerInner() {
         )}
       </div>
 
-      <div style={{ flex: "1 1 auto", display: "flex", minHeight: 0 }}>
+      <div style={{ flex: "1 1 auto", display: "flex", minHeight: 0, position: "relative" }}>
         {showPicker ? (
           <PhaseSeriesPicker
             series={pickerSeries}
@@ -1121,28 +1121,55 @@ function ContrastViewerInner() {
             </div>
           </div>
         )}
+        {/* The wash-out + ROI panels float OVER the grid (absolute), they do
+            NOT take layout width: a side panel shrinking the flex row would
+            resize the Cornerstone canvas and the re-fit makes the drawn ROI
+            jump ("panel shrinks, ROI shifts"). The wash-out card is anchored
+            bottom-CENTRE so it never breaks the left/right symmetry of the two
+            phase panes. */}
         {(measureMode || washout) && (
-          <WashoutPanel
-            result={washout}
-            busy={washoutBusy}
-            error={washoutErr}
-            saved={washoutSaved}
-            onSave={saveWashout}
-            onClose={() => {
-              setMeasureMode(false);
-              setWashout(null);
-              lastRoiRef.current = null;
+          <div
+            style={{
+              position: "absolute",
+              bottom: 10,
+              left: "50%",
+              transform: "translateX(-50%)",
+              zIndex: 7,
+              maxHeight: "46%",
+              display: "flex",
+              borderRadius: 8,
+              overflow: "hidden",
+              boxShadow: "0 8px 28px rgba(0,0,0,0.6)",
             }}
-          />
+          >
+            <WashoutPanel
+              result={washout}
+              busy={washoutBusy}
+              error={washoutErr}
+              saved={washoutSaved}
+              onSave={saveWashout}
+              onClose={() => {
+                setMeasureMode(false);
+                setWashout(null);
+                lastRoiRef.current = null;
+              }}
+            />
+          </div>
         )}
         {showMarkers && (
           <div
             style={{
-              flex: "0 0 240px",
+              position: "absolute",
+              top: 0,
+              bottom: 0,
+              right: 0,
+              zIndex: 6,
+              width: 240,
               overflowY: "auto",
               padding: "0.5rem 0.75rem",
               background: "var(--bv-card-bg, #11151c)",
               borderLeft: "1px solid var(--bv-card-border, #1a1f2b)",
+              boxShadow: "-8px 0 24px rgba(0,0,0,0.5)",
               color: "#e6ecf3",
               minHeight: 0,
             }}
