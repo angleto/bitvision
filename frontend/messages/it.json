@@ -29,6 +29,39 @@
     "compute": "Calcola risposta",
     "working": "Elaborazione…",
     "noneYet": "Nessuna valutazione per questo esame.",
+    "explainer": "RECIST 1.1 misura la risposta al trattamento confrontando la somma dei diametri delle lesioni target tra l'esame basale e questo controllo. Servono lesioni designate come «target» con una misura sia al basale sia ora.",
+    "ne": {
+      "no_target_lesions": "Nessuna lesione target designata. Traccia una misura bidirezionale su una lesione target e designala qui per abilitare il calcolo.",
+      "baseline_missing": "Manca la misura basale. Aggiungi al track target una misura nell'esame basale (il più precoce) per calcolare la variazione.",
+      "current_missing": "Manca la misura in questo esame. Aggiungi al track target una misura in questo controllo, oppure collega una misura di follow-up.",
+      "unknown": "Dati insufficienti per il calcolo RECIST."
+    },
+    "targets": {
+      "title": "Lesioni target",
+      "colTarget": "Target",
+      "colBaseline": "Basale",
+      "colCurrent": "Attuale",
+      "colPct": "Var. %"
+    },
+    "rationale": {
+      "CR": "Risposta completa: tutte le lesioni target scomparse.",
+      "PR": "Risposta parziale: somma dei diametri {pct} vs basale (≥30% in meno).",
+      "SD": "Malattia stabile: variazione {pct} vs basale, sotto le soglie PR/PD.",
+      "PD": "Progressione: somma {pct} vs nadir (≥20% in più e ≥5 mm).",
+      "PD_new": "Progressione: comparsa di nuove lesioni."
+    },
+    "caps": {
+      "overLimit": "Oltre i limiti RECIST 1.1 (max 5 target totali, max 2 per organo)."
+    },
+    "nodalFootnote": "* Linfonodo: contribuisce con l'asse corto (RECIST 1.1).",
+    "lesionType": {
+      "lesion": "Lesione parenchimale",
+      "node": "Linfonodo"
+    },
+    "designate": "Designa come target",
+    "threshold": {
+      "tooSmall": "Sotto la soglia target (≥10 mm; linfonodi ≥15 mm di asse corto)."
+    },
     "category": {
       "CR": "Risposta completa",
       "PR": "Risposta parziale",
@@ -54,11 +87,87 @@
       "unaligned": "Non allineato"
     },
     "selectSeries": "Scegli la serie da confrontare",
+    "pick": {
+      "title": "Scegli quali serie confrontare",
+      "subtitle": "Scegli una serie comparabile su ciascun lato, poi carica.",
+      "hintAmbiguous": "Più serie comparabili: scegli quale confrontare su ciascun lato.",
+      "hintNoMatch": "Nessuna serie chiaramente corrispondente: scegli manualmente prima di caricare.",
+      "suggested": "consigliata",
+      "load": "Carica confronto",
+      "analyzing": "Analisi delle serie…",
+      "empty": "Nessuna serie."
+    },
     "plane": {
       "axial": "assiale",
       "coronal": "coronale",
       "sagittal": "sagittale",
       "oblique": "obliqua"
+    },
+    "recist": {
+      "title": "Target RECIST",
+      "panelToggle": "Target RECIST",
+      "measure": "Misura",
+      "measuring": "Misura attiva",
+      "measureHint": "Attiva «Misura» e traccia l'asse lungo, poi l'asse corto perpendicolare, su una lesione target in ciascun esame.",
+      "differentPatients": "I due esami sono di pazienti diversi: RECIST non disponibile.",
+      "baselineCandidates": "Misure nell'esame basale",
+      "noBaselineMeasurements": "Nessuna misura bidirezionale nell'esame basale. Attiva «Misura» e tracciane una.",
+      "followupCandidates": "Misure nel follow-up",
+      "designateBaselineFirst": "Designa prima una lesione target nell'esame basale.",
+      "noFollowupMeasurements": "Nessuna misura bidirezionale nel follow-up.",
+      "existingTargets": "Target esistenti",
+      "timepoints": "timepoint",
+      "labelPlaceholder": "Etichetta (es. nodulo LSD)",
+      "anatomyPlaceholder": "Sede anatomica (opzionale)",
+      "linkTo": "Collega al target",
+      "link": "Collega",
+      "cancel": "Annulla",
+      "close": "Chiudi"
+    }
+  },
+  "contrast": {
+    "title": "Fasi del contrasto",
+    "pickHint": "Apri da uno studio TAC con contrasto multifase.",
+    "sync": "Sincronizza mirino",
+    "detect": "Rileva fasi",
+    "detecting": "Rilevamento…",
+    "detectFailed": "Rilevamento fasi fallito.",
+    "unclassified": "Non classificata",
+    "confirm": "Conferma",
+    "confirmHint": "Bassa confidenza, conferma o correggi",
+    "clear": "Azzera",
+    "align": "Allinea",
+    "aligning": "Allineamento…",
+    "needsAlign": "Frame diverso, allinea per sincronizzare",
+    "aligned": "Allineata",
+    "loadError": "Errore di caricamento: {detail}",
+    "loading": "caricamento…",
+    "noPhases": "Nessuna serie CT da classificare in questo studio.",
+    "sourceAuto": "auto",
+    "sourceHuman": "confermata",
+    "measureWashout": "Misura wash-out",
+    "washoutTitle": "Wash-out",
+    "washoutHint": "Disegna una ROI circolare sulla fase di riferimento per misurare il wash-out tra le fasi.",
+    "computing": "Calcolo…",
+    "save": "Salva misura",
+    "saved": "Salvato",
+    "close": "Chiudi",
+    "enhancement": "Impregnazione",
+    "lipidRich": "Basale < 10 HU (lipid-rich)",
+    "skippedPhases": "{count} fase/i saltate (frame diverso)",
+    "notDiagnosis": "Soglie di riferimento (Korobkin 1998; Szolar 1998), non una diagnosi.",
+    "curveLabel": "HU per fase",
+    "phase": {
+      "unenhanced": "Basale",
+      "arterial": "Arteriosa",
+      "portal_venous": "Portale",
+      "delayed": "Tardiva",
+      "hepatobiliary": "Epatobiliare",
+      "corticomedullary": "Corticomidollare",
+      "nephrographic": "Nefrografica",
+      "excretory": "Escretoria",
+      "dynamic": "Dinamica",
+      "other": "Altro"
     }
   },
   "modal": {

@@ -29,6 +29,39 @@
     "compute": "Compute response",
     "working": "Working…",
     "noneYet": "No assessment yet for this study.",
+    "explainer": "RECIST 1.1 measures treatment response by comparing the sum of target-lesion diameters between the baseline study and this follow-up. It needs lesions marked as «target» with a measurement at both baseline and now.",
+    "ne": {
+      "no_target_lesions": "No target lesions designated. Draw a bidirectional measurement on a target lesion and designate it here to enable the computation.",
+      "baseline_missing": "Baseline measurement missing. Add a measurement on the target track at the baseline (earliest) study to compute the change.",
+      "current_missing": "Follow-up measurement missing. Add a measurement on the target track at this study, or link a follow-up measurement.",
+      "unknown": "Insufficient data for the RECIST computation."
+    },
+    "targets": {
+      "title": "Target lesions",
+      "colTarget": "Target",
+      "colBaseline": "Baseline",
+      "colCurrent": "Current",
+      "colPct": "% change"
+    },
+    "rationale": {
+      "CR": "Complete response: all target lesions disappeared.",
+      "PR": "Partial response: sum of diameters {pct} vs baseline (≥30% decrease).",
+      "SD": "Stable disease: {pct} vs baseline, below the PR/PD thresholds.",
+      "PD": "Progression: sum {pct} vs nadir (≥20% increase and ≥5 mm).",
+      "PD_new": "Progression: new lesions appeared."
+    },
+    "caps": {
+      "overLimit": "Exceeds RECIST 1.1 caps (max 5 targets total, max 2 per organ)."
+    },
+    "nodalFootnote": "* Lymph node: contributes its short axis (RECIST 1.1).",
+    "lesionType": {
+      "lesion": "Parenchymal lesion",
+      "node": "Lymph node"
+    },
+    "designate": "Designate as target",
+    "threshold": {
+      "tooSmall": "Below target threshold (≥10 mm; nodes ≥15 mm short axis)."
+    },
     "category": {
       "CR": "Complete response",
       "PR": "Partial response",
@@ -54,11 +87,87 @@
       "unaligned": "Not aligned"
     },
     "selectSeries": "Select series to compare",
+    "pick": {
+      "title": "Choose which series to compare",
+      "subtitle": "Pick a comparable series on each side, then load.",
+      "hintAmbiguous": "More than one comparable series — pick which to compare on each side.",
+      "hintNoMatch": "No clearly matching series — choose manually before loading.",
+      "suggested": "suggested",
+      "load": "Load comparison",
+      "analyzing": "Analyzing series…",
+      "empty": "No series."
+    },
     "plane": {
       "axial": "axial",
       "coronal": "coronal",
       "sagittal": "sagittal",
       "oblique": "oblique"
+    },
+    "recist": {
+      "title": "RECIST targets",
+      "panelToggle": "RECIST targets",
+      "measure": "Measure",
+      "measuring": "Measuring",
+      "measureHint": "Turn on «Measure» and draw the long axis, then the perpendicular short axis, on a target lesion in each study.",
+      "differentPatients": "The two studies are from different patients: RECIST unavailable.",
+      "baselineCandidates": "Baseline measurements",
+      "noBaselineMeasurements": "No bidirectional measurement in the baseline study. Turn on «Measure» and draw one.",
+      "followupCandidates": "Follow-up measurements",
+      "designateBaselineFirst": "Designate a target lesion in the baseline study first.",
+      "noFollowupMeasurements": "No bidirectional measurement in the follow-up study.",
+      "existingTargets": "Existing targets",
+      "timepoints": "timepoints",
+      "labelPlaceholder": "Label (e.g. RUL nodule)",
+      "anatomyPlaceholder": "Anatomy site (optional)",
+      "linkTo": "Link to target",
+      "link": "Link",
+      "cancel": "Cancel",
+      "close": "Close"
+    }
+  },
+  "contrast": {
+    "title": "Contrast phases",
+    "pickHint": "Open from a multiphase contrast-enhanced CT study.",
+    "sync": "Sync crosshair",
+    "detect": "Detect phases",
+    "detecting": "Detecting…",
+    "detectFailed": "Phase detection failed.",
+    "unclassified": "Unclassified",
+    "confirm": "Confirm",
+    "confirmHint": "Low confidence — confirm or correct",
+    "clear": "Clear",
+    "align": "Align",
+    "aligning": "Aligning…",
+    "needsAlign": "Different frame — align to sync",
+    "aligned": "Aligned",
+    "loadError": "Load error: {detail}",
+    "loading": "loading…",
+    "noPhases": "No CT series to phase in this study.",
+    "sourceAuto": "auto",
+    "sourceHuman": "confirmed",
+    "measureWashout": "Measure wash-out",
+    "washoutTitle": "Wash-out",
+    "washoutHint": "Draw a circle ROI on the reference phase to measure wash-out across phases.",
+    "computing": "Computing…",
+    "save": "Save measurement",
+    "saved": "Saved",
+    "close": "Close",
+    "enhancement": "Enhancement",
+    "lipidRich": "Unenhanced < 10 HU (lipid-rich)",
+    "skippedPhases": "{count} phase(s) skipped (different frame)",
+    "notDiagnosis": "Reference thresholds (Korobkin 1998; Szolar 1998), not a diagnosis.",
+    "curveLabel": "HU per phase",
+    "phase": {
+      "unenhanced": "Unenhanced",
+      "arterial": "Arterial",
+      "portal_venous": "Portal venous",
+      "delayed": "Delayed",
+      "hepatobiliary": "Hepatobiliary",
+      "corticomedullary": "Corticomedullary",
+      "nephrographic": "Nephrographic",
+      "excretory": "Excretory",
+      "dynamic": "Dynamic",
+      "other": "Other"
     }
   },
   "modal": {

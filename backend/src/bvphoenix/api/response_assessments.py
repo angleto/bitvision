@@ -341,6 +341,9 @@ async def list_response_assessments(
     db: Annotated[AsyncSession, Depends(get_db)],
     user: Annotated[User, Depends(require_user)],
     include_deleted: bool = Query(False),
+    current_study_id: uuid.UUID | None = Query(
+        None, description="Only assessments computed at this follow-up study."
+    ),
     limit: int = Query(200, ge=1, le=1000),
 ) -> list[ResponseAssessmentOut]:
     await _patient_for_read(db, request, user, patient_id)
@@ -350,6 +353,8 @@ async def list_response_assessments(
         .order_by(ResponseAssessment.created_at.desc())
         .limit(limit)
     )
+    if current_study_id is not None:
+        stmt = stmt.where(ResponseAssessment.current_study_id == current_study_id)
     if not include_deleted:
         stmt = stmt.where(ResponseAssessment.deleted_at.is_(None))
     rows = (await db.execute(stmt)).scalars().all()

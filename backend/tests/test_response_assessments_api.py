@@ -194,3 +194,149 @@ async def test_response_assessment_pr_then_recompute_pd(db_session, make_user, m
             text("DELETE FROM findings WHERE patient_id = :p"), {"p": str(patient_id)}
         )
         await db_session.commit()
+
+
+async def _cleanup(db_session, patient_id) -> None:
+    app.dependency_overrides.clear()
+    for tbl in ("response_assessments", "lesion_tracks", "findings"):
+        await db_session.execute(
+            text(f"DELETE FROM {tbl} WHERE patient_id = :p"), {"p": str(patient_id)}
+        )
+    await db_session.commit()
+
+
+async def test_list_scoped_to_current_study(db_session, make_user, make_study) -> None:
+    """The card lists by ``current_study_id`` so an assessment from study A
+    never leaks onto study B (the stale-NE bug)."""
+    owner = await make_user()
+    base_study, base_series = await make_study(owner, study_date=date(2026, 1, 1))
+    patient_id = base_study.patient_id
+    patient = (
+        await db_session.execute(select(Patient).where(Patient.id == patient_id))
+    ).scalar_one()
+    cur_study, cur_series = await make_study(owner, patient=patient, study_date=date(2026, 4, 1))
+    ftype = await _ftype_id(db_session)
+    await _target_lesion(
+        db_session,
+        patient_id=patient_id,
+        ftype=ftype,
+        base_study=base_study,
+        base_series=base_series,
+        cur_study=cur_study,
+        cur_series=cur_series,
+        base_mm=50.0,
+        cur_mm=35.0,
+    )
+    await db_session.commit()
+    try:
+        async with _client_as(db_session, owner) as client:
+            r = await client.post(
+                f"/api/patients/{patient_id}/response-assessments",
+                json={"current_study_id": str(cur_study.id), "criterion": "recist_1_1"},
+            )
+            assert r.status_code == 201, r.text
+
+            # Scoped to the follow-up study -> returns it.
+            r = await client.get(
+                f"/api/patients/{patient_id}/response-assessments"
+                f"?current_study_id={cur_study.id}&limit=1"
+            )
+            assert r.status_code == 200
+            assert len(r.json()) == 1
+            assert r.json()[0]["current_study_id"] == str(cur_study.id)
+
+            # Scoped to the baseline study (which has no assessment) -> empty,
+            # not the unrelated follow-up assessment.
+            r = await client.get(
+                f"/api/patients/{patient_id}/response-assessments"
+                f"?current_study_id={base_study.id}&limit=1"
+            )
+            assert r.status_code == 200
+            assert r.json() == []
+    finally:
+        await _cleanup(db_session, patient_id)
+
+
+async def test_nodal_target_uses_short_axis_e2e(db_session, make_user, make_study) -> None:
+    """A lymph-node target contributes its short axis to the SoD (the
+    ``FindingType.key == 'lymph_node'`` join drives ``is_nodal``)."""
+    owner = await make_user()
+    base_study, base_series = await make_study(owner, study_date=date(2026, 1, 1))
+    patient_id = base_study.patient_id
+    patient = (
+        await db_session.execute(select(Patient).where(Patient.id == patient_id))
+    ).scalar_one()
+    cur_study, cur_series = await make_study(owner, patient=patient, study_date=date(2026, 4, 1))
+    node_ftype = (
+        await db_session.execute(select(FindingType.id).where(FindingType.key == "lymph_node"))
+    ).scalar_one()
+
+    track = LesionTrack(
+        patient_id=patient_id,
+        label="Linfonodo mediastinico",
+        finding_type_id=node_ftype,
+        recist_role="target",
+        author_kind="human",
+        etag=uuid.uuid4(),
+    )
+    db_session.add(track)
+    f_base = Finding(
+        patient_id=patient_id,
+        study_id=base_study.id,
+        series_id=base_series.id,
+        finding_type_id=node_ftype,
+        longest_diameter_mm=30.0,
+        short_axis_mm=18.0,
+        author_kind="human",
+        etag=uuid.uuid4(),
+    )
+    f_cur = Finding(
+        patient_id=patient_id,
+        study_id=cur_study.id,
+        series_id=cur_series.id,
+        finding_type_id=node_ftype,
+        longest_diameter_mm=30.0,
+        short_axis_mm=12.0,
+        author_kind="human",
+        etag=uuid.uuid4(),
+    )
+    db_session.add_all([f_base, f_cur])
+    await db_session.flush()
+    db_session.add_all(
+        [
+            LesionTrackPoint(
+                lesion_track_id=track.id,
+                finding_id=f_base.id,
+                patient_id=patient_id,
+                is_baseline=True,
+                timepoint_date=base_study.study_date,
+            ),
+            LesionTrackPoint(
+                lesion_track_id=track.id,
+                finding_id=f_cur.id,
+                patient_id=patient_id,
+                is_baseline=False,
+                timepoint_date=cur_study.study_date,
+            ),
+        ]
+    )
+    await db_session.commit()
+    try:
+        async with _client_as(db_session, owner) as client:
+            r = await client.post(
+                f"/api/patients/{patient_id}/response-assessments",
+                json={
+                    "current_study_id": str(cur_study.id),
+                    "baseline_study_id": str(base_study.id),
+                    "criterion": "recist_1_1",
+                },
+            )
+            assert r.status_code == 201, r.text
+            ra = r.json()
+            # Short axis summed: 18 -> 12 (-33%) = PR, not the static 30->30.
+            assert ra["baseline_sum_mm"] == 18.0, ra
+            assert ra["target_sum_mm"] == 12.0, ra
+            assert ra["category"] == "PR", ra
+            assert ra["basis"]["lesions"][0]["is_nodal"] is True
+    finally:
+        await _cleanup(db_session, patient_id)

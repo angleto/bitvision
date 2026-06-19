@@ -3,6 +3,7 @@ import {
   type PrimaryPlane,
   bestMatchSeries,
   descTokens,
+  matchConfidence,
   seriesMatchScore,
   seriesOptionLabel,
 } from "@/lib/seriesMatch";
@@ -98,6 +99,112 @@ describe("bestMatchSeries", () => {
 
   it("returns null for no candidates", () => {
     expect(bestMatchSeries([], mk({}))).toBeNull();
+  });
+});
+
+describe("matchConfidence", () => {
+  const axial = (id: string): PrimaryPlane =>
+    id.startsWith("ax") || id === "r" ? "axial" : "coronal";
+
+  it("is not confident with no candidates", () => {
+    expect(matchConfidence([], mk({ id: "r", modality: "CT" }))).toMatchObject({
+      best: null,
+      confident: false,
+      reason: "empty",
+    });
+  });
+
+  it("is not confident when nothing shares the reference modality (CT vs MR)", () => {
+    const ref = mk({ id: "r", modality: "CT", series_description: "addome venosa" });
+    const cand = [
+      mk({
+        id: "m1",
+        modality: "MR",
+        series_description: "addome venosa",
+        received_instance_count: 200,
+      }),
+      mk({ id: "m2", modality: "MR", series_description: "addome", received_instance_count: 200 }),
+    ];
+    expect(matchConfidence(cand, ref)).toMatchObject({
+      confident: false,
+      reason: "no-modality-match",
+    });
+  });
+
+  it("auto-selects the only comparable (same-modality) series", () => {
+    const ref = mk({ id: "r", modality: "CT", series_description: "addome venosa" });
+    const cand = [
+      mk({ id: "ct", modality: "CT", series_description: "x", received_instance_count: 200 }),
+      mk({
+        id: "mr",
+        modality: "MR",
+        series_description: "addome venosa",
+        received_instance_count: 200,
+      }),
+    ];
+    expect(matchConfidence(cand, ref)).toMatchObject({
+      confident: true,
+      reason: "single",
+      best: expect.objectContaining({ id: "ct" }),
+    });
+  });
+
+  it("auto-selects a clear plane-margin winner", () => {
+    const ref = mk({
+      id: "r",
+      modality: "CT",
+      series_description: "addome venosa",
+      received_instance_count: 250,
+    });
+    const cand = [
+      mk({
+        id: "ax",
+        modality: "CT",
+        series_description: "addome venosa",
+        received_instance_count: 250,
+      }),
+      mk({
+        id: "cor",
+        modality: "CT",
+        series_description: "addome venosa",
+        received_instance_count: 250,
+      }),
+    ];
+    // ax uniquely matches the reference plane (+25) -> margin >= 25 -> confident.
+    expect(matchConfidence(cand, ref, axial)).toMatchObject({
+      confident: true,
+      reason: "clear-margin",
+      best: expect.objectContaining({ id: "ax" }),
+    });
+  });
+
+  it("asks (ambiguous) when comparable series differ only by contrast phase", () => {
+    // Same plane, same region; only the phase phrasing differs -> a clinical
+    // choice, not a guess. Margin (~one phase token) stays under the threshold.
+    const ref = mk({
+      id: "r",
+      modality: "CT",
+      series_description: "addome portale venosa",
+      received_instance_count: 250,
+    });
+    const cand = [
+      mk({
+        id: "axpv",
+        modality: "CT",
+        series_description: "addome portale venosa",
+        received_instance_count: 250,
+      }),
+      mk({
+        id: "axart",
+        modality: "CT",
+        series_description: "addome arteriosa",
+        received_instance_count: 250,
+      }),
+    ];
+    const res = matchConfidence(cand, ref, axial);
+    expect(res.confident).toBe(false);
+    expect(res.reason).toBe("ambiguous");
+    expect(res.best?.id).toBe("axpv"); // still the best guess, just not auto-loaded
   });
 });
 

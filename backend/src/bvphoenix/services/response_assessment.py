@@ -42,6 +42,16 @@ class TargetMeasurement:
     longest_diameter_mm: float | None
     volume_ml: float | None
     recist_role: str  # 'target' | 'new' | ...
+    short_axis_mm: float | None = None
+    is_nodal: bool = False  # lymph-node target → contributes short axis to the SoD
+    anatomy_key: str | None = None  # organ key, for the per-organ target cap
+
+
+def _recist_diameter(m: TargetMeasurement) -> float | None:
+    """The diameter a target contributes to the RECIST 1.1 sum-of-diameters:
+    short axis for nodal targets, longest diameter otherwise (Eisenhauer et
+    al., EJC 2009)."""
+    return m.short_axis_mm if m.is_nodal else m.longest_diameter_mm
 
 
 def _pct(ref: float | None, new: float | None) -> float | None:
@@ -118,8 +128,9 @@ def summarize_response(
     dates: dict[UUID, date | None] = {}
     for m in targets:
         s = sums.setdefault(m.study_id, {"diam": 0.0, "vol": 0.0})
-        if m.longest_diameter_mm is not None:
-            s["diam"] += m.longest_diameter_mm
+        diam = _recist_diameter(m)
+        if diam is not None:
+            s["diam"] += diam
         if m.volume_ml is not None:
             s["vol"] += m.volume_ml
         dates[m.study_id] = m.study_date
@@ -160,25 +171,70 @@ def summarize_response(
             has_new_lesions=has_new,
         )
 
-    # Per-track basis (baseline vs current diameter).
+    # Per-track basis (baseline vs current diameter — short axis for nodal
+    # targets, longest diameter otherwise, matching the summed SoD above).
     by_track: dict[UUID, dict[str, Any]] = {}
     for m in targets:
         t = by_track.setdefault(
-            m.track_id, {"label": m.label, "baseline_mm": None, "current_mm": None}
+            m.track_id,
+            {
+                "label": m.label,
+                "baseline_mm": None,
+                "current_mm": None,
+                "is_nodal": m.is_nodal,
+                "anatomy": m.anatomy_key,
+            },
         )
         if m.study_id == baseline_study_id:
-            t["baseline_mm"] = m.longest_diameter_mm
+            t["baseline_mm"] = _recist_diameter(m)
         if m.study_id == current_study_id:
-            t["current_mm"] = m.longest_diameter_mm
+            t["current_mm"] = _recist_diameter(m)
+
+    # Why NE, so the UI can explain it and point at the missing input
+    # instead of rendering a bare dash.
+    ne_reason: str | None = None
+    if category == "NE":
+        if len(by_track) == 0:
+            ne_reason = "no_target_lesions"
+        elif current_sum is None:
+            ne_reason = "current_missing"
+        elif baseline_sum is None:
+            ne_reason = "baseline_missing"
+        else:
+            ne_reason = "unknown"
+
+    # RECIST 1.1 reading caps: <=5 target lesions total, <=2 per organ.
+    # Surfaced as a soft warning (radiologists sometimes exceed it
+    # deliberately), counted over distinct tracks not measurements.
+    track_anatomy: dict[UUID, str | None] = {}
+    for m in targets:
+        track_anatomy.setdefault(m.track_id, m.anatomy_key)
+    per_organ: dict[str, int] = {}
+    for akey in track_anatomy.values():
+        if akey:
+            per_organ[akey] = per_organ.get(akey, 0) + 1
+
     basis = {
         "criterion": criterion,
         "n_target_lesions": len(by_track),
+        "ne_reason": ne_reason,
+        "has_baseline": baseline_sum is not None,
+        "has_current": current_sum is not None,
+        "caps": {
+            "n_targets": len(by_track),
+            "max_targets": 5,
+            "over_limit": len(by_track) > 5,
+            "per_organ": per_organ,
+            "per_organ_over_limit": [k for k, c in per_organ.items() if c > 2],
+        },
         "lesions": [
             {
                 "track_id": str(tid),
                 "label": v["label"],
                 "baseline_mm": v["baseline_mm"],
                 "current_mm": v["current_mm"],
+                "is_nodal": v["is_nodal"],
+                "anatomy": v["anatomy"],
                 "delta_mm": (
                     None
                     if v["baseline_mm"] is None or v["current_mm"] is None
@@ -217,7 +273,9 @@ async def compute_response_assessment(
     from sqlalchemy import select
 
     from bvphoenix.db.models import (
+        AnatomySite,
         Finding,
+        FindingType,
         ImagingStudy,
         LesionTrack,
         LesionTrackPoint,
@@ -232,11 +290,16 @@ async def compute_response_assessment(
                 Finding.study_id,
                 ImagingStudy.study_date,
                 Finding.longest_diameter_mm,
+                Finding.short_axis_mm,
                 Finding.volume_ml,
+                FindingType.key,
+                AnatomySite.key,
             )
             .join(LesionTrackPoint, LesionTrackPoint.lesion_track_id == LesionTrack.id)
             .join(Finding, Finding.id == LesionTrackPoint.finding_id)
             .join(ImagingStudy, ImagingStudy.id == Finding.study_id)
+            .join(FindingType, FindingType.id == Finding.finding_type_id)
+            .outerjoin(AnatomySite, AnatomySite.id == LesionTrack.anatomy_site_id)
             .where(
                 LesionTrack.patient_id == patient_id,
                 LesionTrack.deleted_at.is_(None),
@@ -254,7 +317,10 @@ async def compute_response_assessment(
             study_id=r[3],
             study_date=r[4],
             longest_diameter_mm=r[5],
-            volume_ml=r[6],
+            short_axis_mm=r[6],
+            volume_ml=r[7],
+            is_nodal=(r[8] == "lymph_node"),
+            anatomy_key=r[9],
         )
         for r in rows
     ]

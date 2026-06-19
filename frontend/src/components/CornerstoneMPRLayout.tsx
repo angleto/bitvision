@@ -61,6 +61,7 @@ import { makeSampler, sampleDisk, worldToIjk } from "@/lib/cornerstoneTools/volu
 import { buildLocalVolume } from "@/lib/cornerstoneVolume";
 import { resolveFusionOrder } from "@/lib/fusionVolumeOrder";
 import { LAYOUT_DIMS } from "@/lib/hangingProtocols";
+import { extractBidirectionalMm } from "@/lib/measurements";
 import {
   type EdgeLetters,
   type OrientationCamera,
@@ -1521,6 +1522,7 @@ const CornerstoneMPRLayout = forwardRef<MPRLayoutHandle, ExtendedProps>(
               string,
               {
                 length?: number;
+                width?: number;
                 mean?: number;
                 max?: number;
                 area?: number;
@@ -1535,8 +1537,14 @@ const CornerstoneMPRLayout = forwardRef<MPRLayoutHandle, ExtendedProps>(
         }>;
         const out = groups.map((a, i) => {
           const stats = a.data?.cachedStats ? Object.values(a.data.cachedStats)[0] : undefined;
+          // BidirectionalTool (RECIST) reports both axes in patient mm.
+          const { longAxisMm, shortAxisMm } = extractBidirectionalMm(stats);
           let value: string;
-          if (stats?.length !== undefined) {
+          if (shortAxisMm !== undefined && longAxisMm !== undefined) {
+            // Bidirectional: surface "long × short mm" so the canvas label
+            // and markers panel read as a RECIST measurement.
+            value = `${longAxisMm.toFixed(1)} × ${shortAxisMm.toFixed(1)} mm`;
+          } else if (stats?.length !== undefined) {
             value = `${stats.length.toFixed(1)} mm`;
           } else if (
             stats?.mean !== undefined &&
@@ -1630,6 +1638,8 @@ const CornerstoneMPRLayout = forwardRef<MPRLayoutHandle, ExtendedProps>(
             sliceIndex,
             markerId: a.annotationUID,
             suv,
+            longAxisMm,
+            shortAxisMm,
           };
         });
         onMeasurementsChange?.(out);

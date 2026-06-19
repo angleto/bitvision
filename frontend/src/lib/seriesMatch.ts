@@ -92,6 +92,69 @@ export function bestMatchSeries(
   return best;
 }
 
+// Why a default was (or was not) auto-selected, so the picker can explain
+// itself instead of silently loading something:
+//  - "single"           one comparable (same-modality) series — the obvious pick
+//  - "clear-margin"     one comparable series clearly beats the rest (plane/phrasing)
+//  - "ambiguous"        several comparable series, no clear winner (e.g. same plane,
+//                       different contrast phase) — a medical choice the user must make
+//  - "no-modality-match" no candidate shares the reference modality — don't auto-compare
+//  - "empty"            no candidates at all
+export type MatchReason = "single" | "clear-margin" | "ambiguous" | "no-modality-match" | "empty";
+
+export interface MatchConfidence {
+  best: Series | null;
+  confident: boolean;
+  reason: MatchReason;
+}
+
+// A candidate must at least share the reference modality to be "comparable"
+// (== the +100 from seriesMatchScore). Comparing a CT against an MR series by
+// default is never sensible.
+const MODALITY_FLOOR = 100;
+// The winner must beat the runner-up by at least this much to auto-load. 25 ==
+// one acquisition-plane match: a series that UNIQUELY lines up with the
+// reference plane (axial↔axial) is a confident default. A margin below this
+// (e.g. two comparable axial series differing only in contrast phase) is a
+// clinical decision — surface the picker rather than guess the phase.
+const CONFIDENT_MARGIN = 25;
+
+/** Decide whether ``candidates`` contain a confident medical default to compare
+ * against ``reference``, or whether the choice is ambiguous and must be left to
+ * the user. Pure: drives whether the comparison viewer auto-loads or asks. */
+export function matchConfidence(
+  candidates: Series[],
+  reference: Series,
+  planeOf?: (seriesId: string) => PrimaryPlane | null | undefined,
+): MatchConfidence {
+  if (candidates.length === 0) return { best: null, confident: false, reason: "empty" };
+  const referencePlane = planeOf?.(reference.id) ?? null;
+  const scored = candidates
+    .map((c) => ({
+      c,
+      s: seriesMatchScore(c, reference, {
+        candidatePlane: planeOf?.(c.id) ?? null,
+        referencePlane,
+      }),
+    }))
+    .sort((a, b) => b.s - a.s);
+
+  const top = scored[0];
+  // Nothing shares the modality: comparing apples to oranges — make the user choose.
+  if (top.s < MODALITY_FLOOR) {
+    return { best: top.c, confident: false, reason: "no-modality-match" };
+  }
+  const comparable = scored.filter((x) => x.s >= MODALITY_FLOOR);
+  if (comparable.length === 1) {
+    return { best: top.c, confident: true, reason: "single" };
+  }
+  const margin = top.s - comparable[1].s;
+  if (margin >= CONFIDENT_MARGIN) {
+    return { best: top.c, confident: true, reason: "clear-margin" };
+  }
+  return { best: top.c, confident: false, reason: "ambiguous" };
+}
+
 /** Human label for a series option in the comparison selector:
  * ``#<num> · <MOD> · <plane> · <N> img — <description>``. ``planeLabel`` is the
  * already-localized plane word (or null/undefined to omit). The verbatim

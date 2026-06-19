@@ -283,3 +283,44 @@ export function createProbe(at: Pt, huValue?: number): Measurement {
     color: "#9ef",
   };
 }
+
+// ---------------------------------------------------------------------------
+// Cornerstone3D BidirectionalTool extraction (MPR viewer / RECIST).
+//
+// The Cornerstone-native MPR layout reports a bidirectional annotation's two
+// axes in patient mm under ``cachedStats`` (``length`` = long axis,
+// ``width`` = short axis). These pure helpers turn that into the long/short
+// values our RECIST persistence stores; kept free of any Cornerstone import
+// so they unit-test in jsdom.
+// ---------------------------------------------------------------------------
+
+/** A BidirectionalTool ``cachedStats`` entry (only the fields we read). */
+export interface BidirectionalStats {
+  length?: number;
+  width?: number;
+}
+
+/** Long/short axes (mm) of a bidirectional measurement. Cornerstone already
+ *  reports both in patient space, so we pass them through verbatim; non-finite
+ *  or missing values become ``undefined`` so callers can distinguish "not a
+ *  bidirectional" from "measured 0". */
+export function extractBidirectionalMm(stats: BidirectionalStats | undefined): {
+  longAxisMm?: number;
+  shortAxisMm?: number;
+} {
+  const long = stats?.length;
+  const short = stats?.width;
+  return {
+    longAxisMm: typeof long === "number" && Number.isFinite(long) ? long : undefined,
+    shortAxisMm: typeof short === "number" && Number.isFinite(short) ? short : undefined,
+  };
+}
+
+/** Human label for a bidirectional measurement, e.g. ``24.0 × 16.0 mm``;
+ *  falls back to the long-axis-only form (``24.0 mm``) when there is no short
+ *  axis (a plain Length tool routed through the same path). */
+export function formatBidirectionalLabel(longAxisMm?: number, shortAxisMm?: number): string | null {
+  if (longAxisMm === undefined) return null;
+  if (shortAxisMm === undefined) return `${longAxisMm.toFixed(1)} mm`;
+  return `${longAxisMm.toFixed(1)} × ${shortAxisMm.toFixed(1)} mm`;
+}
