@@ -111,6 +111,7 @@ from bvphoenix.db.models.patient_tasks import (
     PatientTaskTransition,
 )
 from bvphoenix.db.models.patients import Document, DocumentFile, DocumentStudyLink, Patient
+from bvphoenix.db.models.phase_enhancement import PhaseEnhancementSet
 from bvphoenix.db.models.principals import (
     Group,
     Membership,
@@ -140,7 +141,6 @@ from bvphoenix.db.models.report_contents import (
     ReportContent,
     ReportContentCitation,
 )
-from bvphoenix.db.models.phase_enhancement import PhaseEnhancementSet
 from bvphoenix.db.models.response_assessments import (
     ResponseAssessment,
     ResponseAssessmentRevision,
@@ -305,6 +305,7 @@ __all__ = [
     "Patient",
     "PatientContact",
     "PatientInboxAddress",
+    "PhaseEnhancementSet",
     "Proposal",
     "ProvenanceEvent",
     "Ref",
@@ -313,7 +314,6 @@ __all__ = [
     "ReindexJob",
     "ReportContent",
     "ReportContentCitation",
-    "PhaseEnhancementSet",
     "ResponseAssessment",
     "ResponseAssessmentRevision",
     "RevokedToken",
