@@ -68,7 +68,8 @@ def sync_session() -> Session:
 
 def _make_owner_and_patient(session: Session) -> tuple[uuid.UUID, uuid.UUID]:
     owner = Subject(id=uuid.uuid4(), kind="user", display_name="path-owner")
-    patient = Patient(id=uuid.uuid4(), managed_by_subject_id=None)
+    # Patient.display_name is NOT NULL; managed_by_subject_id is nullable.
+    patient = Patient(id=uuid.uuid4(), managed_by_subject_id=owner.id, display_name="Test Patient")
     session.add(owner)
     session.add(patient)
     session.flush()
