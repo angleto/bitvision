@@ -48,6 +48,7 @@ from bvphoenix.db.session import SERVICE_SUBJECT, set_current_subject
 from bvphoenix.services import jobs as jobs_service
 from bvphoenix.services import k_anonymity, training_cohort
 from bvphoenix.services.patient_export import _bytes_member, _fetch_blob_bytes
+from bvphoenix.services.pixel_deid import classify_pixel_risk_bytes
 from bvphoenix.storage import get_s3_storage
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
@@ -96,7 +97,7 @@ def _stream_cohort_sync(
     key: str,
     progress_q: list[int],
     cancel: threading.Event,
-) -> tuple[int, dict[uuid.UUID, dict[str, Any]]]:
+) -> tuple[int, dict[uuid.UUID, dict[str, Any]], list[dict[str, Any]]]:
     """Sync core: fetch each blob (DICOM de-id'd, masks raw), zip-stream
     into the S3 multipart sink. O(part_size) memory.
 
@@ -104,21 +105,34 @@ def _stream_cohort_sync(
     streams (keyed on the work item's real ``study_id``) so the dataset
     producer can write one ``DatasetStudy`` per study with an accurate
     ``size_bytes`` (the payout weight) and ``content_sha256``. Returns
-    ``(total_size_bytes, {study_id: {size_bytes, content_sha256}})``.
+    ``(total_size_bytes, {study_id: {size_bytes, content_sha256}}, skipped)``
+    where ``skipped`` lists the high-risk-pixel instances excluded by the
+    burned-in-PHI gate (see below).
 
     ``cancel`` is checked before each member (and before the trailing
     labels.json): once the poller trips it, the generator raises
     ``_ExportCancelledError`` so ``upload_iter`` aborts the multipart cleanly."""
     storage = get_s3_storage()
     per_study: dict[uuid.UUID, dict[str, Any]] = {}
+    skipped: list[dict[str, Any]] = []
 
     def _members():  # type: ignore[no-untyped-def]
         for item in work:
             if cancel.is_set():
                 raise _ExportCancelledError
-            body = _fetch_blob_bytes(
-                storage, item["bucket"], item["key"], deidentify=(item["kind"] == "dicom")
-            )
+            is_dicom = item["kind"] == "dicom"
+            body = _fetch_blob_bytes(storage, item["bucket"], item["key"], deidentify=is_dicom)
+            # Burned-in-pixel PHI gate (M0): ``deidentify`` above scrubs the
+            # DICOM *header* but leaves pixels untouched, so an instance with
+            # PHI burned into the image (ultrasound banners, secondary capture,
+            # dose-report screenshots) would otherwise ship to the public /
+            # licensed cohort. Until automated pixel redaction + human review
+            # land (M1/M4), high-risk instances are EXCLUDED from the artifact
+            # and recorded so the drop is never silent.
+            if is_dicom and classify_pixel_risk_bytes(body).is_high:
+                skipped.append({"study_id": item.get("study_id"), "name": item["name"]})
+                progress_q[0] += 1
+                continue
             sid = item.get("study_id")
             if sid is not None:
                 stat = per_study.setdefault(sid, {"size": 0, "hash": hashlib.sha256()})
@@ -140,7 +154,7 @@ def _stream_cohort_sync(
         sid: {"size_bytes": s["size"], "content_sha256": s["hash"].hexdigest()}
         for sid, s in per_study.items()
     }
-    return result.size_bytes, stats
+    return result.size_bytes, stats, skipped
 
 
 async def _stream_cohort(
@@ -152,10 +166,11 @@ async def _stream_cohort(
     bucket: str,
     key: str,
     total: int,
-) -> tuple[int, dict[uuid.UUID, dict[str, Any]]]:
+) -> tuple[int, dict[uuid.UUID, dict[str, Any]], list[dict[str, Any]]]:
     """Run the sync stream in a thread while an async poller publishes the
-    shared progress counter to the Job. Returns the streamed size plus the
-    per-study byte/hash stats the dataset producer needs."""
+    shared progress counter to the Job. Returns the streamed size, the
+    per-study byte/hash stats the dataset producer needs, and the list of
+    high-risk-pixel instances the burned-in-PHI gate excluded."""
     progress_q = [0]
     stop = asyncio.Event()
     cancel = threading.Event()
@@ -253,9 +268,17 @@ async def training_cohort_export_zip(
         total = len(work) + 1  # + labels.json
         bucket = settings.s3_bucket_derivatives
         key = f"exports/training/{job_id}/cohort.zip"
-        size, per_study_stats = await _stream_cohort(
+        size, per_study_stats, pixel_skipped = await _stream_cohort(
             engine, jid, work, labels_bytes, bucket=bucket, key=key, total=total
         )
+        if pixel_skipped:
+            logger.warning(
+                "training cohort export %s: burned-in-PHI gate EXCLUDED %d high-risk "
+                "instance(s) from the public artifact; affected studies=%s",
+                job_id,
+                len(pixel_skipped),
+                sorted({str(s["study_id"]) for s in pixel_skipped if s.get("study_id")}),
+            )
 
         # Materialize the standalone Dataset (Option 3): the manifest gets its
         # own S3 object (the ZIP is the bundle, but licensed_datasets.manifest_s3_*
@@ -309,6 +332,7 @@ async def training_cohort_export_zip(
             "findings": len(rows),
             "size_bytes": size,
             "dataset_id": dataset_id,
+            "pixel_phi_skipped": len(pixel_skipped),
         }
     except _ExportCancelledError:
         # The Job is already terminal ('cancelled', set by request_cancellation);

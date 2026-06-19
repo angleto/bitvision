@@ -312,6 +312,42 @@ class Settings(BaseSettings):
                 self.jwt_secret = "dev-only-insecure-default"
         return self
 
+    # ---- DICOM de-identification (PS3.15 in-house engine) ----
+    # Per-deployment secret salt for the keyed-hash UID remap + per-patient
+    # date shift (services/deid). Same threat model as jwt_secret: an empty or
+    # shared salt would make the remap guessable and linkable ACROSS
+    # deployments — defeating the point — so production rejects an empty value.
+    deid_secret_salt: str = Field(default="")
+    # Org root OID for generated (remapped) UIDs. Default is a documentation
+    # OID; a production deployment should set its registered root.
+    deid_org_root_uid: str = Field(default="1.2.826.0.1.3680043.10.9999")
+    # Bumped whenever the engine's semantics/options change; invalidates the
+    # per-study deidentified_at stamp so stale scrubs are re-run.
+    deid_method_version: str = Field(default="phoenix-deid-2")
+    deid_safe_private_version: str = Field(default="v1")
+    # "shift" = Retain Longitudinal Temporal Information (Modified Dates option);
+    # "remove" = empty all dates.
+    deid_date_policy: str = Field(default="shift")
+    deid_clean_descriptors: bool = Field(default=True)
+    deid_retain_patient_characteristics: bool = Field(default=True)
+    deid_retain_device_identity: bool = Field(default=False)
+    deid_retain_safe_private: bool = Field(default=False)
+
+    @model_validator(mode="after")
+    def _reject_weak_deid_salt_in_production(self) -> Settings:
+        """Mirror the JWT-secret guard for the de-identification salt. An empty
+        salt in production would make the keyed-hash UID remap + date shift
+        guessable and cross-deployment-linkable; refuse to load. Dev falls back
+        to an obvious insecure marker."""
+        if self.env == "production" and not self.deid_secret_salt:
+            raise RuntimeError(
+                "BVP_DEID_SECRET_SALT must be set to a strong random value in production "
+                "(generate with: python -c 'import secrets; print(secrets.token_urlsafe(48))')"
+            )
+        if not self.deid_secret_salt:
+            self.deid_secret_salt = "dev-only-insecure-deid-salt"
+        return self
+
     # Email verification. When true, login refuses accounts with a NULL
     # ``email_verified_at``. Default false keeps dev bootstraps usable
     # without a live SMTP relay — production deployments must flip it.

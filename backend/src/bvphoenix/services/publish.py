@@ -216,6 +216,13 @@ async def publish_patient_to_opendata(
             # F12.4 v0: study/series/etc. are not cloned, so notes
             # attached to them are dropped on publish. The decision
             # to publish a richer fascicolo is F12.4 follow-up.
+            #
+            # BURNED-IN-PHI GATE: when imaging publish lands here, DICOM pixels
+            # MUST NOT be cloned to the public patient directly — route every
+            # instance through the public-contribution review queue (M1), whose
+            # PixelPhiCheck blocks/quarantines high-risk pixels. Header de-id
+            # alone is insufficient (it never touches pixel data). See
+            # services.pixel_deid.classify_pixel_risk.
             continue
         else:
             continue

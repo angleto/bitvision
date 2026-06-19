@@ -29,6 +29,7 @@ from bvmcp.tools import clinical_event_attachments as clinical_event_attachments
 from bvmcp.tools import clinical_events as clinical_events_tools
 from bvmcp.tools import clinical_notes as clinical_notes_tools
 from bvmcp.tools import contrast_phases as contrast_phases_tools
+from bvmcp.tools import contributions as contributions_tools
 from bvmcp.tools import document_reads as document_reads_tools
 from bvmcp.tools import document_writes as document_writes_tools
 from bvmcp.tools import documents as documents_tools
@@ -105,6 +106,7 @@ TOOL_MODULES = (
     training_tools,
     embeddings_admin_tools,
     inbox_tools,
+    contributions_tools,
 )
 
 

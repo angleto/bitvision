@@ -15,16 +15,15 @@ upload enqueue this task. Three phases:
 3. **Re-enqueue pack_volume** for each series so the volume cache
    rebuilds in the background and the viewer is ready on first open.
 
-The task is **idempotent**: running it twice on the same study
-leaves the DB in the same state (derivatives are deleted if present,
-scrub is a no-op on clean bytes, pack is enqueued again and itself
-short-circuits when the cache already exists).
-
-The backend's ``should_deidentify`` still returns True for T3 / T4,
-which keeps the read path as belt-and-suspenders in case a blob in
-S3 predates this task. Once every blob has been written by this
-path the lazy-scrub becomes a cheap tag-check; removing it behind a
-per-study ``deidentified_at`` stamp is the next step.
+The task is **idempotent** via the per-study DB stamp: it skips the scrub
+phase when ``imaging_studies.deid_method_version`` already equals the current
+engine version (a re-run leaves materialised bytes untouched). The engine
+itself is NOT byte-idempotent (its UID remap + date shift are value-based), and
+it deliberately does NOT trust the file's own ``PatientIdentityRemoved`` tag —
+that signal is attacker-forgeable; only the DB stamp is authoritative. On
+success the task writes the stamp, which the download path
+(``api/studies/core.py``) then uses to serve the stored scrubbed bytes without
+a per-download re-scrub.
 """
 
 from __future__ import annotations
@@ -142,7 +141,9 @@ async def deidentify_reindex_study(ctx: dict, study_id: str) -> dict:  # type: i
     async with AsyncSession(engine) as db:
         study_row = (
             await db.execute(
-                text("SELECT id, contribution_tier FROM studies WHERE id = :sid"),
+                text(
+                    "SELECT id, contribution_tier, deid_method_version FROM studies WHERE id = :sid"
+                ),
                 {"sid": sid},
             )
         ).first()
@@ -151,12 +152,24 @@ async def deidentify_reindex_study(ctx: dict, study_id: str) -> dict:  # type: i
             return {"status": "not_found", "study_id": study_id}
 
         tier = study_row[1]
+        already_deid_version = study_row[2]
+
+        # DB-driven idempotency (the unforgeable "already scrubbed" signal): a
+        # study already scrubbed at the CURRENT engine version is not re-scrubbed.
+        # The engine's UID remap + date shift are value-based, not byte-idempotent,
+        # so a second pass would re-mutate the materialised bytes (drifting UIDs,
+        # double-shifting dates). A version mismatch (engine upgraded) DOES
+        # re-scrub. We deliberately do NOT trust the file's own
+        # PatientIdentityRemoved tag for this — only the DB stamp.
+        from bvphoenix.config import get_settings as _bvp_get_settings
+
+        current_version = _bvp_get_settings().deid_method_version
 
         # Phase 1: scrub raw DICOM for commons tiers. Private / shared-
         # controlled studies stay as uploaded because the user's own
         # tenant is still the only audience; only T3 / T4 land in a
         # sharing posture that assumes PHI has been removed from disk.
-        if tier in _COMMONS_TIERS:
+        if tier in _COMMONS_TIERS and already_deid_version != current_version:
             instance_rows = (
                 await db.execute(
                     text(
@@ -189,9 +202,7 @@ async def deidentify_reindex_study(ctx: dict, study_id: str) -> dict:  # type: i
 
         for _, bucket, key in deriv_rows:
             try:
-                await asyncio.to_thread(
-                    s3.delete_object, Bucket=bucket, Key=key
-                )
+                await asyncio.to_thread(s3.delete_object, Bucket=bucket, Key=key)
             except Exception as exc:
                 log.warning(
                     "deidentify_reindex: failed to delete s3://%s/%s: %s",
@@ -218,6 +229,21 @@ async def deidentify_reindex_study(ctx: dict, study_id: str) -> dict:  # type: i
             )
         ).all()
         series_rebuilt = [str(r[0]) for r in series_rows]
+
+        # Stamp the study as de-identified at rest after a clean commons-tier
+        # scrub, so the egress download path (api/studies/core.py) can serve the
+        # stored scrubbed bytes directly instead of re-scrubbing on every read.
+        # The version must equal what the engine wrote into the bytes, so read
+        # it from the backend engine config (lazy import: the worker image may
+        # ship without bvphoenix, in which case the scrub already failed above).
+        if tier in _COMMONS_TIERS and scrub_summary["error"] == 0:
+            await db.execute(
+                text(
+                    "UPDATE imaging_studies SET deidentified_at = now(), "
+                    "deid_method_version = :v WHERE id = :sid"
+                ),
+                {"v": current_version, "sid": sid},
+            )
 
         await db.commit()
 
