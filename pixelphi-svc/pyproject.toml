@@ -1,0 +1,59 @@
+[project]
+name = "bvpixelphi"
+version = "0.0.1"
+description = "bitvision phoenix, CPU ONNX burned-in-pixel PHI text-region detector"
+readme = "README.md"
+requires-python = ">=3.12"
+license = { text = "AGPL-3.0-or-later" }
+authors = [{ name = "bitvision phoenix contributors" }]
+# Runtime deps kept deliberately lean: the service runs an exported PP-OCRv5
+# detection graph on onnxruntime CPU. It does NOT pull paddlepaddle / paddleocr
+# at runtime, those are only needed by the one-time export script (the
+# ``export`` optional extra), run out-of-band to materialise the ONNX graph.
+dependencies = [
+    "fastapi>=0.115.0",
+    "uvicorn[standard]>=0.32.0",
+    "onnxruntime>=1.19.0",
+    "numpy>=1.26.0",
+    "pillow>=10.4.0",
+    "opencv-python-headless>=4.10.0",
+    "pydantic>=2.9.0",
+    "pydantic-settings>=2.6.0",
+]
+
+[project.optional-dependencies]
+# Heavy deps used ONLY by scripts/export_onnx.py to materialise the PP-OCRv5
+# detector .onnx graph for upload to the model bucket. Never installed in the
+# runtime image layer.
+export = [
+    "paddlepaddle>=2.6.0",
+    "paddleocr>=2.9.0",
+    "paddle2onnx>=1.2.0",
+]
+dev = [
+    "pytest>=8.3.0",
+    "pytest-asyncio>=0.24.0",
+    "httpx>=0.28.0",
+    "ruff>=0.8.0",
+    "mypy>=1.13.0",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/bvpixelphi"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "N", "UP", "B", "C4", "SIM", "RUF"]
+ignore = ["E501"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
