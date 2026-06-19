@@ -180,8 +180,20 @@
     "curveLabel": "HU per phase",
     "chooseSeries": "Choose series",
     "pickTitle": "Choose the contrast phases",
-    "pickSubtitle": "Pick the volumetric series to open as phases (scouts, recons, dose reports are hidden).",
+    "pickSubtitle": "Pick the series to open as phases. Reviewable axial volumes are listed; scouts, reformats, recons and dose reports are hidden. Your choice opens exactly those series.",
     "pickOpen": "Open {count} series",
+    "showAllSeries": "Show all series ({count} hidden)",
+    "manualSelection": "Manual selection · {count} phase(s)",
+    "resetToAuto": "reset to auto",
+    "autoClassified": "Auto-detected {count} phase(s)",
+    "wrongPickSeries": "wrong? choose series",
+    "showingFirst": "showing first {count}",
+    "plane": {
+      "axial": "axial",
+      "sagittal": "sagittal reformat",
+      "coronal": "coronal reformat",
+      "oblique": "oblique reformat"
+    },
     "phase": {
       "unenhanced": "Unenhanced",
       "arterial": "Arterial",

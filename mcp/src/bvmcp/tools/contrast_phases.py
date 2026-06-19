@@ -75,9 +75,14 @@ TOOLS: list[Tool] = [
             "``phase_confidence`` (0..1), ``phase_source`` (auto / human), "
             "``needs_confirmation`` (true = low-confidence candidate the "
             "human should confirm), ``acquisition_time_of_day``, the "
-            "``contrast_bolus_agent``, and ``frame_of_reference_uid`` (when "
-            "the volume is packed). Read-only: reflects the persisted state; "
-            "run ``detect_study_phases`` first if everything is unclassified."
+            "``contrast_bolus_agent``, ``frame_of_reference_uid`` (when "
+            "the volume is packed), ``series_plane`` (axial / sagittal / "
+            "coronal / oblique, from packed geometry), and "
+            "``is_reviewable_phase`` (true = an axial CT phase volume to open "
+            "as a pane; false = a localizer / capture / dose report / "
+            "bolus-prep / MPR reformat to ignore). Read-only: reflects the "
+            "persisted state; run ``detect_study_phases`` first if everything "
+            "is unclassified."
         ),
         inputSchema={
             "type": "object",

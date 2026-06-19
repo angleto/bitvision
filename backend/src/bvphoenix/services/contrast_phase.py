@@ -35,6 +35,7 @@ from dataclasses import dataclass, field
 from datetime import time
 
 from bvphoenix.db.models.dicom import ACQUISITION_PHASES
+from bvphoenix.services.series_kind import is_non_reviewable_desc
 
 # Confidence a label needs to be trusted without human confirmation. Below
 # this, the UI/MCP surfaces the phase as a candidate to confirm.
@@ -205,6 +206,30 @@ def _match_description(text: str | None) -> tuple[str | None, str | None]:
     return None, None
 
 
+def _distinct_phase_matches(text: str | None) -> set[str]:
+    """Every distinct phase whose pattern matches anywhere in ``text``."""
+    if not text:
+        return set()
+    return {phase for phase, pattern in _PHASE_PATTERNS if pattern.search(text)}
+
+
+def _unambiguous_protocol_phase(protocol_name: str | None) -> str | None:
+    """Phase from a ProtocolName, but ONLY when the protocol names exactly
+    one phase.
+
+    A study-level ProtocolName is shared by every series and frequently
+    enumerates the *whole* multiphase protocol — e.g. GE's
+    "Torace Addome Pelvi (Basale/Arteriosa-Venosa)" names unenhanced +
+    arterial + portal at once. Matching the first pattern would stamp that
+    single label onto every scout, reformat and dose report in the study.
+    So a protocol that resolves to more than one distinct phase is treated
+    as a non-discriminating exam descriptor and ignored; only a protocol
+    that points at a single phase is trusted as a weak fallback signal.
+    """
+    matches = _distinct_phase_matches(protocol_name)
+    return next(iter(matches)) if len(matches) == 1 else None
+
+
 def _is_renal(s: SeriesPhaseInput) -> bool:
     for txt in (s.body_part_examined, s.series_description, s.protocol_name):
         if txt and _RENAL_RE.search(txt):
@@ -278,10 +303,25 @@ def _classify_group(
     for s in group:
         rationale: list[str] = []
 
-        # 1) Description / protocol — the strong signal.
+        # 0) Localizer / capture / dose report / bolus-prep series are not a
+        #    contrast phase at all — never label them (a stale "portal" on a
+        #    Scout would otherwise leak into the viewer's phase panes).
+        if is_non_reviewable_desc(s.series_description):
+            out[s.series_id] = SeriesPhaseResult(
+                series_id=s.series_id,
+                acquisition_phase=None,
+                confidence=None,
+                rationale=["non-reviewable series (localizer / capture / dose / prep)"],
+            )
+            continue
+
+        # 1) Description — the strong signal. ProtocolName is a guarded
+        #    fallback: used only when it names exactly one phase (a
+        #    multiphase protocol descriptor shared by every series, e.g.
+        #    "Basale/Arteriosa-Venosa", is ambiguous and ignored).
         desc_phase, _ = _match_description(s.series_description)
         if desc_phase is None:
-            desc_phase, _ = _match_description(s.protocol_name)
+            desc_phase = _unambiguous_protocol_phase(s.protocol_name)
         if desc_phase is not None:
             rationale.append(f"description matched '{desc_phase}'")
 

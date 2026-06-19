@@ -253,13 +253,19 @@ export default function StudyDetailContent({ studyId, initialStudy }: Props) {
           compareIds.length === 2
             ? `/viewer/followup?baseline=${compareIds[0]}&followup=${compareIds[1]}`
             : "#";
-        // The multiphase contrast viewer is study-scoped (it groups the
-        // study's own CT phases), not selection-scoped: enabled whenever the
-        // study has >= 2 CT series.
+        // The multiphase contrast viewer opens this study's CT phases. By
+        // default it auto-classifies them, but if the radiologist ticked the
+        // exact series to compare we honour that pick: pass the selected CT
+        // series so the viewer opens precisely those (the auto-detection can
+        // be wrong, so the manual choice must win).
         const ctCount = study.series.filter(
           (s) => (s.modality ?? "").toUpperCase() === "CT",
         ).length;
-        const contrastUrl = `/viewer/contrast?study=${studyId}`;
+        const contrastSel = ctSeries.map((s) => s.id);
+        const contrastUrl =
+          contrastSel.length >= 2
+            ? `/viewer/contrast?study=${studyId}&${contrastSel.map((id) => `s=${id}`).join("&")}`
+            : `/viewer/contrast?study=${studyId}`;
         return (
           <div
             style={{
@@ -381,9 +387,15 @@ export default function StudyDetailContent({ studyId, initialStudy }: Props) {
                   opacity: ctCount >= 2 ? 1 : 0.45,
                   pointerEvents: ctCount >= 2 ? "auto" : "none",
                 }}
-                title="Open this CT study's contrast phases side-by-side, synced by anatomy and auto-windowed (non-contrast / arterial / portal / delayed)"
+                title={
+                  contrastSel.length >= 2
+                    ? `Open the ${contrastSel.length} selected CT series as contrast phases, synced by anatomy and auto-windowed`
+                    : "Open this CT study's contrast phases side-by-side, synced by anatomy and auto-windowed (non-contrast / arterial / portal / delayed). Tick 2+ CT series to open exactly those."
+                }
               >
-                Contrast phases →
+                {contrastSel.length >= 2
+                  ? `Contrast phases (${contrastSel.length}) →`
+                  : "Contrast phases →"}
               </Link>
               {study.patient_id && (
                 <ComparePriorButton

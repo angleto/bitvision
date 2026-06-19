@@ -357,6 +357,13 @@ export interface SeriesPhase {
   contrast_bolus_agent: string | null;
   frame_of_reference_uid: string | null;
   instance_count: number | null;
+  /** Acquisition plane from packed geometry: axial | sagittal | coronal |
+   *  oblique, or null when the series is not packed yet. */
+  series_plane?: string | null;
+  /** True when the series is a reviewable axial phase volume (CT, axial,
+   *  enough slices, not a localizer / capture / dose / prep / reformat).
+   *  Optional so an older backend (no field) degrades to the FE heuristic. */
+  is_reviewable_phase?: boolean;
 }
 
 export interface StudyPhases {
