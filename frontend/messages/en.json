@@ -81,6 +81,15 @@
     "noMatrix": "Alignment produced no transform.",
     "alignFailed": "Alignment failed.",
     "alignTimeout": "Alignment is taking too long; try again shortly.",
+    "alignCancel": "Cancel",
+    "alignRetry": "Retry",
+    "alignStage": {
+      "queued": "Queued…",
+      "running": "Aligning…",
+      "loading": "Loading volumes…",
+      "registering": "Registering…",
+      "uploading": "Saving transform…"
+    },
     "align": {
       "sameFrame": "Aligned (same frame)",
       "registered": "Aligned (registration)",
@@ -138,6 +147,18 @@
     "clear": "Clear",
     "align": "Align",
     "aligning": "Aligning…",
+    "alignCancel": "Cancel",
+    "alignRetry": "Retry",
+    "alignFailed": "Alignment failed.",
+    "alignTimeout": "Alignment is taking too long; try again shortly.",
+    "noMatrix": "Alignment produced no transform.",
+    "alignStage": {
+      "queued": "Queued…",
+      "running": "Aligning…",
+      "loading": "Loading volumes…",
+      "registering": "Registering…",
+      "uploading": "Saving transform…"
+    },
     "needsAlign": "Different frame — align to sync",
     "aligned": "Aligned",
     "loadError": "Load error: {detail}",

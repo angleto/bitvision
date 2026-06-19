@@ -470,9 +470,22 @@ class RegistrationOut(BaseModel):
     error: str | None
     created_at: str
     finished_at: str | None
+    # Live progress mirrored from the linked Job (populated on GET) so the
+    # viewer can show "queued / loading / registering / uploading" instead of
+    # a blind spinner.
+    stage: str | None = None
+    progress_done: int | None = None
+    progress_total: int | None = None
 
 
-def _registration_to_out(reg, *, download_url: str | None = None) -> RegistrationOut:
+def _registration_to_out(
+    reg,
+    *,
+    download_url: str | None = None,
+    stage: str | None = None,
+    progress_done: int | None = None,
+    progress_total: int | None = None,
+) -> RegistrationOut:
     return RegistrationOut(
         id=str(reg.id),
         fixed_series_id=str(reg.fixed_series_id),
@@ -485,6 +498,9 @@ def _registration_to_out(reg, *, download_url: str | None = None) -> Registratio
         error=reg.error,
         created_at=reg.created_at.isoformat(),
         finished_at=reg.finished_at.isoformat() if reg.finished_at else None,
+        stage=stage,
+        progress_done=progress_done,
+        progress_total=progress_total,
     )
 
 

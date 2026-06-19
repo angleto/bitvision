@@ -4595,6 +4595,11 @@ export interface Registration {
   error: string | null;
   created_at: string;
   finished_at: string | null;
+  // Live progress mirrored from the linked Job so the viewer shows real
+  // status instead of a blind spinner: stage in queued|loading|registering|uploading.
+  stage?: string | null;
+  progress_done?: number | null;
+  progress_total?: number | null;
 }
 
 export const registrationsApi = {
@@ -4608,4 +4613,6 @@ export const registrationsApi = {
       json: { kind: "rigid", ...input },
     }),
   get: (id: string) => request<Registration>(`/api/registrations/${id}`),
+  cancel: (id: string) =>
+    request<Registration>(`/api/registrations/${id}/cancel`, { method: "POST" }),
 };
