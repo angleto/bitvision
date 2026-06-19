@@ -46,6 +46,7 @@ from sqlalchemy.orm import Session
 from bvphoenix.cli._public_http import HTTP_TIMEOUT, _http_get_with_retry
 from bvphoenix.config import get_settings
 from bvphoenix.services.pathology_import import storage_target
+from bvphoenix.services.pathology_jobs import enqueue_tile_jobs_sync
 from bvphoenix.services.public_pathology import (
     PublicPathologySource,
     completed_slide_keys_for_source,
@@ -389,6 +390,22 @@ def main(
                         per_subject_count.get(item.subject_id, 0) + 1
                     )
                     succeeded += 1
+                    # Enqueue DZI tiling so the deep-zoom viewer's pyramid is
+                    # built as slides land. The viewer serves pre-generated
+                    # tiles and returns 409 until ``dzi_ready``; enqueuing per
+                    # slide (not at end-of-run) makes a multi-day bulk import
+                    # viewable progressively. Best-effort: a redis outage must
+                    # not fail an otherwise-successful ingest — the backfill CLI
+                    # (bvphoenix-tile-pathology --all) re-queues any slide left
+                    # with dzi_ready=false.
+                    if not dry_run and sr.created:
+                        try:
+                            enqueue_tile_jobs_sync(settings.redis_url, [str(sr.slide_id)])
+                        except Exception as exc:
+                            click.echo(
+                                f"  warning: could not enqueue tiling for {sr.slide_id}: {exc}",
+                                err=True,
+                            )
                 except Exception as exc:
                     click.echo(f"  ✗ FAILED {key}: {exc}", err=True)
                     failed.append((src.collection, item.subject_id, str(exc)))
