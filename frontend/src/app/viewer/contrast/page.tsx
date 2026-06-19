@@ -384,9 +384,10 @@ function ContrastViewerInner() {
   // Which pane the keyboard drives (arrows scroll it; sync propagates to the
   // rest). Click a pane to make it active.
   const [activePane, setActivePane] = useState(0);
-  // Apply W/L preset/Auto to every same-modality pane at once (off by default:
-  // arterial vs delayed legitimately want different windows).
-  const [linkWL, setLinkWL] = useState(false);
+  // Apply W/L presets/Auto to every phase at once. ON by default: a radiologist
+  // compares phases at the SAME window, so picking a preset should change all
+  // panes; turn it off to tune one phase independently.
+  const [linkWL, setLinkWL] = useState(true);
   // Single-pane reading mode (one phase full-size + a phase-flip strip) vs the
   // synced side-by-side grid (default).
   const [layoutMode, setLayoutMode] = useState<"grid" | "single">("grid");
@@ -516,6 +517,18 @@ function ContrastViewerInner() {
       h?.setWW(Math.max(1, ww));
     }
   };
+  // Per-pane W/L action that reads the live handle(s) AT CLICK TIME (never a
+  // stale lifted prop) and honours Link W/L: act on pane ``i`` alone, or on
+  // every pane when linked.
+  const forPaneWL = (i: number, fn: (h: MPRLayoutHandle) => void) => {
+    const targets = linkWL ? paneHandlesRef.current : [paneHandlesRef.current[i]];
+    for (const h of targets) if (h) fn(h);
+  };
+  const applyWLForPane = (i: number, wc: number, ww: number) =>
+    forPaneWL(i, (h) => {
+      h.setWC(wc);
+      h.setWW(Math.max(1, ww));
+    });
   const stepSlice = (delta: number) => {
     const h = paneHandlesRef.current[activePane];
     if (!h) return;
@@ -1090,11 +1103,12 @@ function ContrastViewerInner() {
                       )}
                       <span style={{ marginLeft: "auto" }}>
                         <PaneWLControl
-                          handle={paneInfo[i]?.handle ?? null}
                           modality={phase.modality}
                           bodyPart={phase.body_part_examined}
                           scalars={paneInfo[i]?.scalars ?? null}
-                          onApply={linkWL ? applyWL : undefined}
+                          onApplyWL={(wc, ww) => applyWLForPane(i, wc, ww)}
+                          onReset={() => forPaneWL(i, (h) => h.resetWL())}
+                          onInvert={() => forPaneWL(i, (h) => h.setInvert(!h.invert))}
                         />
                       </span>
                     </div>
