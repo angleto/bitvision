@@ -435,6 +435,18 @@ export interface PhaseRoiInput {
   parenchyma_radius_mm?: number;
 }
 
+/** Per-voxel wash-out / subtraction heat map (POST /studies/{id}/washout-map). */
+export interface PhaseMap {
+  metric: string;
+  phase_a: string;
+  phase_b: string;
+  /** Symmetric HU colour scale (green = wash-out, red = uptake). */
+  vabs: number;
+  width: number;
+  height: number;
+  png_base64: string;
+}
+
 export interface PhaseEnhancementSet {
   id: string;
   study_id: string;
@@ -602,6 +614,19 @@ export const studiesApi = {
     request<PhaseRoiStats>(`/api/studies/${studyId}/phase-roi-stats`, {
       method: "POST",
       json: roi,
+    }),
+  /** Per-voxel wash-out / subtraction heat map over the lesion region. */
+  washoutMap: (
+    studyId: string,
+    body: {
+      center_lps: [number, number, number];
+      radius_mm: number;
+      metric?: "washout" | "subtraction";
+    },
+  ) =>
+    request<PhaseMap>(`/api/studies/${studyId}/washout-map`, {
+      method: "POST",
+      json: body,
     }),
   /** Persist a wash-out measurement (the samples from phaseRoiStats). */
   createPhaseEnhancementSet: (

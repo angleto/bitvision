@@ -12,6 +12,7 @@ shape (unenhanced + delayed only, no enhanced) that must NOT 500.
 
 from __future__ import annotations
 
+import base64
 import uuid
 
 import numpy as np
@@ -351,3 +352,76 @@ async def test_washout_unreadable_volume_skips_not_500(
     body = r.json()
     assert [s["acquisition_phase"] for s in body["samples"]] == ["unenhanced"]
     assert any("unreadable" in sk["reason"] for sk in body["skipped"])
+
+
+async def _setup_three_phases(db_session, make_study, owner, with_delayed: bool):
+    study, s0 = await make_study(
+        owner, modality="CT", body_part="LIVER", series_description="basale"
+    )
+    s0.series_number = 1
+    s0.acquisition_phase = "unenhanced"
+    s0.phase_source = "human"
+    await db_session.flush()
+    k0 = f"vol/{s0.id}"
+    db_session.add(
+        Derivative(
+            id=uuid.uuid4(),
+            series_id=s0.id,
+            kind=DERIVATIVE_KIND,
+            format=DERIVATIVE_FORMAT,
+            stack_index=0,
+            s3_bucket="bv-derivatives",
+            s3_key=k0,
+            geometry=_GEOM,
+        )
+    )
+    _, k1 = await _phase_series(db_session, study.id, "portale", 2, "portal_venous")
+    blobs: dict[str, bytes | Exception] = {k0: _packed(40.0), k1: _packed(120.0)}
+    if with_delayed:
+        _, k2 = await _phase_series(db_session, study.id, "tardiva", 3, "delayed")
+        blobs[k2] = _packed(70.0)
+    await db_session.commit()
+    return study, blobs
+
+
+async def test_washout_map_png(db_session, make_user, make_study, monkeypatch) -> None:
+    owner = await make_user()
+    study, blobs = await _setup_three_phases(db_session, make_study, owner, with_delayed=True)
+    monkeypatch.setattr("bvphoenix.api.studies.phases.get_s3_storage", lambda: _FakeStorage(blobs))
+    async with _client_as(db_session, owner) as client:
+        # wash-out map = enhanced(portal_venous,120) - delayed(70) -> vabs 50, green.
+        r = await client.post(
+            f"/api/studies/{study.id}/washout-map",
+            json={"center_lps": [5.0, 5.0, 5.0], "radius_mm": 3.0, "metric": "washout"},
+        )
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["metric"] == "washout"
+    assert body["phase_a"] == "portal_venous"
+    assert body["phase_b"] == "delayed"
+    assert body["vabs"] == 50.0
+    assert body["width"] > 0 and body["height"] > 0
+    png = base64.b64decode(body["png_base64"])
+    assert png[:8] == b"\x89PNG\r\n\x1a\n"
+
+
+async def test_washout_map_subtraction_and_422_without_delayed(
+    db_session, make_user, make_study, monkeypatch
+) -> None:
+    owner = await make_user()
+    study, blobs = await _setup_three_phases(db_session, make_study, owner, with_delayed=False)
+    monkeypatch.setattr("bvphoenix.api.studies.phases.get_s3_storage", lambda: _FakeStorage(blobs))
+    async with _client_as(db_session, owner) as client:
+        # subtraction = enhanced(120) - unenhanced(40) -> vabs 80.
+        r = await client.post(
+            f"/api/studies/{study.id}/washout-map",
+            json={"center_lps": [5.0, 5.0, 5.0], "radius_mm": 3.0, "metric": "subtraction"},
+        )
+        assert r.status_code == 200, r.text
+        assert r.json()["vabs"] == 80.0
+        # wash-out needs a delayed phase; none present -> clean 422, not 500.
+        r2 = await client.post(
+            f"/api/studies/{study.id}/washout-map",
+            json={"center_lps": [5.0, 5.0, 5.0], "radius_mm": 3.0, "metric": "washout"},
+        )
+        assert r2.status_code == 422, r2.text

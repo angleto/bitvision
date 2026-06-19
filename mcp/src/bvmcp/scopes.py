@@ -418,6 +418,7 @@ TOOL_SCOPE: dict[str, str] = {
     "detect_study_phases": "imaging:compute",
     "set_series_acquisition_phase": "imaging:compute",
     "compute_phase_washout": "imaging:read",
+    "compute_washout_map": "imaging:read",
     # Persisted wash-out measurements are a structured imaging finding, so
     # they ride the findings:* scopes (like lesion_tracks / response_assessments).
     "create_phase_enhancement_set": "findings:write",

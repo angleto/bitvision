@@ -251,6 +251,48 @@ TOOLS: list[Tool] = [
         },
     ),
     Tool(
+        name="compute_washout_map",
+        annotations=ToolAnnotations(
+            title="Per-voxel wash-out / subtraction heat map",
+            readOnlyHint=True,
+            destructiveHint=False,
+            idempotentHint=True,
+            openWorldHint=False,
+        ),
+        description=(
+            "Per-voxel wash-out / subtraction heat map over a lesion region, as "
+            "a base64 PNG (GREEN = wash-out, RED = uptake; alpha by magnitude). "
+            "metric='washout' = enhanced-delayed; 'subtraction' = "
+            "enhanced-unenhanced. v1 needs the two phases on a COMMON voxel grid "
+            "(same geometry) else 422. Returns metric, phase_a, phase_b, vabs (HU "
+            "colour scale), width, height, png_base64."
+        ),
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "study_id": {"type": "string"},
+                "center_lps": {
+                    "type": "array",
+                    "items": {"type": "number"},
+                    "minItems": 3,
+                    "maxItems": 3,
+                    "description": "[x, y, z] LPS centre of the lesion region",
+                },
+                "radius_mm": {
+                    "type": "number",
+                    "exclusiveMinimum": 0,
+                    "description": "in-plane half-extent of the cropped map, in mm",
+                },
+                "metric": {
+                    "type": "string",
+                    "enum": ["washout", "subtraction"],
+                    "default": "washout",
+                },
+            },
+            "required": ["study_id", "center_lps", "radius_mm"],
+        },
+    ),
+    Tool(
         name="create_phase_enhancement_set",
         annotations=ToolAnnotations(
             title="Save a cross-phase wash-out measurement",
@@ -455,6 +497,23 @@ async def _compute_phase_washout(args: dict[str, Any]) -> str:
     return json.dumps(payload, indent=2, ensure_ascii=False)
 
 
+async def _compute_washout_map(args: dict[str, Any]) -> str:
+    study_id = args["study_id"]
+    body: dict[str, Any] = {
+        "center_lps": args["center_lps"],
+        "radius_mm": args["radius_mm"],
+        "metric": args.get("metric", "washout"),
+    }
+    try:
+        payload, _headers = await api_post_with_headers(
+            f"/api/studies/{study_id}/washout-map",
+            json=body,
+        )
+    except httpx.HTTPStatusError as exc:
+        return format_http_error(exc)
+    return json.dumps(payload, indent=2, ensure_ascii=False)
+
+
 async def _create_phase_enhancement_set(args: dict[str, Any]) -> str:
     study_id = args["study_id"]
     body: dict[str, Any] = {
@@ -528,6 +587,7 @@ _DISPATCH = {
     "detect_study_phases": _detect_study_phases,
     "set_series_acquisition_phase": _set_series_acquisition_phase,
     "compute_phase_washout": _compute_phase_washout,
+    "compute_washout_map": _compute_washout_map,
     "create_phase_enhancement_set": _create_phase_enhancement_set,
     "list_phase_enhancement_sets": _list_phase_enhancement_sets,
     "get_phase_enhancement_set": _get_phase_enhancement_set,
