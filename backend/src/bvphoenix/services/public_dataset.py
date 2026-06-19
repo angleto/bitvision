@@ -37,8 +37,8 @@ from sqlalchemy.orm import Session
 
 from bvphoenix.cli.import_dicom import ImportReport, persist_and_upload, scan
 from bvphoenix.config import get_settings
-from bvphoenix.db.models import ImagingStudy, Patient, Series, Subject
-from bvphoenix.services.permissions import platform_owner_subject_id
+from bvphoenix.db.models import ImagingStudy, Patient, Series
+from bvphoenix.services.permissions import get_or_create_platform_owner_subject
 from bvphoenix.storage import S3Storage
 
 
@@ -70,22 +70,6 @@ class PublicImportResult:
     patient_id: uuid.UUID
     patient_created: bool
     report: ImportReport
-
-
-def _get_or_create_platform_owner_subject(session: Session) -> Subject:
-    """Return the Subject row for the platform-owner sentinel.
-
-    The row is seeded by the bootstrap migration; if it is missing
-    (fresh dev DB), create it. Real prod always has it.
-    """
-    owner_id = platform_owner_subject_id()
-    row = session.execute(select(Subject).where(Subject.id == owner_id)).scalar_one_or_none()
-    if row is not None:
-        return row
-    row = Subject(id=owner_id, kind="system")
-    session.add(row)
-    session.flush()
-    return row
 
 
 def _find_existing_patient_for_source(
@@ -167,7 +151,7 @@ def import_public_dataset(
     Returns a ``PublicImportResult`` with the patient id, whether it
     was newly created, and the underlying ``ImportReport`` counters.
     """
-    owner = _get_or_create_platform_owner_subject(session)
+    owner = get_or_create_platform_owner_subject(session)
 
     existing = _find_existing_patient_for_source(
         session, collection=source.collection, subject_id=source.subject_id

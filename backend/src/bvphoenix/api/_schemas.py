@@ -34,6 +34,11 @@ class StudyOut(BaseModel):
     license_url: str | None = None
     citation_required: bool = False
     citation_text: str | None = None
+    # False when the license carries a NonCommercial (-NC) clause. Derived
+    # from license_spdx at serialisation. CC-BY/CC0 → True; CC-BY-NC-* →
+    # False. Drives the 'non-commercial / educational use only' badge and
+    # lets a future commercial tier filter NC data out.
+    commercial_use_allowed: bool = True
     # True when the study is owned by the platform-owner subject (the
     # OpenData public dataset). Computed from owner_subject_id at
     # serialisation; lets the frontend distinguish a curated OpenData
@@ -52,6 +57,7 @@ class StudyOut(BaseModel):
         # ImagingStudy row picks up the derived field without needing
         # a custom select. Cheap (1 UUID compare) and keeps callers
         # free of platform-owner plumbing.
+        from bvphoenix.services.licensing import license_allows_commercial_use
         from bvphoenix.services.permissions import platform_owner_subject_id
 
         out = super().model_validate(obj, *args, **kwargs)
@@ -61,6 +67,7 @@ class StudyOut(BaseModel):
                 out.is_opendata = owner == platform_owner_subject_id()
             except Exception:
                 out.is_opendata = False
+        out.commercial_use_allowed = license_allows_commercial_use(out.license_spdx)
         return out
 
 

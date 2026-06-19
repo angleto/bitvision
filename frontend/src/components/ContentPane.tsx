@@ -10,6 +10,7 @@ import FolderExportButton from "@/components/FolderExportButton";
 import FolderGlimpse from "@/components/FolderGlimpse";
 import LicenseBadge from "@/components/LicenseBadge";
 import { useModal } from "@/components/ModalHost";
+import PathologyThumbnail from "@/components/PathologyThumbnail";
 import SendFolderButton from "@/components/SendFolderButton";
 import SendStudyButton from "@/components/SendStudyButton";
 import StudyExportButton from "@/components/StudyExportButton";
@@ -1279,116 +1280,10 @@ function StudyThumbnail({
   );
 }
 
-/**
- * Cover image for a pathology slide card. The thumbnail JPEG is
- * generated at ingest by ``services.wsi_deid.generate_thumbnail_jpeg``
- * and served by ``GET /api/pathology-slides/{id}/thumbnail`` — no on-
- * the-fly pyvips call from the FE. On 404 / fetch failure we fall
- * back to the generic document icon. The optional stain string is
- * overlaid as a corner badge for parity with the StudyThumbnail
- * modality chip.
- */
-function PathologyThumbnail({
-  slideId,
-  stain,
-}: {
-  slideId: string;
-  stain: string | null;
-}) {
-  const tThumb = useTranslations("thumbnail");
-  const [src, setSrc] = useState<string | null>(null);
-  const [failed, setFailed] = useState(false);
-
-  useEffect(() => {
-    let cancelled = false;
-    const ac = new AbortController();
-    const token = getStoredToken();
-    const headers: Record<string, string> = {};
-    if (token) headers.authorization = `Bearer ${token}`;
-    fetch(`${API_BASE_URL}/api/pathology-slides/${slideId}/thumbnail`, {
-      credentials: "include",
-      headers,
-      signal: ac.signal,
-    })
-      .then((r) => {
-        if (!r.ok) throw new Error(`${r.status}`);
-        return r.blob();
-      })
-      .then((blob) => {
-        if (cancelled) return;
-        setSrc(URL.createObjectURL(blob));
-      })
-      .catch(() => {
-        if (!cancelled) setFailed(true);
-      });
-    return () => {
-      cancelled = true;
-      ac.abort();
-    };
-  }, [slideId]);
-
-  return (
-    <div
-      style={{
-        position: "relative",
-        width: "100%",
-        height: 110,
-        background: "#1c1410",
-        borderRadius: 6,
-        overflow: "hidden",
-        display: "flex",
-        alignItems: "center",
-        justifyContent: "center",
-      }}
-    >
-      {src ? (
-        <img
-          src={src}
-          alt={tThumb("studyAlt")}
-          draggable={false}
-          style={{ width: "100%", height: "100%", objectFit: "contain", display: "block" }}
-        />
-      ) : failed ? (
-        <TypeIcon type="document" size={48} />
-      ) : (
-        <div style={{ color: "#a08070", fontSize: "0.75rem" }}>{tThumb("loading")}</div>
-      )}
-      {stain && (
-        <span
-          style={{
-            position: "absolute",
-            top: 4,
-            left: 4,
-            background: "rgba(0,0,0,0.65)",
-            color: "#e6ecf3",
-            fontSize: "0.65rem",
-            padding: "1px 5px",
-            borderRadius: 3,
-            letterSpacing: "0.04em",
-          }}
-        >
-          {stain}
-        </span>
-      )}
-      <span
-        style={{
-          position: "absolute",
-          bottom: 4,
-          right: 4,
-          background: "rgba(127, 29, 29, 0.85)",
-          color: "#fff",
-          fontSize: "0.6rem",
-          padding: "1px 5px",
-          borderRadius: 3,
-          letterSpacing: "0.05em",
-          fontWeight: 600,
-        }}
-      >
-        WSI
-      </span>
-    </div>
-  );
-}
+// ``PathologyThumbnail`` was extracted to its own component
+// (``@/components/PathologyThumbnail``) so the public pathology library
+// grid (/pathology) can reuse it without duplicating the fetch / badge
+// logic. Imported at the top of this file.
 
 /**
  * Cover image for a document card. Fetches the backend-rendered JPEG

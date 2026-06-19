@@ -18,9 +18,10 @@ import uuid
 from datetime import datetime
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, HTTPException, Response
+from fastapi import APIRouter, Depends, HTTPException, Query, Response
+from fastapi.concurrency import run_in_threadpool
 from pydantic import BaseModel, ConfigDict
-from sqlalchemy import select
+from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from bvphoenix.auth import optional_user
@@ -29,6 +30,7 @@ from bvphoenix.db.session import get_db
 from bvphoenix.services.permissions import (
     platform_owner_subject_id,
 )
+from bvphoenix.services.wsi_tiles import get_dzi_xml, get_tile_jpeg
 from bvphoenix.storage import get_s3_storage
 
 router = APIRouter(tags=["pathology"])
@@ -70,11 +72,16 @@ class PathologySlideOut(BaseModel):
     license_url: str | None = None
     citation_required: bool = False
     citation_text: str | None = None
+    # See StudyOut.commercial_use_allowed — False when license_spdx carries
+    # a NonCommercial (-NC) clause.
+    commercial_use_allowed: bool = True
     is_opendata: bool = False
     created_at: datetime
 
     @classmethod
     def model_validate(cls, obj, *args, **kwargs):  # type: ignore[override]
+        from bvphoenix.services.licensing import license_allows_commercial_use
+
         out = super().model_validate(obj, *args, **kwargs)
         owner = getattr(obj, "owner_subject_id", None)
         if owner is not None:
@@ -83,6 +90,7 @@ class PathologySlideOut(BaseModel):
             except Exception:
                 out.is_opendata = False
         out.has_macro = getattr(obj, "s3_macro_key", None) is not None
+        out.commercial_use_allowed = license_allows_commercial_use(out.license_spdx)
         return out
 
 
@@ -115,6 +123,38 @@ async def _load_visible_slide(
     raise HTTPException(status_code=404, detail="slide not found")
 
 
+@router.get("/pathology-slides", response_model=list[PathologySlideOut])
+async def list_pathology_slides(
+    db: Annotated[AsyncSession, Depends(get_db)],
+    user: Annotated[User | None, Depends(optional_user)],
+    public_only: bool = True,
+    limit: Annotated[int, Query(ge=1, le=200)] = 60,
+    offset: Annotated[int, Query(ge=0)] = 0,
+) -> list[PathologySlideOut]:
+    """List ingested slides, newest first, applying the same visibility OR
+    as the single-slide read. ``public_only`` (the default) drives the
+    OpenData public-pathology library grid; anonymous callers are always
+    restricted to public slides regardless of the flag.
+    """
+    stmt = select(PathologySlide).where(PathologySlide.ingestion_complete.is_(True))
+    if public_only or user is None:
+        stmt = stmt.where(PathologySlide.is_public.is_(True))
+    elif getattr(user, "is_admin", False):
+        pass  # admin sees every ingested slide
+    else:
+        owner = platform_owner_subject_id()
+        stmt = stmt.where(
+            or_(
+                PathologySlide.is_public.is_(True),
+                PathologySlide.owner_subject_id == owner,
+                PathologySlide.owner_subject_id == user.subject_id,
+            )
+        )
+    stmt = stmt.order_by(PathologySlide.created_at.desc()).limit(limit).offset(offset)
+    rows = (await db.execute(stmt)).scalars().all()
+    return [PathologySlideOut.model_validate(r) for r in rows]
+
+
 @router.get("/pathology-slides/{slide_id}", response_model=PathologySlideOut)
 async def get_pathology_slide(
     slide_id: uuid.UUID,
@@ -123,6 +163,54 @@ async def get_pathology_slide(
 ) -> PathologySlideOut:
     slide = await _load_visible_slide(db, slide_id=slide_id, user=user)
     return PathologySlideOut.model_validate(slide)
+
+
+@router.get("/pathology-slides/{slide_id}/dzi")
+async def get_pathology_slide_dzi(
+    slide_id: uuid.UUID,
+    db: Annotated[AsyncSession, Depends(get_db)],
+    user: Annotated[User | None, Depends(optional_user)],
+) -> Response:
+    """Deep Zoom (.dzi) XML descriptor for the OpenSeadragon viewer.
+
+    The first call for a slide downloads the source from S3 into the
+    bounded tile cache (see ``services.wsi_tiles``); subsequent tile
+    requests reuse the open handle. Run in a threadpool so the blocking
+    OpenSlide / S3 work does not stall the event loop.
+    """
+    slide = await _load_visible_slide(db, slide_id=slide_id, user=user)
+    if not slide.s3_source_key:
+        raise HTTPException(status_code=404, detail="slide source not available")
+    xml = await run_in_threadpool(get_dzi_xml, slide)
+    return Response(
+        content=xml,
+        media_type="application/xml",
+        headers={"Cache-Control": "private, max-age=86400"},
+    )
+
+
+@router.get("/pathology-slides/{slide_id}/tiles/{level}/{col}/{row}")
+async def get_pathology_slide_tile(
+    slide_id: uuid.UUID,
+    level: int,
+    col: int,
+    row: int,
+    db: Annotated[AsyncSession, Depends(get_db)],
+    user: Annotated[User | None, Depends(optional_user)],
+) -> Response:
+    """Stream one Deep Zoom JPEG tile (visibility-gated, S3-isolated)."""
+    slide = await _load_visible_slide(db, slide_id=slide_id, user=user)
+    if not slide.s3_source_key:
+        raise HTTPException(status_code=404, detail="slide source not available")
+    try:
+        body = await run_in_threadpool(get_tile_jpeg, slide, level=level, col=col, row=row)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail="tile out of range") from exc
+    return Response(
+        content=body,
+        media_type="image/jpeg",
+        headers={"Cache-Control": "private, max-age=86400, immutable"},
+    )
 
 
 @router.get("/pathology-slides/{slide_id}/thumbnail")
