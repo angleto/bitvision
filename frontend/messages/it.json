@@ -157,6 +157,10 @@
     "skippedPhases": "{count} fase/i saltate (frame diverso)",
     "notDiagnosis": "Soglie di riferimento (Korobkin 1998; Szolar 1998), non una diagnosi.",
     "curveLabel": "HU per fase",
+    "chooseSeries": "Scegli serie",
+    "pickTitle": "Scegli le fasi del contrasto",
+    "pickSubtitle": "Seleziona le serie volumetriche da aprire come fasi (scout, ricostruzioni, dose report sono nascosti).",
+    "pickOpen": "Apri {count} serie",
     "phase": {
       "unenhanced": "Basale",
       "arterial": "Arteriosa",
