@@ -356,6 +356,7 @@ export interface SeriesPhase {
   acquisition_time_of_day: string | null;
   contrast_bolus_agent: string | null;
   frame_of_reference_uid: string | null;
+  instance_count: number | null;
 }
 
 export interface StudyPhases {
