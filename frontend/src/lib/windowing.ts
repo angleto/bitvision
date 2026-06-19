@@ -295,6 +295,46 @@ export function modalityDefaults(modality: string, bodyPart?: string): WLPreset[
   return base;
 }
 
+// Maps a classified contrast/acquisition phase to the W/L preset whose
+// window matches that phase's contrast timing. Region-aware: the same
+// phase label windows differently for liver vs kidney protocols. Only
+// phases with a dedicated, literature-grounded CT window are mapped;
+// phases without one (hepatobiliary = MR Gd-EOB; dynamic; other) return
+// null so the caller falls back to ``modalityDefaults`` / ``computeAutoWL``.
+const PHASE_PRESET_LABEL: Record<string, { hepatic?: string; renal?: string }> = {
+  unenhanced: { hepatic: "CT Liver non-contrast", renal: "CT Kidney" },
+  arterial: { hepatic: "CT Liver arterial" },
+  portal_venous: { hepatic: "CT Liver portal venous" },
+  delayed: { hepatic: "CT Liver delayed" },
+  corticomedullary: { renal: "CT Kidney corticomedullary" },
+  nephrographic: { renal: "CT Kidney nephrographic" },
+  excretory: { renal: "CT Kidney excretory" },
+};
+
+const RENAL_RE = /kidney|renal|rene|urogr|uro|nephro|nefro/i;
+
+/**
+ * Return the W/L preset that matches a classified contrast phase, or
+ * null when the phase has no dedicated CT window. ``bodyPart`` selects
+ * the liver vs kidney window family for the same phase label.
+ *
+ * Used by the multiphase viewer to auto-window each phase pane: an
+ * arterial liver series opens on "CT Liver arterial", a nephrographic
+ * renal series on "CT Kidney nephrographic", etc.
+ */
+export function presetForPhase(
+  phase: string | null | undefined,
+  bodyPart?: string | null,
+): WLPreset | null {
+  if (!phase) return null;
+  const entry = PHASE_PRESET_LABEL[phase];
+  if (!entry) return null;
+  const region = RENAL_RE.test(bodyPart || "") ? "renal" : "hepatic";
+  const label = entry[region] ?? entry.hepatic ?? entry.renal;
+  if (!label) return null;
+  return CT_PRESETS.find((p) => p.label === label) ?? null;
+}
+
 /**
  * Pull the site-suggested WC/WW from series metadata if present.
  *
