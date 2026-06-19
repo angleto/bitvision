@@ -43,6 +43,9 @@ class SeriesPhaseOut(BaseModel):
     acquisition_time_of_day: str | None = None
     contrast_bolus_agent: str | None = None
     frame_of_reference_uid: str | None = None
+    # Received instance count: lets the viewer tell a real volume apart from a
+    # scout / screenshot / dose-report / bolus-prep series in the picker.
+    instance_count: int | None = None
 
 
 class StudyPhasesOut(BaseModel):
@@ -116,6 +119,7 @@ def _series_phase_out(series: Series, for_uid: str | None) -> SeriesPhaseOut:
         ),
         contrast_bolus_agent=series.contrast_bolus_agent,
         frame_of_reference_uid=for_uid,
+        instance_count=series.received_instance_count,
     )
 
 

@@ -149,3 +149,24 @@ def test_golden_ambiguous_degrades_to_confirmation() -> None:
     r = _by_id(classify_study_phases(series))
     assert r[_sid(1)].acquisition_phase == "arterial"
     assert r[_sid(1)].needs_confirmation
+
+
+def test_golden_real_study_addome_completo_descriptions() -> None:
+    # Real series descriptions from a TC addome completo (study 70ce04b1):
+    # only the true phases get a label; scout/recon/MPR/prep/screenshot don't,
+    # so the viewer opens exactly the phases instead of arbitrary CT series.
+    series = [
+        SeriesPhaseInput(_sid(1), "CT", 1, "CHEST", "Scout"),
+        SeriesPhaseInput(_sid(2), "CT", 2, "CHEST", "Basale"),
+        SeriesPhaseInput(_sid(3), "CT", 3, "CHEST", "Polmone 1.25"),
+        SeriesPhaseInput(_sid(9), "CT", 9, "CHEST", "tardiva dopo portale"),
+        SeriesPhaseInput(_sid(99), "CT", 99, "CHEST", "Screen Save"),
+        SeriesPhaseInput(_sid(200), "CT", 200, "CHEST", "Serie Prep Smart"),
+        SeriesPhaseInput(_sid(300), "CT", 300, "CHEST", "SAG"),
+        SeriesPhaseInput(_sid(301), "CT", 301, "CHEST", "COR"),
+    ]
+    r = _by_id(classify_study_phases(series))
+    assert r[_sid(2)].acquisition_phase == "unenhanced"  # Basale
+    assert r[_sid(9)].acquisition_phase == "delayed"  # tardiva (beats "portale")
+    for junk in (_sid(1), _sid(3), _sid(99), _sid(200), _sid(300), _sid(301)):
+        assert r[junk].acquisition_phase is None, f"{junk} should be unclassified"
