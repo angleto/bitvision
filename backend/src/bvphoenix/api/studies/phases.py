@@ -25,6 +25,7 @@ from bvphoenix.db.models.dicom import ACQUISITION_PHASES
 from bvphoenix.services.contrast_phase import CONFIRM_THRESHOLD
 from bvphoenix.services.contrast_phase_classify import classify_and_persist_study
 from bvphoenix.services.roi_sampling import sample_bbox_hu, sample_sphere_hu, world_to_ijk
+from bvphoenix.services.series_kind import is_reviewable_phase, plane_from_direction
 from bvphoenix.services.washout import PhaseHu, compute_washout
 
 router = APIRouter()
@@ -46,6 +47,15 @@ class SeriesPhaseOut(BaseModel):
     # Received instance count: lets the viewer tell a real volume apart from a
     # scout / screenshot / dose-report / bolus-prep series in the picker.
     instance_count: int | None = None
+    # Acquisition plane derived from the packed volume's direction cosines
+    # (axial / sagittal / coronal / oblique), or None when the series is not
+    # packed yet. Distinguishes an axial source from an MPR reformat.
+    series_plane: str | None = None
+    # True when this series is a reviewable axial phase volume (CT, axial,
+    # enough slices, not a localizer / capture / dose report / bolus-prep /
+    # reformat). The viewer opens these as phase panes by default and the
+    # picker offers them first; everything else is clutter to hide.
+    is_reviewable_phase: bool = False
 
 
 class StudyPhasesOut(BaseModel):
@@ -77,12 +87,13 @@ def _needs_confirmation(series: Series) -> bool:
     )
 
 
-async def _frame_of_reference_map(
-    db: AsyncSession, series_ids: list[uuid.UUID]
-) -> dict[uuid.UUID, str | None]:
-    """series_id -> FrameOfReferenceUID of its primary packed volume, when
-    packed. Lets the viewer decide same-FoR (zero-job sync) vs needs-
-    registration without fetching every volume."""
+async def _geometry_map(db: AsyncSession, series_ids: list[uuid.UUID]) -> dict[uuid.UUID, dict]:
+    """series_id -> the geometry dict of its primary packed volume
+    (``frame_of_reference_uid`` + ``direction`` cosines), when packed.
+
+    Lets the viewer decide same-FoR (zero-job sync) vs needs-registration,
+    and lets the manifest tell an axial source from an MPR reformat — both
+    without fetching every volume."""
     if not series_ids:
         return {}
     rows = (
@@ -94,14 +105,15 @@ async def _frame_of_reference_map(
             )
         )
     ).all()
-    out: dict[uuid.UUID, str | None] = {}
+    out: dict[uuid.UUID, dict] = {}
     for sid, geom in rows:
         if isinstance(geom, dict):
-            out[sid] = geom.get("frame_of_reference_uid")
+            out[sid] = geom
     return out
 
 
-def _series_phase_out(series: Series, for_uid: str | None) -> SeriesPhaseOut:
+def _series_phase_out(series: Series, geom: dict | None) -> SeriesPhaseOut:
+    plane = plane_from_direction((geom or {}).get("direction"))
     return SeriesPhaseOut(
         series_id=series.id,
         series_number=series.series_number,
@@ -118,8 +130,15 @@ def _series_phase_out(series: Series, for_uid: str | None) -> SeriesPhaseOut:
             else None
         ),
         contrast_bolus_agent=series.contrast_bolus_agent,
-        frame_of_reference_uid=for_uid,
+        frame_of_reference_uid=(geom or {}).get("frame_of_reference_uid"),
         instance_count=series.received_instance_count,
+        series_plane=plane,
+        is_reviewable_phase=is_reviewable_phase(
+            modality=series.modality,
+            instance_count=series.received_instance_count,
+            plane=plane,
+            description=series.series_description,
+        ),
     )
 
 
@@ -162,8 +181,8 @@ async def get_study_phases(
     enforce_agent_patient_scope(request, study.patient_id, scope="patient:images")
 
     rows = await _load_study_series_ordered(db, study.id)
-    for_map = await _frame_of_reference_map(db, [r.id for r in rows])
-    phases = [_series_phase_out(r, for_map.get(r.id)) for r in rows]
+    geom_map = await _geometry_map(db, [r.id for r in rows])
+    phases = [_series_phase_out(r, geom_map.get(r.id)) for r in rows]
 
     await audit.log(
         action="study_phases_read",
@@ -209,8 +228,8 @@ async def detect_study_phases(
     await db.commit()
 
     rows = await _load_study_series_ordered(db, study.id)
-    for_map = await _frame_of_reference_map(db, [r.id for r in rows])
-    phases = [_series_phase_out(r, for_map.get(r.id)) for r in rows]
+    geom_map = await _geometry_map(db, [r.id for r in rows])
+    phases = [_series_phase_out(r, geom_map.get(r.id)) for r in rows]
 
     await audit.log(
         action="study_phases_detect",
@@ -269,28 +288,18 @@ async def set_series_acquisition_phase(
             extra={"allowed": list(ACQUISITION_PHASES)},
         )
 
-    for_uid = (await _frame_of_reference_map(db, [series.id])).get(series.id)
+    geom = (await _geometry_map(db, [series.id])).get(series.id)
 
     if body.dry_run:
-        # Reflect the would-be state without persisting.
-        return SeriesPhaseOut(
-            series_id=series.id,
-            series_number=series.series_number,
-            modality=series.modality,
-            series_description=series.series_description,
-            body_part_examined=series.body_part_examined,
-            acquisition_phase=val,
-            phase_confidence=None,
-            phase_source=None if val is None else "human",
-            needs_confirmation=False,
-            acquisition_time_of_day=(
-                series.acquisition_time_of_day.isoformat()
-                if series.acquisition_time_of_day is not None
-                else None
-            ),
-            contrast_bolus_agent=series.contrast_bolus_agent,
-            frame_of_reference_uid=for_uid,
-        )
+        # Reflect the would-be state without persisting. Start from the shared
+        # serializer (so plane / is_reviewable_phase / FoR stay consistent) and
+        # overlay the would-be human override.
+        out = _series_phase_out(series, geom)
+        out.acquisition_phase = val
+        out.phase_confidence = None
+        out.phase_source = None if val is None else "human"
+        out.needs_confirmation = False
+        return out
 
     # A human decision carries no model confidence; clearing reverts to
     # the unclassified state so a later detect can re-label it.
@@ -307,7 +316,7 @@ async def set_series_acquisition_phase(
         resource_id=series.id,
         metadata={"acquisition_phase": val},
     )
-    return _series_phase_out(series, for_uid)
+    return _series_phase_out(series, geom)
 
 
 # ---- cross-phase HU + wash-out ----------------------------------------

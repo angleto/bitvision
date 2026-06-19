@@ -193,3 +193,56 @@ def test_output_order_matches_input_order() -> None:
     ]
     out = classify_study_phases(series)
     assert [r.series_id for r in out] == [_sid(3), _sid(1), _sid(2)]
+
+
+def test_multiphase_protocol_name_does_not_contaminate() -> None:
+    """A study-level ProtocolName that enumerates several phases
+    ("Basale/Arteriosa-Venosa") must NOT stamp a single phase onto every
+    series — it is ambiguous and ignored. Only the description-matched
+    series get labelled; scouts / reformats / dose reports stay unknown.
+
+    Reproduces the real bug where every Scout / SAG / COR / dose-report
+    series inherited 'portal_venous' from the protocol's "Venosa".
+    """
+    proto = "5.2 Torace Addome Pelvi (Basale/Arteriosa-Venosa)"
+    series = [
+        SeriesPhaseInput(_sid(1), "CT", 1, "CHEST", "Scout", protocol_name=proto),
+        SeriesPhaseInput(_sid(2), "CT", 2, "CHEST", "Basale", protocol_name=proto),
+        SeriesPhaseInput(_sid(3), "CT", 3, "CHEST", "Polmone 1.25", protocol_name=proto),
+        SeriesPhaseInput(_sid(4), "CT", 9, "CHEST", "tardiva dopo portale", protocol_name=proto),
+        SeriesPhaseInput(_sid(5), "CT", 300, "CHEST", "SAG", protocol_name=proto),
+        SeriesPhaseInput(_sid(6), "CT", 301, "CHEST", "COR", protocol_name=proto),
+        SeriesPhaseInput(_sid(7), "CT", 999, "CHEST", "Rapporto dose", protocol_name=proto),
+    ]
+    r = _by_id(classify_study_phases(series))
+    # Only the two clearly-described phases are labelled.
+    assert r[_sid(2)].acquisition_phase == "unenhanced"
+    assert r[_sid(4)].acquisition_phase == "delayed"
+    # Everything the protocol would have contaminated stays unknown.
+    for sid in (_sid(1), _sid(3), _sid(5), _sid(6), _sid(7)):
+        assert r[sid].acquisition_phase is None
+
+
+def test_single_phase_protocol_name_is_a_fallback_signal() -> None:
+    """When ProtocolName names exactly one phase and the description is
+    silent, it is trusted as a (low) fallback signal."""
+    series = [
+        SeriesPhaseInput(_sid(1), "CT", 1, "LIVER", "series 1", protocol_name="Late arterial"),
+    ]
+    r = _by_id(classify_study_phases(series))
+    assert r[_sid(1)].acquisition_phase == "arterial"
+
+
+def test_localizer_capture_dose_prep_never_labelled() -> None:
+    """Scout / Screen Save / Dose report / Smart-Prep are not a contrast
+    phase: never labelled, even if a phase word appears in the text (so a
+    'Serie Prep Smart venosa' cannot leak a portal label)."""
+    series = [
+        SeriesPhaseInput(_sid(1), "CT", 1, "ABDOMEN", "Scout topogram"),
+        SeriesPhaseInput(_sid(2), "CT", 2, "ABDOMEN", "Screen Save"),
+        SeriesPhaseInput(_sid(3), "CT", 3, "ABDOMEN", "Rapporto dose"),
+        SeriesPhaseInput(_sid(4), "CT", 4, "ABDOMEN", "Serie Prep Smart venosa"),
+    ]
+    r = _by_id(classify_study_phases(series))
+    for s in series:
+        assert r[s.series_id].acquisition_phase is None

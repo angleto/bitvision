@@ -27,33 +27,29 @@ import {
   registrationsApi,
   studiesApi,
 } from "@/lib/api";
+import { defaultPhasePanes, reviewableSeries } from "@/lib/contrastPhases";
 import { presetForPhase } from "@/lib/windowing";
 import { useTranslations } from "next-intl";
 import dynamic from "next/dynamic";
 import Link from "next/link";
 import { useSearchParams } from "next/navigation";
-import { Suspense, useEffect, useMemo, useRef, useState } from "react";
+import { type CSSProperties, Suspense, useEffect, useMemo, useRef, useState } from "react";
 
 const CornerstoneMPRLayout = dynamic(() => import("@/components/CornerstoneMPRLayout"), {
   ssr: false,
 });
 
 const MAX_PANES = 6;
-// Below this instance count a CT "series" is a scout / screenshot / dose
-// report / bolus-prep — not a reviewable phase volume; hidden from the picker.
-const MIN_VOLUME_INSTANCES = 16;
-// Canonical left-to-right ordering of phases in the grid.
-const PHASE_ORDER: Record<string, number> = {
-  unenhanced: 0,
-  arterial: 1,
-  portal_venous: 2,
-  delayed: 3,
-  hepatobiliary: 4,
-  corticomedullary: 5,
-  nephrographic: 6,
-  excretory: 7,
-  dynamic: 8,
-  other: 9,
+
+// Inline reset so a <button> reads as an accent text link in the toolbar.
+const LINK_BTN: CSSProperties = {
+  background: "none",
+  border: "none",
+  padding: 0,
+  font: "inherit",
+  cursor: "pointer",
+  color: "var(--bv-accent, #e96b1f)",
+  textDecoration: "underline",
 };
 
 type AlignState = "same" | "needs" | "aligning" | "aligned" | "error";
@@ -167,16 +163,24 @@ function PhasePane({
   );
 }
 
-// Manual series picker: when the study has no auto-classified phases (or the
-// user wants to override which series open), let them choose the volumetric
-// series to load as phase panes — instead of blindly opening every CT series.
+// Manual series picker: the explicit override for "your classification is
+// wrong — let me open the right series". Lists the study's reviewable axial
+// phase volumes (scouts / reformats / dose reports hidden), with a "show all
+// series" escape hatch for the rare case the radiologist wants one of those.
+// The chosen set becomes the authoritative phase panes.
 function PhaseSeriesPicker({
   series,
+  hiddenCount,
+  showAll,
+  onToggleShowAll,
   initialSelected,
   onConfirm,
   onCancel,
 }: {
   series: SeriesPhase[];
+  hiddenCount: number;
+  showAll: boolean;
+  onToggleShowAll: (v: boolean) => void;
   initialSelected: string[];
   onConfirm: (ids: string[]) => void;
   onCancel?: () => void;
@@ -190,7 +194,10 @@ function PhaseSeriesPicker({
       else n.add(id);
       return n;
     });
-  const chosen = series.filter((p) => sel.has(p.series_id)).map((p) => p.series_id);
+  // Derive from the selection set itself, NOT the visible list: a series that
+  // is selected but hidden (e.g. a non-reviewable one carried in from a URL
+  // pick while "show all" is off) must survive a toggle and the confirm.
+  const chosen = [...sel];
 
   return (
     <div
@@ -210,45 +217,75 @@ function PhaseSeriesPicker({
         <p className="meta">{t("noPhases")}</p>
       ) : (
         <ul style={{ listStyle: "none", padding: 0, margin: 0, display: "grid", gap: 4 }}>
-          {series.map((p) => (
-            <li key={p.series_id}>
-              <label
-                style={{
-                  display: "flex",
-                  alignItems: "center",
-                  gap: 8,
-                  padding: "4px 8px",
-                  background: "#11151c",
-                  border: "1px solid #1a1f2b",
-                  borderRadius: 6,
-                  cursor: "pointer",
-                }}
-              >
-                <input
-                  type="checkbox"
-                  checked={sel.has(p.series_id)}
-                  onChange={() => toggle(p.series_id)}
-                />
-                <span style={{ flex: 1, minWidth: 0 }}>
-                  {p.acquisition_phase && (
-                    <span style={{ color: "var(--bv-accent, #e96b1f)", marginRight: 6 }}>
-                      {t(`phase.${p.acquisition_phase}`)}
-                    </span>
-                  )}
-                  {p.series_description || `series ${p.series_number ?? "?"}`}
-                </span>
-                <span className="meta" style={{ fontSize: "0.72rem", whiteSpace: "nowrap" }}>
-                  {p.instance_count ?? 0} img
-                </span>
-              </label>
-            </li>
-          ))}
+          {series.map((p) => {
+            const reformat = !showAll
+              ? false
+              : !(p.is_reviewable_phase ?? true) ||
+                (!!p.series_plane && p.series_plane !== "axial");
+            return (
+              <li key={p.series_id}>
+                <label
+                  style={{
+                    display: "flex",
+                    alignItems: "center",
+                    gap: 8,
+                    padding: "4px 8px",
+                    background: "#11151c",
+                    border: "1px solid #1a1f2b",
+                    borderRadius: 6,
+                    cursor: "pointer",
+                    opacity: reformat ? 0.7 : 1,
+                  }}
+                >
+                  <input
+                    type="checkbox"
+                    checked={sel.has(p.series_id)}
+                    onChange={() => toggle(p.series_id)}
+                  />
+                  <span style={{ flex: 1, minWidth: 0 }}>
+                    {p.acquisition_phase && (
+                      <span style={{ color: "var(--bv-accent, #e96b1f)", marginRight: 6 }}>
+                        {t(`phase.${p.acquisition_phase}`)}
+                      </span>
+                    )}
+                    {p.series_description || `series ${p.series_number ?? "?"}`}
+                    {p.series_plane && p.series_plane !== "axial" && (
+                      <span className="meta" style={{ marginLeft: 6, fontSize: "0.72rem" }}>
+                        · {t(`plane.${p.series_plane}`)}
+                      </span>
+                    )}
+                  </span>
+                  <span className="meta" style={{ fontSize: "0.72rem", whiteSpace: "nowrap" }}>
+                    {p.instance_count ?? 0} img
+                  </span>
+                </label>
+              </li>
+            );
+          })}
         </ul>
+      )}
+      {(hiddenCount > 0 || showAll) && (
+        <label
+          style={{
+            display: "inline-flex",
+            alignItems: "center",
+            gap: 6,
+            marginTop: 10,
+            fontSize: "0.78rem",
+          }}
+        >
+          <input
+            type="checkbox"
+            checked={showAll}
+            onChange={(e) => onToggleShowAll(e.target.checked)}
+          />
+          {t("showAllSeries", { count: hiddenCount })}
+        </label>
       )}
       <div style={{ display: "flex", gap: 8, marginTop: 12 }}>
         <button
           type="button"
-          className="ghost"
+          className="viewer-btn viewer-btn--active"
           disabled={chosen.length === 0}
           onClick={() => onConfirm(chosen)}
         >
@@ -281,7 +318,15 @@ export default function ContrastViewerPage() {
 function ContrastViewerInner() {
   const t = useTranslations("contrast");
   const search = useSearchParams();
-  const studyId = search.get("study") ?? search.getAll("s")[0] ?? null;
+  const studyParam = search.get("study");
+  const studyId = studyParam ?? search.getAll("s")[0] ?? null;
+  // Explicit series selection passed in the URL (``?study=X&s=id&s=id``) —
+  // e.g. from the study page's "Contrast phases" button after the user ticked
+  // the right series. This is an authoritative manual pick: open exactly these
+  // series as phases. Only honoured alongside ``study`` (otherwise a bare
+  // ``s=`` is the legacy "study id" fallback above).
+  const urlSeriesKey = studyParam ? search.getAll("s").join(",") : "";
+  const urlSeries = useMemo(() => (urlSeriesKey ? urlSeriesKey.split(",") : []), [urlSeriesKey]);
 
   const grid = useWorldSyncGrid();
   const [phases, setPhases] = useState<SeriesPhase[]>([]);
@@ -297,10 +342,15 @@ function ContrastViewerInner() {
   const [activeReg, setActiveReg] = useState<Record<string, string | null>>({});
   const alignCancelRef = useRef<Record<string, boolean>>({});
   const [alignedSet, setAlignedSet] = useState<Record<string, boolean>>({});
-  // Which series to open as panes: null = the auto-classified phases; a list
-  // = an explicit manual selection from the picker.
-  const [manualIds, setManualIds] = useState<string[] | null>(null);
+  // In-session decision about which series to open as panes:
+  //   null    = none yet -> follow the URL selection, else auto-classification;
+  //   "auto"  = the user explicitly reset to auto -> ignore the URL selection;
+  //   string[] = an explicit pick from the picker -> takes precedence.
+  const [pick, setPick] = useState<string[] | "auto" | null>(null);
   const [showPicker, setShowPicker] = useState(false);
+  // Picker escape hatch: reveal non-reviewable series (reformats, scouts, dose
+  // reports) for the rare case the radiologist wants one of them.
+  const [showAllSeries, setShowAllSeries] = useState(false);
   // Wash-out measurement state.
   const [measureMode, setMeasureMode] = useState(false);
   const [washout, setWashout] = useState<PhaseRoiStats | null>(null);
@@ -351,53 +401,73 @@ function ContrastViewerInner() {
     };
   }, [studyId]);
 
-  // The classifier-labelled phase series (one per phase, clinical order) are
-  // the default panes. Scouts / recon kernels / MPR reformats / dose reports
-  // never get a phase label, so they fall away on their own — no blind slice
-  // of every CT series.
-  const classified = useMemo(() => {
-    const byPhase = new Map<string, SeriesPhase>();
-    for (const p of phases) {
-      if (p.acquisition_phase && !byPhase.has(p.acquisition_phase)) {
-        byPhase.set(p.acquisition_phase, p);
-      }
-    }
-    return [...byPhase.values()].sort(
-      (a, b) =>
-        (PHASE_ORDER[a.acquisition_phase ?? "other"] ?? 9) -
-        (PHASE_ORDER[b.acquisition_phase ?? "other"] ?? 9),
-    );
-  }, [phases]);
+  // Default panes when there is no manual pick: one reviewable axial series
+  // per classified phase, in clinical order. Scouts / recon-kernel duplicates
+  // / MPR reformats / dose reports are excluded even if a stale label sits on
+  // them, so two acquired phases never open as six panes.
+  const autoPanes = useMemo(() => defaultPhasePanes(phases), [phases]);
 
-  // Volumetric CT series the user can pick from manually (drop the scout /
-  // screenshot / dose / bolus-prep clutter); fall back to all CT if the
-  // instance-count signal leaves nothing.
-  const selectable = useMemo(() => {
-    const ct = phases.filter((p) => (p.modality || "").toUpperCase() === "CT");
-    const volumetric = ct.filter((p) => (p.instance_count ?? 0) >= MIN_VOLUME_INSTANCES);
-    return volumetric.length > 0 ? volumetric : ct;
-  }, [phases]);
+  // The reviewable axial phase volumes the picker offers first (clutter
+  // hidden); the "show all" toggle reveals the rest.
+  const reviewable = useMemo(() => reviewableSeries(phases), [phases]);
+  const allCt = useMemo(
+    () => phases.filter((p) => (p.modality || "").toUpperCase() === "CT"),
+    [phases],
+  );
+  const pickerSeries = showAllSeries ? allCt : reviewable.length > 0 ? reviewable : allCt;
+  const hiddenCount = Math.max(0, allCt.length - reviewable.length);
 
-  // Panes = the manual pick if any, else the classified phases. Never every CT.
+  // The active selection: an in-session picker choice wins, else the URL
+  // selection, else auto-classification. ``null`` => auto.
+  const selection = pick === "auto" ? null : (pick ?? (urlSeries.length > 0 ? urlSeries : null));
+  const selectionActive = selection != null;
+
+  // Panes = the active selection mapped to series (preserving the chosen
+  // order), else the auto phases. Never every CT.
   const panes = useMemo(() => {
     const base =
-      manualIds != null
-        ? manualIds
+      selection != null
+        ? selection
             .map((id) => phases.find((p) => p.series_id === id))
             .filter((p): p is SeriesPhase => p != null)
-        : classified;
+        : autoPanes;
     return base.slice(0, MAX_PANES);
-  }, [manualIds, classified, phases]);
-  const truncated = (manualIds?.length ?? classified.length) > MAX_PANES;
+  }, [selection, autoPanes, phases]);
+  const truncated = (selection?.length ?? autoPanes.length) > MAX_PANES;
   const referenceFoR = panes[0]?.frame_of_reference_uid ?? null;
 
-  // Nothing to show and no manual pick yet -> open the picker so the user
-  // chooses the phase series rather than facing an empty viewer.
+  // Apply a manual pick: drive the panes now AND reflect it in the URL so a
+  // reload / bookmark / shared link keeps exactly these phases.
+  function applySelection(ids: string[]) {
+    setPick(ids);
+    setShowPicker(false);
+    if (typeof window !== "undefined") {
+      const sp = new URLSearchParams();
+      if (studyId) sp.set("study", studyId);
+      for (const id of ids) sp.append("s", id);
+      window.history.replaceState(null, "", `${window.location.pathname}?${sp.toString()}`);
+    }
+  }
+
+  // No panes to show (nothing auto-classified, or a URL/stale selection that
+  // matched no current series) -> open the picker so the user chooses rather
+  // than facing an empty viewer.
   useEffect(() => {
-    if (phases.length > 0 && classified.length === 0 && manualIds == null) {
+    if (phases.length > 0 && panes.length === 0) {
       setShowPicker(true);
     }
-  }, [phases.length, classified.length, manualIds]);
+  }, [phases.length, panes.length]);
+
+  // If the open picker carries a selection that includes a non-reviewable
+  // series (a deliberate URL/manual pick of a reformat etc.), reveal the full
+  // list so the user actually sees what is selected.
+  useEffect(() => {
+    if (!showPicker || selection == null || reviewable.length === 0) return;
+    const revIds = new Set(reviewable.map((p) => p.series_id));
+    if (selection.some((id) => !revIds.has(id) && phases.some((p) => p.series_id === id))) {
+      setShowAllSeries(true);
+    }
+  }, [showPicker, selection, reviewable, phases]);
 
   // Assign each pane's sync transform from its FrameOfReferenceUID: same FoR
   // as the reference pane => identity (null, syncable). Different FoR are
@@ -647,17 +717,52 @@ function ContrastViewerInner() {
         </button>
         <button
           type="button"
-          className={showPicker ? "viewer-btn viewer-btn--active" : "ghost"}
+          className="viewer-btn viewer-btn--active"
           aria-pressed={showPicker}
           onClick={() => setShowPicker((v) => !v)}
           title={t("pickSubtitle")}
         >
           {t("chooseSeries")}
         </button>
+        {/* Provenance of the open panes + the one-click correction the user
+            explicitly asked for: "if your classification is wrong let me pick
+            the right series". */}
+        {!showPicker && panes.length > 0 && (
+          <span className="meta" style={{ fontSize: "0.76rem" }}>
+            {selectionActive ? (
+              <>
+                {t("manualSelection", { count: panes.length })}{" "}
+                <button
+                  type="button"
+                  onClick={() => {
+                    setPick("auto");
+                    if (typeof window !== "undefined" && studyId) {
+                      window.history.replaceState(
+                        null,
+                        "",
+                        `${window.location.pathname}?study=${studyId}`,
+                      );
+                    }
+                  }}
+                  style={LINK_BTN}
+                >
+                  {t("resetToAuto")}
+                </button>
+              </>
+            ) : (
+              <>
+                {t("autoClassified", { count: panes.length })}{" "}
+                <button type="button" onClick={() => setShowPicker(true)} style={LINK_BTN}>
+                  {t("wrongPickSeries")}
+                </button>
+              </>
+            )}
+          </span>
+        )}
         {loadErr && <span style={{ color: "var(--bv-danger, #f87171)" }}>{loadErr}</span>}
         {truncated && (
           <span className="meta" style={{ fontSize: "0.76rem" }}>
-            {`showing first ${MAX_PANES}`}
+            {t("showingFirst", { count: MAX_PANES })}
           </span>
         )}
       </div>
@@ -665,12 +770,12 @@ function ContrastViewerInner() {
       <div style={{ flex: "1 1 auto", display: "flex", minHeight: 0 }}>
         {showPicker ? (
           <PhaseSeriesPicker
-            series={selectable}
-            initialSelected={manualIds ?? classified.map((p) => p.series_id)}
-            onConfirm={(ids) => {
-              setManualIds(ids);
-              setShowPicker(false);
-            }}
+            series={pickerSeries}
+            hiddenCount={hiddenCount}
+            showAll={showAllSeries}
+            onToggleShowAll={setShowAllSeries}
+            initialSelected={selection ?? autoPanes.map((p) => p.series_id)}
+            onConfirm={applySelection}
             onCancel={panes.length > 0 ? () => setShowPicker(false) : undefined}
           />
         ) : panes.length === 0 ? (

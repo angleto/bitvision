@@ -180,8 +180,20 @@
     "curveLabel": "HU per fase",
     "chooseSeries": "Scegli serie",
     "pickTitle": "Scegli le fasi del contrasto",
-    "pickSubtitle": "Seleziona le serie volumetriche da aprire come fasi (scout, ricostruzioni, dose report sono nascosti).",
+    "pickSubtitle": "Scegli le serie da aprire come fasi. Sono elencati i volumi assiali rivedibili; scout, reformat, ricostruzioni e dose report sono nascosti. La tua scelta apre esattamente quelle serie.",
     "pickOpen": "Apri {count} serie",
+    "showAllSeries": "Mostra tutte le serie ({count} nascoste)",
+    "manualSelection": "Selezione manuale · {count} fase/i",
+    "resetToAuto": "torna ad automatico",
+    "autoClassified": "{count} fase/i rilevate automaticamente",
+    "wrongPickSeries": "sbagliato? scegli le serie",
+    "showingFirst": "mostro le prime {count}",
+    "plane": {
+      "axial": "assiale",
+      "sagittal": "reformat sagittale",
+      "coronal": "reformat coronale",
+      "oblique": "reformat obliquo"
+    },
     "phase": {
       "unenhanced": "Basale",
       "arterial": "Arteriosa",
