@@ -140,11 +140,7 @@ def _wire_monkeypatches(
             type(
                 "B",
                 (),
-                {
-                    "client": staticmethod(
-                        lambda *a, **kw: _StubS3({})
-                    )
-                },
+                {"client": staticmethod(lambda *a, **kw: _StubS3({}))},
             ),
         )
     else:
@@ -163,9 +159,7 @@ def _wire_monkeypatches(
 async def test_not_found_short_circuits(monkeypatch: pytest.MonkeyPatch) -> None:
     session = _ScriptedSession(script=[None])
     _wire_monkeypatches(monkeypatch, session=session, s3=None)
-    out = await mod.deidentify_reindex_study(
-        {"redis": None}, str(uuid.uuid4())
-    )
+    out = await mod.deidentify_reindex_study({"redis": None}, str(uuid.uuid4()))
     assert out["status"] == "not_found"
 
 
@@ -175,17 +169,15 @@ async def test_t2_skips_scrub_phase(monkeypatch: pytest.MonkeyPatch) -> None:
     # Script: study row (t2), no derivatives, one series.
     session = _ScriptedSession(
         script=[
-            (sid, "t2"),       # study lookup
-            [],                # derivative rows
-            [(uuid.uuid4(),)], # series rows
+            (sid, "t2", None),  # study lookup
+            [],  # derivative rows
+            [(uuid.uuid4(),)],  # series rows
         ]
     )
     s3 = _StubS3({})
     _wire_monkeypatches(monkeypatch, session=session, s3=s3)
 
-    out = await mod.deidentify_reindex_study(
-        {"redis": None}, str(sid)
-    )
+    out = await mod.deidentify_reindex_study({"redis": None}, str(sid))
     assert out["status"] == "reindexed"
     assert out["tier"] == "t2"
     assert out["instances_scrubbed"] == 0
@@ -209,13 +201,13 @@ async def test_t3_scrubs_dirty_and_leaves_clean_alone(
     )
     session = _ScriptedSession(
         script=[
-            (sid, "t3"),                           # study lookup
-            [                                      # instance rows
+            (sid, "t3", None),  # study lookup
+            [  # instance rows
                 ("raw-bucket", dirty_key),
                 ("raw-bucket", clean_key),
             ],
-            [],                                    # derivative rows
-            [(uuid.uuid4(),)],                     # series rows
+            [],  # derivative rows
+            [(uuid.uuid4(),)],  # series rows
         ]
     )
     _wire_monkeypatches(monkeypatch, session=session, s3=s3)
@@ -242,7 +234,7 @@ async def test_t4_scrubs_all_instances(monkeypatch: pytest.MonkeyPatch) -> None:
     )
     session = _ScriptedSession(
         script=[
-            (sid, "t4"),
+            (sid, "t4", None),
             [("raw-bucket", "a.dcm"), ("raw-bucket", "b.dcm")],
             [],
             [],
@@ -277,7 +269,7 @@ async def test_scrub_error_is_counted_not_raised(
     )
     session = _ScriptedSession(
         script=[
-            (sid, "t3"),
+            (sid, "t3", None),
             [("raw-bucket", "ok.dcm"), ("raw-bucket", "broken.dcm")],
             [],
             [],
@@ -296,12 +288,12 @@ async def test_derivatives_are_deleted(monkeypatch: pytest.MonkeyPatch) -> None:
     s3 = _StubS3(bodies={})
     session = _ScriptedSession(
         script=[
-            (sid, "t2"),                                 # study
-            [                                            # derivatives
+            (sid, "t2", None),  # study
+            [  # derivatives
                 (uuid.uuid4(), "deriv-bucket", "thumb/a.png"),
                 (uuid.uuid4(), "deriv-bucket", "mpr/b.nii.gz"),
             ],
-            [],                                          # series
+            [],  # series
         ]
     )
     _wire_monkeypatches(monkeypatch, session=session, s3=s3)
@@ -312,3 +304,28 @@ async def test_derivatives_are_deleted(monkeypatch: pytest.MonkeyPatch) -> None:
         ("deriv-bucket", "thumb/a.png"),
         ("deriv-bucket", "mpr/b.nii.gz"),
     ]
+
+
+@pytest.mark.asyncio
+async def test_already_stamped_study_skips_scrub(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A study already de-identified at the CURRENT engine version must not be
+    re-scrubbed — DB-stamp idempotency, never file-content trust. (Regression
+    for the removed forgeable-tag short-circuit.)"""
+    from bvphoenix.config import get_settings as _bvp_settings
+
+    sid = uuid.uuid4()
+    s3 = _StubS3(bodies={("raw-bucket", "a.dcm"): _RAW_DIRTY})
+    session = _ScriptedSession(
+        script=[
+            # study row stamped at the current version → scrub phase skipped
+            (sid, "t3", _bvp_settings().deid_method_version),
+            [],  # derivative rows
+            [],  # series rows
+        ]
+    )
+    _wire_monkeypatches(monkeypatch, session=session, s3=s3)
+
+    out = await mod.deidentify_reindex_study({"redis": None}, str(sid))
+    assert out["instances_scrubbed"] == 0
+    assert out["instances_unchanged"] == 0
+    assert s3.puts == []  # no re-mutation of already-scrubbed bytes

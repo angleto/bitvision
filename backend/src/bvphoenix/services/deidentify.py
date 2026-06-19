@@ -1,159 +1,58 @@
 """De-identification helpers for DICOM bytes and free-text payloads.
 
-DICOM path implements a subset of DICOM PS3.15 Basic Application
-Confidentiality Profile (the "Basic Profile"). We strip or hash direct
-patient / staff / institution identifiers that would leak PHI if a share
-link escapes its intended recipient. Pixel data is untouched —
-burned-in annotations are out of scope for this profile and must be
-handled upstream if present.
+The DICOM path delegates to the in-house PS3.15 engine in
+``bvphoenix.services.deid`` — a table-driven Basic Application Confidentiality
+Profile with options (consistent salted UID remap, per-patient date shift,
+private-tag removal, coded ``DeidentificationMethodCodeSequence`` provenance,
+and a fail-closed verification pass). This module keeps the stable facade
+(``deidentify_dicom_bytes`` / ``should_deidentify``) so call sites are
+unchanged, plus the free-text helpers used by the consultation / publish
+pipelines.
 
-The text helpers (``deidentify_text``, ``deidentify_markdown``) support
-the consultation pipeline: every consultation defaults to
-``deidentify=True`` so LLM prompts and outbound summaries never carry
-directly-identifying patient data unless the clinician explicitly opts
-out. Consent is snapshotted alongside (see ``consent_snapshot.py``).
+Pixel data is NOT touched here — PHI burned into the image is handled by
+``bvphoenix.services.pixel_deid`` (risk gate today; redaction + human review in
+M1/M4).
+
+The text helpers (``deidentify_text``, ``deidentify_markdown``) support the
+consultation pipeline: every consultation defaults to ``deidentify=True`` so LLM
+prompts and outbound summaries never carry directly-identifying patient data
+unless the clinician explicitly opts out. Consent is snapshotted alongside (see
+``consent_snapshot.py``).
 
 Usage:
 
     from bvphoenix.services.deidentify import deidentify_dicom_bytes, should_deidentify
 
-    if should_deidentify(grant):
+    if should_deidentify(grant, study):
         dcm = deidentify_dicom_bytes(dcm)
 
-The DICOM function is pure (input bytes → output bytes) so it runs
-safely from an ``asyncio.to_thread`` wrapper in request handlers.
+The DICOM function is pure (input bytes -> output bytes) so it runs safely from
+an ``asyncio.to_thread`` wrapper in request handlers.
 """
 
 from __future__ import annotations
 
-import hashlib
-import io
 import re
 from typing import TYPE_CHECKING, Any
 
-import pydicom
-from pydicom.dataset import Dataset
+from bvphoenix.services.deid.engine import scrub_dicom_bytes
 
 if TYPE_CHECKING:
     from bvphoenix.db.models import Patient
-
-# Tags to REMOVE entirely (no clinical value once de-identified).
-# Addresses, telephone numbers, free-text comments — per PS3.15 Table E.1-1
-# rows marked "X" (remove) under the Basic Profile.
-_REMOVE_TAGS: tuple[str, ...] = (
-    "PatientAddress",
-    "PatientTelephoneNumbers",
-    "PatientMotherBirthName",
-    "PatientBirthName",
-    "OtherPatientNames",
-    "OtherPatientIDs",
-    "PatientComments",
-    "ReferringPhysicianAddress",
-    "ReferringPhysicianTelephoneNumbers",
-    "PhysiciansOfRecord",
-    "PerformingPhysicianName",
-    "NameOfPhysiciansReadingStudy",
-    "OperatorsName",
-    "InstitutionAddress",
-    "RequestingPhysician",
-    "AdmittingDiagnosesDescription",
-    "MedicalRecordLocator",
-    "IssuerOfPatientID",
-    "MilitaryRank",
-    "EthnicGroup",
-    "Occupation",
-    "AdditionalPatientHistory",
-    "CountryOfResidence",
-    "RegionOfResidence",
-    "DeviceSerialNumber",
-)
-
-# Tags to REPLACE with a deterministic pseudonym (hash of original so the
-# same patient remains joinable across instances within one share batch
-# but the plaintext identifier is no longer recoverable).
-_PSEUDONYMIZE_TAGS: tuple[str, ...] = (
-    "PatientName",
-    "PatientID",
-    "ReferringPhysicianName",
-    "InstitutionName",
-    "InstitutionalDepartmentName",
-    "StationName",
-)
-
-# Tags to BLANK (preserve existence for viewer compatibility, strip content).
-_BLANK_TAGS: tuple[str, ...] = (
-    "PatientBirthDate",
-    "PatientBirthTime",
-    "PatientSex",
-    "PatientAge",
-    "PatientWeight",
-    "PatientSize",
-    "AccessionNumber",
-    "StudyID",
-)
-
-
-def _pseudonym(value: Any) -> str:
-    """Short stable hash used as replacement identifier.
-
-    Not cryptographically unlinkable — it's the same input every time —
-    but it prevents trivial lookup of the plaintext and keeps intra-study
-    joins working (all instances of the same patient end up with the same
-    replacement).
-    """
-    if value is None:
-        return "ANON"
-    raw = str(value).encode("utf-8", errors="replace")
-    digest = hashlib.sha256(raw).hexdigest()[:12].upper()
-    return f"ANON-{digest}"
-
-
-def _scrub_dataset(ds: Dataset) -> None:
-    """Apply the Basic Profile transforms to ``ds`` in place."""
-    for tag in _REMOVE_TAGS:
-        if tag in ds:
-            del ds[tag]
-
-    for tag in _PSEUDONYMIZE_TAGS:
-        if tag in ds:
-            try:
-                ds.data_element(tag).value = _pseudonym(ds.data_element(tag).value)
-            except Exception:
-                # If the tag exists but the element is malformed, drop it.
-                del ds[tag]
-
-    for tag in _BLANK_TAGS:
-        if tag in ds:
-            try:
-                ds.data_element(tag).value = ""
-            except Exception:
-                del ds[tag]
-
-    # Recurse into sequences — nested items (e.g. RequestAttributesSequence)
-    # carry the same PHI fields and must be scrubbed too.
-    for elem in list(ds):
-        if elem.VR == "SQ" and elem.value is not None:
-            for item in elem.value:
-                _scrub_dataset(item)
-
-    # Mark the instance as de-identified per PS3.3 C.12.1.
-    ds.PatientIdentityRemoved = "YES"
-    ds.DeidentificationMethod = "bitvision phoenix Basic Profile"
 
 
 def deidentify_dicom_bytes(src: bytes) -> bytes:
     """Return a new DICOM byte string with PHI removed / pseudonymised.
 
-    Raises ``pydicom.errors.InvalidDicomError`` if ``src`` is not a valid
-    DICOM file. The caller is responsible for error handling — we don't
-    want to silently hand a client the un-scrubbed original on parse
-    failure.
+    Delegates to the in-house PS3.15 engine
+    (:func:`bvphoenix.services.deid.engine.scrub_dicom_bytes`). Raises
+    ``pydicom.errors.InvalidDicomError`` on unparseable input,
+    ``DeidVerificationError`` if the post-scrub verification finds residual PHI,
+    or ``RequiresReview`` for SR / encapsulated objects. Callers treat any
+    exception as "withhold this instance" — we never hand back un-verified
+    bytes.
     """
-    ds = pydicom.dcmread(io.BytesIO(src))
-    _scrub_dataset(ds)
-    out = io.BytesIO()
-    ds.save_as(out, write_like_original=False)
-    return out.getvalue()
+    return scrub_dicom_bytes(src)
 
 
 # ---- Text / Markdown de-identification ----
@@ -299,6 +198,14 @@ def should_deidentify(share_grant: Any, study: Any = None) -> bool:
     if study is not None:
         tier = getattr(study, "contribution_tier", None)
         if tier == "t3":
+            return True
+        # Contributed public studies (our contribution flow: is_public with no
+        # external source_collection) are ALWAYS served de-identified — never
+        # trust the uploader's tier choice (T4 historically meant "serve
+        # verbatim"). Externally-imported public datasets (TCIA etc.) carry a
+        # source_collection and are already de-identified upstream, so they are
+        # served as-is (re-scrubbing would corrupt their citable UIDs/dates).
+        if getattr(study, "is_public", False) and not getattr(study, "source_collection", None):
             return True
     if share_grant is None:
         return False

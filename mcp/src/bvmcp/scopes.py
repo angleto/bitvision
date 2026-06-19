@@ -112,6 +112,21 @@ SCOPE_CATALOG: tuple[ScopeDef, ...] = (
         "transition.",
         sensitive=True,
     ),
+    # --- Public contributions (OpenData publish quarantine) --------------------
+    ScopeDef(
+        "contributions:read",
+        "List + read the public-contribution review queue (submission status + "
+        "auto-check verdicts: header de-id, burned-in-pixel risk, malware, CSAM).",
+    ),
+    ScopeDef(
+        "contributions:review",
+        "Reject public-contribution submissions to the OpenData library. "
+        "Accepting (publishing PHI-bearing imaging to the public web) is "
+        "human-only by design and refused for agent actors server-side — there "
+        "is no agent-accept path.",
+        sensitive=True,
+        human_only=True,
+    ),
     # --- Report contents (Expression) -----------------------------------------
     ScopeDef("reports:read", "Read report_contents, list per event, citations"),
     ScopeDef(
@@ -579,6 +594,10 @@ TOOL_SCOPE: dict[str, str] = {
     "configure_trusted_senders": "inbox:manage",
     "accept_inbox_item": "inbox:review",
     "reject_inbox_item": "inbox:review",
+    # --- Public contributions (OpenData publish quarantine) ----------
+    "list_contribution_queue": "contributions:read",
+    "get_contribution": "contributions:read",
+    "reject_contribution": "contributions:review",
 }
 
 

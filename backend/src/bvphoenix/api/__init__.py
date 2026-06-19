@@ -21,6 +21,7 @@ from bvphoenix.api import (
 from bvphoenix.api import clinical_events as clinical_events_routes
 from bvphoenix.api import clinical_notes as clinical_notes_routes
 from bvphoenix.api import consultations_compat as consultations_compat_routes
+from bvphoenix.api import contributions as contributions_routes
 from bvphoenix.api import credits as credits_routes
 from bvphoenix.api import dicom_upload as dicom_upload_routes
 from bvphoenix.api import display_metadata as display_metadata_routes
@@ -123,6 +124,7 @@ api_router.include_router(gdpr_routes.router)
 api_router.include_router(a2a_routes.router)
 api_router.include_router(ai_assistants_routes.router)
 api_router.include_router(inbox_routes.router)
+api_router.include_router(contributions_routes.router)
 api_router.include_router(internal_auth_routes.router)
 api_router.include_router(internal_inbound_email_routes.router)
 api_router.include_router(dicom_upload_routes.router)

@@ -18,7 +18,7 @@ so cache invalidation never touches originals.
 from __future__ import annotations
 
 import uuid
-from datetime import date, time
+from datetime import date, datetime, time
 
 from sqlalchemy import (
     BigInteger,
@@ -26,6 +26,7 @@ from sqlalchemy import (
     CheckConstraint,
     Computed,
     Date,
+    DateTime,
     Enum,
     Float,
     ForeignKey,
@@ -36,6 +37,7 @@ from sqlalchemy import (
     Text,
     Time,
     UniqueConstraint,
+    text,
 )
 from sqlalchemy.dialects.postgresql import ARRAY, JSONB, TSVECTOR
 from sqlalchemy.dialects.postgresql import UUID as PG_UUID
@@ -75,6 +77,29 @@ ACQUISITION_PHASES: tuple[str, ...] = (
 # values render as a "confirm" candidate until a human approves) or a
 # human override (which pins the value and clears ``phase_confidence``).
 PHASE_SOURCES: tuple[str, ...] = ("auto", "human")
+
+# Burned-in-pixel PHI risk of an instance/series (see
+# ``services.pixel_deid.classify_pixel_risk``). ``high`` = may carry PHI burned
+# into the pixels (US, secondary capture, screenshots, dose reports) and must be
+# redacted + human-reviewed before public egress; ``low`` = cross-sectional
+# head/face with recognizable-visual-feature risk; ``none`` = no burned-in
+# pixel risk. NULL = not yet classified. (Kept in sync with the
+# ``PixelRiskLevel`` literal in services.pixel_deid; models must not import
+# services, so the value set is mirrored here as the DB constraint's source.)
+PIXEL_PHI_RISK_VALUES: tuple[str, ...] = ("none", "low", "high")
+
+# Lifecycle of an instance's pixel de-identification. ``unprocessed`` at ingest;
+# ``cleaned`` after automated redaction (M4); ``quarantined`` while awaiting
+# human review; ``approved``/``rejected`` after a human decision; ``blocked``
+# when the pixels can't be safely decoded/redacted at all.
+PIXEL_DEID_STATUS_VALUES: tuple[str, ...] = (
+    "unprocessed",
+    "cleaned",
+    "quarantined",
+    "approved",
+    "rejected",
+    "blocked",
+)
 
 
 class ImagingStudy(TimestampMixin, UpdatedAtMixin, Base):
@@ -145,6 +170,13 @@ class ImagingStudy(TimestampMixin, UpdatedAtMixin, Base):
     license_url: Mapped[str | None] = mapped_column(Text)
     citation_required: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default="false")
     citation_text: Mapped[str | None] = mapped_column(Text)
+    # De-identification stamp (services/deid). Set by the reindex worker after a
+    # successful T3/T4 scrub: the egress download path serves the stored scrubbed
+    # bytes directly (no per-download re-scrub) when deid_method_version matches
+    # the engine's current version; a mismatch (engine upgraded) re-scrubs on the
+    # fly. NULL = not de-identified at rest.
+    deidentified_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    deid_method_version: Mapped[str | None] = mapped_column(String(32))
     # Dual-config full-text vector: the Italian-stemmed lexemes (so
     # "polmoni" matches "polmone") OR'd with the raw 'simple' tokens
     # (so DICOM code-strings / acronyms like "T2 FLAIR" still match
@@ -223,6 +255,12 @@ class Series(TimestampMixin, Base):
     ingestion_complete: Mapped[bool] = mapped_column(
         Boolean, nullable=False, server_default="false"
     )
+    # Burned-in-pixel PHI risk, summarised across the series' instances at
+    # ingest (the max over ``Instance.pixel_phi_risk``). Lets the contribution
+    # review queue and the public-egress gate filter high-risk series without
+    # re-decoding pixels. NULL = not classified (pre-existing data); the egress
+    # gate falls back to classifying the bytes on the fly.
+    pixel_phi_risk: Mapped[str | None] = mapped_column(String(8))
     # Dual-config FTS (Italian-stemmed || simple); see ImagingStudy above.
     series_description_tsv: Mapped[str] = mapped_column(
         TSVECTOR,
@@ -256,6 +294,12 @@ class Series(TimestampMixin, Base):
             "phase_confidence IS NULL OR (phase_confidence >= 0 AND phase_confidence <= 1)",
             name="ck_series_phase_confidence_range",
         ),
+        CheckConstraint(
+            "pixel_phi_risk IS NULL OR pixel_phi_risk IN ("
+            + ",".join(f"'{v}'" for v in PIXEL_PHI_RISK_VALUES)
+            + ")",
+            name="ck_series_pixel_phi_risk",
+        ),
         Index("ix_series_uid", "series_instance_uid"),
         Index("ix_series_description_tsv", "series_description_tsv", postgresql_using="gin"),
         # Phase-faceted study queries ("show me the portal-venous series")
@@ -285,6 +329,18 @@ class Instance(TimestampMixin, Base):
     s3_key: Mapped[str] = mapped_column(String(1024), nullable=False)
     size_bytes: Mapped[int | None] = mapped_column(BigInteger)
     content_sha256: Mapped[str | None] = mapped_column(String(64))
+    # ---- Burned-in-pixel PHI -------------------------------------------
+    # Risk classified at ingest from the header (see
+    # ``services.pixel_deid.classify_pixel_risk``). NULL = not classified.
+    pixel_phi_risk: Mapped[str | None] = mapped_column(String(8))
+    # Pixel de-identification lifecycle (PIXEL_DEID_STATUS_VALUES). NULL until
+    # the instance enters the de-id pipeline.
+    pixel_deid_status: Mapped[str | None] = mapped_column(String(16))
+    # Per-instance pixel-redaction audit: classifier reasons, engine + model
+    # ids, redaction-box count, residual flag. Written by the redaction worker
+    # (M4+); NULL at ingest.
+    pixel_deid_method: Mapped[dict | None] = mapped_column(JSONB)
+    pixel_deid_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
     __table_args__ = (
         UniqueConstraint(
@@ -292,7 +348,26 @@ class Instance(TimestampMixin, Base):
             "sop_instance_uid",
             name="uq_instances_series_uid",
         ),
+        CheckConstraint(
+            "pixel_phi_risk IS NULL OR pixel_phi_risk IN ("
+            + ",".join(f"'{v}'" for v in PIXEL_PHI_RISK_VALUES)
+            + ")",
+            name="ck_instances_pixel_phi_risk",
+        ),
+        CheckConstraint(
+            "pixel_deid_status IS NULL OR pixel_deid_status IN ("
+            + ",".join(f"'{v}'" for v in PIXEL_DEID_STATUS_VALUES)
+            + ")",
+            name="ck_instances_pixel_deid_status",
+        ),
         Index("ix_instances_uid", "sop_instance_uid"),
+        # The contribution review queue and the egress gate filter on high-risk
+        # instances; a partial index keeps it tiny (most instances are 'none').
+        Index(
+            "ix_instances_pixel_phi_risk",
+            "pixel_phi_risk",
+            postgresql_where=text("pixel_phi_risk = 'high'"),
+        ),
     )
 
 

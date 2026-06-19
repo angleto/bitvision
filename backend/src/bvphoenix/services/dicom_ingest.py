@@ -33,6 +33,7 @@ from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from bvphoenix.db.models import ClinicalEvent, ImagingStudy, Instance, Series, Subject
+from bvphoenix.services.pixel_deid import classify_pixel_risk
 from bvphoenix.storage import S3Storage
 
 # DICOM Part 10: 128-byte preamble (any bytes, typically zeros) + "DICM" magic.
@@ -127,6 +128,21 @@ def _as_int(v: object) -> int | None:
         return int(v)
     except (TypeError, ValueError):
         return None
+
+
+_PIXEL_RISK_ORDER = {"none": 0, "low": 1, "high": 2}
+
+
+def _max_pixel_risk(*levels: str | None) -> str | None:
+    """Return the highest-severity burned-in-pixel risk among ``levels``.
+
+    ``None`` (unclassified) ranks below ``none``. Used to roll a series'
+    ``pixel_phi_risk`` up to the max over its instances.
+    """
+    present = [lvl for lvl in levels if lvl is not None]
+    if not present:
+        return None
+    return max(present, key=lambda v: _PIXEL_RISK_ORDER.get(v, 0))
 
 
 def _parse_dicom_date(value: str | None) -> date | None:
@@ -292,6 +308,7 @@ class DicomIngestor:
         await asyncio.to_thread(self._storage.upload_bytes, blob, bucket=self._bucket, key=key)
 
         sha = hashlib.sha256(blob).hexdigest()
+        risk = classify_pixel_risk(ds).level
         instance = Instance(
             id=instance_id,
             series_id=series.id,
@@ -302,9 +319,12 @@ class DicomIngestor:
             s3_key=key,
             size_bytes=len(blob),
             content_sha256=sha,
+            pixel_phi_risk=risk,
+            pixel_deid_status="unprocessed",
         )
         self._db.add(instance)
         series.received_instance_count = (series.received_instance_count or 0) + 1
+        series.pixel_phi_risk = _max_pixel_risk(series.pixel_phi_risk, risk)
         await self._db.flush()
 
         return InstanceResult(
@@ -461,6 +481,8 @@ class DicomIngestor:
                     "s3_key": key,
                     "size_bytes": len(blob),
                     "content_sha256": hashlib.sha256(blob).hexdigest(),
+                    "pixel_phi_risk": classify_pixel_risk(ds).level,
+                    "pixel_deid_status": "unprocessed",
                 }
 
             uploads = await asyncio.gather(*[_upload(i, ds, b) for i, ds, b in members])
@@ -480,6 +502,11 @@ class DicomIngestor:
             # worse than the legacy code's behaviour.
             series.received_instance_count = (series.received_instance_count or 0) + len(
                 instance_values
+            )
+            # Roll the series' burned-in-pixel risk up to the max over its
+            # instances so the egress gate / review queue can filter by series.
+            series.pixel_phi_risk = _max_pixel_risk(
+                series.pixel_phi_risk, *(v["pixel_phi_risk"] for v in instance_values)
             )
             stats.created += len(instance_values)
 

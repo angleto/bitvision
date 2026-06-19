@@ -839,6 +839,12 @@ EXPECTED_TOOL_NAMES = {
     "get_inbox_item",
     "accept_inbox_item",
     "reject_inbox_item",
+    # --- Public contributions (OpenData publish quarantine; contributions:read
+    # / contributions:review scopes). Backend api/contributions.py. Accept is
+    # human-only (no agent-accept tool by design).
+    "list_contribution_queue",
+    "get_contribution",
+    "reject_contribution",
 }
 
 

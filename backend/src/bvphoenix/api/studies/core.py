@@ -1134,17 +1134,29 @@ async def download_instance(
     storage = get_s3_storage()
 
     if should_deidentify(grant, study):
+        # Fast path: when the study was already de-identified at rest by the
+        # CURRENT engine version (stamped by deidentify_reindex), the stored
+        # bytes are already scrubbed — serve them directly, no per-download
+        # re-scrub. A version mismatch (engine upgraded, or never stamped) falls
+        # through to the on-the-fly scrub so the upgrade is always honoured.
+        from bvphoenix.config import get_settings
+
+        current_version = get_settings().deid_method_version
         raw = await asyncio.to_thread(
             storage.get_object_bytes, bucket=instance.s3_bucket, key=instance.s3_key
         )
-        scrubbed = await asyncio.to_thread(deidentify_dicom_bytes, raw)
+        if study.deidentified_at is not None and study.deid_method_version == current_version:
+            served, deid_header = raw, "stored"
+        else:
+            served = await asyncio.to_thread(deidentify_dicom_bytes, raw)
+            deid_header = "true"
         filename = f"{instance.sop_instance_uid}.dcm"
         return Response(
-            content=scrubbed,
+            content=served,
             media_type="application/dicom",
             headers={
                 "content-disposition": _content_disposition(filename, disposition="attachment"),
-                "x-deidentified": "true",
+                "x-deidentified": deid_header,
                 "cache-control": "no-store",
             },
         )

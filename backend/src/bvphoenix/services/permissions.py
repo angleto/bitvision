@@ -119,6 +119,12 @@ SHARE_DELEGATE = "share:delegate"
 # inbox endpoints additionally refuse share-link sessions outright —
 # a delegated viewer must not triage what enters the record.
 REVIEW_INBOX = "review:inbox"
+# Review the public-contribution quarantine (api/contributions.py): accept /
+# reject studies offered to the OpenData library. PLATFORM-level (not a
+# per-patient grant, so it is NOT in ALL_PERMS): publishing PHI-bearing imaging
+# to the public web is irreversible and human-only — gated on admin today, a
+# dedicated reviewer role later.
+REVIEW_PUBLIC_CONTRIBUTION = "review:contributions"
 PUBLISH = "publish"
 LIST_FOR_SALE = "list:for_sale"
 TRANSFER_OWNERSHIP = "transfer:ownership"

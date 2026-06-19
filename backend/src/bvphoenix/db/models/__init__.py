@@ -148,6 +148,7 @@ from bvphoenix.db.models.response_assessments import (
 from bvphoenix.db.models.revoked_tokens import RevokedToken
 from bvphoenix.db.models.segmentations import SEGMENTATION_PRODUCERS, Segmentation
 from bvphoenix.db.models.sharing import ShareLink
+from bvphoenix.db.models.submissions import SUBMISSION_TARGET_TIERS, Submission
 from bvphoenix.db.models.summaries import Summary
 from bvphoenix.db.models.telegram_link_codes import TelegramLinkCode
 from bvphoenix.db.models.text_chunks import (
@@ -230,6 +231,7 @@ __all__ = [
     "REPORT_CONTENT_STATUSES",
     "SCOPE_KINDS",
     "SCOPE_SPECIFICITY",
+    "SUBMISSION_TARGET_TIERS",
     "TRANSITION_ACTIONS",
     "AgentAssistant",
     "AgentAssistantPatient",
@@ -321,6 +323,7 @@ __all__ = [
     "Series",
     "ShareLink",
     "Subject",
+    "Submission",
     "Summary",
     "Tag",
     "TagAlias",

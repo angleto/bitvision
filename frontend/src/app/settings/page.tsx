@@ -47,6 +47,11 @@ const SETTINGS_LINKS: { href: string; labelKey: string; descriptionKey: string }
     descriptionKey: "sharesDescription",
   },
   {
+    href: "/contributions/review",
+    labelKey: "contributionsLabel",
+    descriptionKey: "contributionsDescription",
+  },
+  {
     href: "/settings/calendar",
     labelKey: "calendarLabel",
     descriptionKey: "calendarDescription",
