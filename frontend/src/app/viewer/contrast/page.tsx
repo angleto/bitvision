@@ -14,6 +14,9 @@ import type { MPRLayoutHandle } from "@/components/MPRLayoutTypes";
 import ViewerIdentityBanner from "@/components/ViewerIdentityBanner";
 import type { VolumeData } from "@/components/VolumeViewer";
 import WashoutPanel from "@/components/WashoutPanel";
+import PaneWLControl from "@/components/viewer/PaneWLControl";
+import ViewerToolPalette from "@/components/viewer/ViewerToolPalette";
+import { CONTRAST_TOOLS, type Tool } from "@/components/viewer/toolTypes";
 import { useWorldSyncGrid } from "@/hooks/useWorldSyncGrid";
 import { isMat4 } from "@/lib/affine";
 import {
@@ -28,6 +31,7 @@ import {
   studiesApi,
 } from "@/lib/api";
 import { defaultPhasePanes, reviewableSeries } from "@/lib/contrastPhases";
+import { dispatchViewportResetView, dispatchViewportZoom, useHotkeys } from "@/lib/hotkeys";
 import { presetForPhase } from "@/lib/windowing";
 import { useTranslations } from "next-intl";
 import dynamic from "next/dynamic";
@@ -54,13 +58,23 @@ const LINK_BTN: CSSProperties = {
 
 type AlignState = "same" | "needs" | "aligning" | "aligned" | "error";
 
-// Minimal shape of a CornerstoneMPRLayout measurement we consume: a circle
-// ROI carries its handle points in world (LPS) space.
+// Minimal subset of a CornerstoneMPRLayout measurement we consume. A circle
+// ROI carries its handle points in world (LPS) space. ``markerId`` is the
+// Cornerstone annotation UID (``a.annotationUID``) — the key we delete by
+// (``removeAnnotation``). ``value`` is the auto-computed measurement string.
 interface DrawnMeasurement {
+  markerId?: string;
   csToolName?: string;
   tool: string;
+  value?: string;
+  label?: string;
   worldPoints?: Array<[number, number, number]>;
   frameOfReferenceUID?: string;
+}
+
+interface PaneReady {
+  handle: MPRLayoutHandle | null;
+  scalars: Float32Array | null;
 }
 
 function PhasePane({
@@ -69,12 +83,16 @@ function PhasePane({
   onCrosshair,
   activeTool,
   onMeasurements,
+  onReady,
 }: {
   phase: SeriesPhase;
   registerHandle: (h: MPRLayoutHandle | null) => void;
   onCrosshair: (pos: [number, number, number]) => void;
   activeTool: string;
   onMeasurements?: (m: DrawnMeasurement[]) => void;
+  /** Report the pane's handle + voxel scalars once the volume is loaded, so
+   *  the parent can drive per-pane W/L presets and keyboard navigation. */
+  onReady?: (info: PaneReady) => void;
 }) {
   const t = useTranslations("contrast");
   const [vol, setVol] = useState<VolumeData | null>(null);
@@ -133,6 +151,14 @@ function PhasePane({
     localRef.current = h;
     registerHandle(h);
   };
+
+  // Lift handle + scalars once the volume is loaded (ref is attached before
+  // effects run, so localRef.current is valid here). onReady is a stable
+  // per-pane closure; re-run only when the volume changes.
+  // biome-ignore lint/correctness/useExhaustiveDependencies: onReady stable; key on vol intentionally
+  useEffect(() => {
+    if (vol) onReady?.({ handle: localRef.current, scalars: vol.scalars });
+  }, [vol]);
 
   if (err) {
     return (
@@ -351,6 +377,29 @@ function ContrastViewerInner() {
   // Picker escape hatch: reveal non-reviewable series (reformats, scouts, dose
   // reports) for the rare case the radiologist wants one of them.
   const [showAllSeries, setShowAllSeries] = useState(false);
+  // ---- Diagnostic controls (toolbar / keyboard / per-pane W/L) ----
+  // The measurement tool applied to every pane (radiologist picks from the
+  // palette). "wl" = window/level drag, the sensible default for reading.
+  const [activeTool, setActiveTool] = useState<Tool>("wl");
+  // Which pane the keyboard drives (arrows scroll it; sync propagates to the
+  // rest). Click a pane to make it active.
+  const [activePane, setActivePane] = useState(0);
+  // Apply W/L preset/Auto to every same-modality pane at once (off by default:
+  // arterial vs delayed legitimately want different windows).
+  const [linkWL, setLinkWL] = useState(false);
+  // Single-pane reading mode (one phase full-size + a phase-flip strip) vs the
+  // synced side-by-side grid (default).
+  const [layoutMode, setLayoutMode] = useState<"grid" | "single">("grid");
+  const [showMarkers, setShowMarkers] = useState(false);
+  // Per-pane handle + scalars, lifted from each PhasePane once its volume
+  // loads. ``paneHandlesRef`` is the click-time source of truth for keyboard /
+  // delete; ``paneInfo`` mirrors it in state so PaneWLControl re-renders when a
+  // pane becomes ready.
+  const paneHandlesRef = useRef<(MPRLayoutHandle | null)[]>([]);
+  const [paneInfo, setPaneInfo] = useState<Record<number, PaneReady>>({});
+  // ROIs drawn on each pane (from the measurement stream) — the source for the
+  // deletable-ROI rail.
+  const [paneMeasurements, setPaneMeasurements] = useState<Record<number, DrawnMeasurement[]>>({});
   // Wash-out measurement state.
   const [measureMode, setMeasureMode] = useState(false);
   const [washout, setWashout] = useState<PhaseRoiStats | null>(null);
@@ -448,6 +497,81 @@ function ContrastViewerInner() {
       window.history.replaceState(null, "", `${window.location.pathname}?${sp.toString()}`);
     }
   }
+
+  // Keep the active (keyboard-driven) pane in range as the pane set changes.
+  useEffect(() => {
+    if (activePane >= panes.length && panes.length > 0) setActivePane(0);
+  }, [activePane, panes.length]);
+
+  // ---- keyboard navigation, radiological read ----
+  // Arrow keys scroll the ACTIVE pane; because setCrosshair fires the layout's
+  // onCrosshairChange, the world-sync grid then drives every other phase to the
+  // same anatomical level (linked scroll). W/L keys act on the active pane, or
+  // on all same-frame panes when "Link W/L" is on. Zoom/reset broadcast to
+  // every viewport (linked by construction).
+  const applyWL = (wc: number, ww: number) => {
+    const targets = linkWL ? paneHandlesRef.current : [paneHandlesRef.current[activePane]];
+    for (const h of targets) {
+      h?.setWC(wc);
+      h?.setWW(Math.max(1, ww));
+    }
+  };
+  const stepSlice = (delta: number) => {
+    const h = paneHandlesRef.current[activePane];
+    if (!h) return;
+    const cur = Math.round(h.crosshair[2]);
+    const maxZ = (h.dims?.[2] ?? 1) - 1;
+    const z = Math.max(0, Math.min(maxZ, cur + delta));
+    if (z !== cur) h.setCrosshair([h.crosshair[0], h.crosshair[1], z]);
+  };
+  const activeHandle = () => paneHandlesRef.current[activePane];
+  useHotkeys([
+    { key: "ArrowUp", handler: () => stepSlice(-1) },
+    { key: "ArrowDown", handler: () => stepSlice(1) },
+    { key: "PageUp", handler: () => stepSlice(-10) },
+    { key: "PageDown", handler: () => stepSlice(10) },
+    {
+      key: "ArrowLeft",
+      handler: () => {
+        const h = activeHandle();
+        if (h) applyWL(h.wc, h.ww - 25);
+      },
+    },
+    {
+      key: "ArrowRight",
+      handler: () => {
+        const h = activeHandle();
+        if (h) applyWL(h.wc, h.ww + 25);
+      },
+    },
+    {
+      key: "[",
+      handler: () => {
+        const h = activeHandle();
+        if (h) applyWL(h.wc - 25, h.ww);
+      },
+    },
+    {
+      key: "]",
+      handler: () => {
+        const h = activeHandle();
+        if (h) applyWL(h.wc + 25, h.ww);
+      },
+    },
+    {
+      key: "i",
+      handler: () => {
+        const h = activeHandle();
+        h?.setInvert(!h.invert);
+      },
+    },
+    { key: "+", handler: () => dispatchViewportZoom(1.1) },
+    { key: "=", handler: () => dispatchViewportZoom(1.1) },
+    { key: "-", handler: () => dispatchViewportZoom(0.9) },
+    { key: "0", handler: () => dispatchViewportResetView() },
+    { key: "f", handler: () => activeHandle()?.flipHAll() },
+    { key: "f", shift: true, handler: () => activeHandle()?.flipVAll() },
+  ]);
 
   // No panes to show (nothing auto-classified, or a URL/stale selection that
   // matched no current series) -> open the picker so the user chooses rather
@@ -715,6 +839,49 @@ function ContrastViewerInner() {
         >
           {t("measureWashout")}
         </button>
+        {/* Full measurement/tool palette (window-level, pan, HU/enhancement
+            ROIs, distance, angle, probe) applied to every phase pane. */}
+        <ViewerToolPalette
+          activeTool={activeTool}
+          onChange={(tool) => setActiveTool(tool ?? "wl")}
+          tools={CONTRAST_TOOLS}
+          compact
+        />
+        <button
+          type="button"
+          className="viewer-btn"
+          style={{ fontSize: "0.7rem", color: "#f66" }}
+          title={t("clearRoisHint")}
+          onClick={() => {
+            for (const h of paneHandlesRef.current) h?.clearAnnotations();
+          }}
+        >
+          {t("clearRois")}
+        </button>
+        <label
+          style={{ display: "inline-flex", alignItems: "center", gap: 4, fontSize: "0.82rem" }}
+          title={t("linkWlHint")}
+        >
+          <input type="checkbox" checked={linkWL} onChange={(e) => setLinkWL(e.target.checked)} />
+          {t("linkWl")}
+        </label>
+        <button
+          type="button"
+          className={layoutMode === "single" ? "viewer-btn viewer-btn--active" : "ghost"}
+          aria-pressed={layoutMode === "single"}
+          onClick={() => setLayoutMode((m) => (m === "grid" ? "single" : "grid"))}
+          title={t("layoutHint")}
+        >
+          {layoutMode === "grid" ? t("layoutSingle") : t("layoutGrid")}
+        </button>
+        <button
+          type="button"
+          className={showMarkers ? "viewer-btn viewer-btn--active" : "ghost"}
+          aria-pressed={showMarkers}
+          onClick={() => setShowMarkers((v) => !v)}
+        >
+          {t("markers")}
+        </button>
         <button
           type="button"
           className="viewer-btn viewer-btn--active"
@@ -781,123 +948,177 @@ function ContrastViewerInner() {
         ) : panes.length === 0 ? (
           <div style={{ color: "#6b7280", padding: "1.5rem" }}>{t("noPhases")}</div>
         ) : (
-          <div
-            style={{
-              flex: "1 1 auto",
-              display: "grid",
-              gridTemplateColumns: `repeat(${cols}, 1fr)`,
-              gap: 2,
-              minHeight: 0,
-            }}
-          >
-            {panes.map((phase, i) => {
-              const a = alignStateOf(phase, i);
-              return (
-                <div
-                  key={phase.series_id}
-                  style={{
-                    position: "relative",
-                    background: "#000",
-                    border: "1px solid #1a1f2b",
-                    display: "grid",
-                    gridTemplateRows: "auto 1fr",
-                    overflow: "hidden",
-                    minHeight: 0,
-                  }}
-                >
+          <div style={{ flex: "1 1 auto", display: "flex", flexDirection: "column", minHeight: 0 }}>
+            {layoutMode === "single" && (
+              <div
+                style={{
+                  display: "flex",
+                  gap: 4,
+                  padding: "0.25rem 0.5rem",
+                  background: "#0b0e13",
+                  borderBottom: "1px solid #1a1f2b",
+                  flexWrap: "wrap",
+                }}
+              >
+                {panes.map((p, i) => (
+                  <button
+                    key={p.series_id}
+                    type="button"
+                    className={i === activePane ? "viewer-btn viewer-btn--active" : "viewer-btn"}
+                    style={{ fontSize: "0.72rem", padding: "1px 8px" }}
+                    onClick={() => setActivePane(i)}
+                  >
+                    {p.acquisition_phase
+                      ? t(`phase.${p.acquisition_phase}`)
+                      : p.series_description || `#${p.series_number ?? "?"}`}
+                  </button>
+                ))}
+              </div>
+            )}
+            <div
+              style={{
+                flex: "1 1 auto",
+                display: "grid",
+                gridTemplateColumns: `repeat(${layoutMode === "single" ? 1 : cols}, 1fr)`,
+                gap: 2,
+                minHeight: 0,
+              }}
+            >
+              {panes.map((phase, i) => {
+                const a = alignStateOf(phase, i);
+                const hidden = layoutMode === "single" && i !== activePane;
+                return (
                   <div
+                    key={phase.series_id}
+                    onPointerDown={() => setActivePane(i)}
                     style={{
-                      display: "flex",
-                      alignItems: "center",
-                      gap: 6,
-                      padding: "0.25rem 0.5rem",
-                      fontSize: "0.78rem",
-                      color: "#cbd5e1",
-                      background: "#0b0e13",
-                      borderBottom: "1px solid #1a1f2b",
-                      flexWrap: "wrap",
+                      position: "relative",
+                      background: "#000",
+                      border: "1px solid #1a1f2b",
+                      outline:
+                        i === activePane && layoutMode === "grid"
+                          ? "2px solid var(--bv-accent, #e96b1f)"
+                          : undefined,
+                      outlineOffset: -2,
+                      display: hidden ? "none" : "grid",
+                      gridTemplateRows: "auto 1fr",
+                      overflow: "hidden",
+                      minHeight: 0,
                     }}
                   >
-                    <ContrastPhaseTab
-                      phase={phase}
-                      busy={busySeries === phase.series_id}
-                      onSet={(p) => setPhase(phase.series_id, p)}
-                    />
-                    {a === "needs" && (
-                      <button
-                        type="button"
-                        className="ghost"
-                        title={t("needsAlign")}
-                        onClick={() => align(i)}
-                        style={{ fontSize: "0.72rem", padding: "1px 6px" }}
-                      >
-                        {t("align")}
-                      </button>
-                    )}
-                    {a === "aligning" && (
-                      <>
-                        <span className="meta">
-                          {alignStage[phase.series_id] &&
-                          t.has(`alignStage.${alignStage[phase.series_id]}`)
-                            ? t(`alignStage.${alignStage[phase.series_id]}`)
-                            : t("aligning")}
-                        </span>
+                    <div
+                      style={{
+                        display: "flex",
+                        alignItems: "center",
+                        gap: 6,
+                        padding: "0.25rem 0.5rem",
+                        fontSize: "0.78rem",
+                        color: "#cbd5e1",
+                        background: "#0b0e13",
+                        borderBottom: "1px solid #1a1f2b",
+                        flexWrap: "wrap",
+                      }}
+                    >
+                      <ContrastPhaseTab
+                        phase={phase}
+                        busy={busySeries === phase.series_id}
+                        onSet={(p) => setPhase(phase.series_id, p)}
+                      />
+                      {a === "needs" && (
                         <button
                           type="button"
                           className="ghost"
-                          onClick={() => cancelAlign(phase.series_id)}
+                          title={t("needsAlign")}
+                          onClick={() => align(i)}
                           style={{ fontSize: "0.72rem", padding: "1px 6px" }}
                         >
-                          {t("alignCancel")}
+                          {t("align")}
                         </button>
-                      </>
-                    )}
-                    {a === "aligned" && (
-                      <span style={{ color: "var(--bv-success, #047857)" }}>{t("aligned")}</span>
-                    )}
-                    {a === "error" && (
-                      <span
-                        style={{ color: "var(--bv-danger, #f87171)", fontSize: "0.72rem" }}
-                        title={alignErrMsg[phase.series_id] ?? undefined}
-                      >
-                        {alignErrMsg[phase.series_id] ?? t("alignFailed")}
+                      )}
+                      {a === "aligning" && (
+                        <>
+                          <span className="meta">
+                            {alignStage[phase.series_id] &&
+                            t.has(`alignStage.${alignStage[phase.series_id]}`)
+                              ? t(`alignStage.${alignStage[phase.series_id]}`)
+                              : t("aligning")}
+                          </span>
+                          <button
+                            type="button"
+                            className="ghost"
+                            onClick={() => cancelAlign(phase.series_id)}
+                            style={{ fontSize: "0.72rem", padding: "1px 6px" }}
+                          >
+                            {t("alignCancel")}
+                          </button>
+                        </>
+                      )}
+                      {a === "aligned" && (
+                        <span style={{ color: "var(--bv-success, #047857)" }}>{t("aligned")}</span>
+                      )}
+                      {a === "error" && (
+                        <span
+                          style={{ color: "var(--bv-danger, #f87171)", fontSize: "0.72rem" }}
+                          title={alignErrMsg[phase.series_id] ?? undefined}
+                        >
+                          {alignErrMsg[phase.series_id] ?? t("alignFailed")}
+                        </span>
+                      )}
+                      {a === "error" && (
+                        <button
+                          type="button"
+                          className="ghost"
+                          onClick={() => align(i)}
+                          style={{ fontSize: "0.72rem", padding: "1px 6px" }}
+                        >
+                          {t("alignRetry")}
+                        </button>
+                      )}
+                      {phase.series_description && (
+                        <span
+                          style={{
+                            color: "#64748b",
+                            overflow: "hidden",
+                            textOverflow: "ellipsis",
+                            whiteSpace: "nowrap",
+                            minWidth: 0,
+                          }}
+                          title={phase.series_description}
+                        >
+                          {phase.series_description}
+                        </span>
+                      )}
+                      <span style={{ marginLeft: "auto" }}>
+                        <PaneWLControl
+                          handle={paneInfo[i]?.handle ?? null}
+                          modality={phase.modality}
+                          bodyPart={phase.body_part_examined}
+                          scalars={paneInfo[i]?.scalars ?? null}
+                          onApply={linkWL ? applyWL : undefined}
+                        />
                       </span>
-                    )}
-                    {a === "error" && (
-                      <button
-                        type="button"
-                        className="ghost"
-                        onClick={() => align(i)}
-                        style={{ fontSize: "0.72rem", padding: "1px 6px" }}
-                      >
-                        {t("alignRetry")}
-                      </button>
-                    )}
-                    {phase.series_description && (
-                      <span
-                        style={{
-                          color: "#64748b",
-                          overflow: "hidden",
-                          textOverflow: "ellipsis",
-                          whiteSpace: "nowrap",
-                          minWidth: 0,
-                        }}
-                        title={phase.series_description}
-                      >
-                        {phase.series_description}
-                      </span>
-                    )}
+                    </div>
+                    <PhasePane
+                      phase={phase}
+                      registerHandle={(h) => {
+                        grid.registerPane(i)(h);
+                        paneHandlesRef.current[i] = h;
+                      }}
+                      onCrosshair={(pos) => grid.onCrosshairChange(i, pos)}
+                      activeTool={measureMode ? "measure-sphere" : activeTool}
+                      onMeasurements={(ms) => {
+                        setPaneMeasurements((prev) => ({ ...prev, [i]: ms }));
+                        if (i === 0) handleMeasurements(ms);
+                      }}
+                      onReady={(info) => {
+                        paneHandlesRef.current[i] = info.handle;
+                        setPaneInfo((prev) => ({ ...prev, [i]: info }));
+                      }}
+                    />
                   </div>
-                  <PhasePane
-                    phase={phase}
-                    registerHandle={grid.registerPane(i)}
-                    onCrosshair={(pos) => grid.onCrosshairChange(i, pos)}
-                    activeTool={measureMode ? "measure-sphere" : "wl"}
-                    onMeasurements={i === 0 ? handleMeasurements : undefined}
-                  />
-                </div>
-              );
-            })}
+                );
+              })}
+            </div>
           </div>
         )}
         {(measureMode || washout) && (
@@ -913,6 +1134,84 @@ function ContrastViewerInner() {
               lastRoiRef.current = null;
             }}
           />
+        )}
+        {showMarkers && (
+          <div
+            style={{
+              flex: "0 0 240px",
+              overflowY: "auto",
+              padding: "0.5rem 0.75rem",
+              background: "var(--bv-card-bg, #11151c)",
+              borderLeft: "1px solid var(--bv-card-border, #1a1f2b)",
+              color: "#e6ecf3",
+              minHeight: 0,
+            }}
+          >
+            <h3 style={{ fontSize: "0.85rem", margin: "0 0 0.5rem" }}>{t("roisTitle")}</h3>
+            {panes.every((_, i) => (paneMeasurements[i]?.length ?? 0) === 0) ? (
+              <p className="meta" style={{ fontSize: "0.76rem" }}>
+                {t("roisEmpty")}
+              </p>
+            ) : (
+              panes.map((phase, i) => {
+                const ms = paneMeasurements[i] ?? [];
+                if (ms.length === 0) return null;
+                return (
+                  <div key={phase.series_id} style={{ marginBottom: "0.6rem" }}>
+                    <div
+                      style={{
+                        fontSize: "0.74rem",
+                        color: "var(--bv-accent, #e96b1f)",
+                        marginBottom: 2,
+                      }}
+                    >
+                      {phase.acquisition_phase
+                        ? t(`phase.${phase.acquisition_phase}`)
+                        : phase.series_description}
+                    </div>
+                    {ms.map((m, k) => (
+                      <div
+                        key={m.markerId ?? `${i}-${k}`}
+                        style={{
+                          display: "flex",
+                          alignItems: "center",
+                          gap: 6,
+                          padding: "2px 4px",
+                          fontSize: "0.74rem",
+                          borderBottom: "1px solid #1a1f2b",
+                        }}
+                      >
+                        <span
+                          style={{
+                            flex: 1,
+                            minWidth: 0,
+                            overflow: "hidden",
+                            textOverflow: "ellipsis",
+                            whiteSpace: "nowrap",
+                          }}
+                        >
+                          {m.label || m.csToolName || m.tool}
+                          {m.value && <span className="meta"> · {m.value}</span>}
+                        </span>
+                        <button
+                          type="button"
+                          className="ghost"
+                          title={t("roiDelete")}
+                          style={{ color: "#f66", padding: "0 6px" }}
+                          disabled={!m.markerId}
+                          onClick={() => {
+                            if (m.markerId) paneHandlesRef.current[i]?.removeAnnotation(m.markerId);
+                          }}
+                        >
+                          ×
+                        </button>
+                      </div>
+                    ))}
+                  </div>
+                );
+              })
+            )}
+          </div>
         )}
       </div>
     </div>

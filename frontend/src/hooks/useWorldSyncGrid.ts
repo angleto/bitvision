@@ -9,7 +9,7 @@
 // echo (each setCrosshairWorld would otherwise re-fire onCrosshairChange).
 
 import type { MPRLayoutHandle } from "@/components/MPRLayoutTypes";
-import { type PaneTransform, mapWorldAcrossPanes } from "@/lib/worldSync";
+import { type PaneTransform, mapWorldAcrossPanes, shouldSkipSync } from "@/lib/worldSync";
 import { useCallback, useMemo, useRef, useState } from "react";
 
 export interface WorldSyncGrid {
@@ -56,10 +56,25 @@ export function useWorldSyncGrid(): WorldSyncGrid {
         for (let j = 0; j < handles.current.length; j++) {
           if (j === i) continue;
           const tj = transforms.current[j];
-          if (tj === undefined) continue;
+          if (tj === undefined) {
+            if (
+              process.env.NODE_ENV !== "production" &&
+              j < handles.current.length &&
+              handles.current[j]
+            ) {
+              // A mounted pane with no transform is silently skipped — the most
+              // common reason a phase "doesn't follow" the scroll. Surface it.
+              console.debug(`[worldSync] pane ${j} skipped: no transform set (different FoR?)`);
+            }
+            continue;
+          }
           const to = handles.current[j];
           if (!to?.setCrosshairWorld) continue;
           const worldJ = mapWorldAcrossPanes(worldI, ti, tj);
+          // Skip a no-op push: the target already sits at this world point, so
+          // re-issuing the camera write would only spawn a redundant
+          // CAMERA_MODIFIED echo (a source of the ROI-drift wobble).
+          if (shouldSkipSync(to.getCrosshairWorld?.(), worldJ)) continue;
           to.setCrosshairWorld(worldJ);
         }
       } finally {
