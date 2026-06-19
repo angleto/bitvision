@@ -156,7 +156,7 @@ TOOLS: list[Tool] = [
                 "patient_id": {"type": "string"},
                 "target_kind": {
                     "type": "string",
-                    "enum": ["study", "series", "instance"],
+                    "enum": ["study", "series", "instance", "pathology_slide"],
                 },
                 "target_id": {"type": "string"},
                 "kind": {
@@ -171,6 +171,8 @@ TOOLS: list[Tool] = [
                         "measurement.text",
                         "measurement.probe",
                         "measurement.bbox",
+                        "measurement.polygon",
+                        "measurement.point",
                         "measurement.sphere",
                         "bbox.lesion",
                         "bbox.exclusion",

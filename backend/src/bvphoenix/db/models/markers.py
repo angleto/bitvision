@@ -85,6 +85,17 @@ MARKER_KINDS: tuple[str, ...] = (
     "measurement.text",
     "measurement.probe",
     "measurement.bbox",
+    # ``measurement.polygon`` — a closed polygon ROI on a whole-slide
+    # image (pathology). Geometry is stored in BASE-LEVEL pixel coords
+    # plus a normalised 0..1 copy so the annotation survives a DZI
+    # re-tiling; ``computed`` carries the area in mm² (from mpp).
+    "measurement.polygon",
+    # ``measurement.point`` — a single point marker, used for the
+    # pathology cell / mitotic counter (Ki-67 index workflow). Geometry:
+    #   {"point_px": [x, y], "point_norm": [nx, ny]}
+    # ``computed`` / ``body`` may carry a category label so the viewer
+    # can tally per-category counts and density (count / area_mm²).
+    "measurement.point",
     # ``measurement.sphere`` — a 2D circle ROI (Cornerstone ``CircleROI``)
     # that the backend treats as the equator of a 3D sphere for PERCIST
     # SUVpeak (1 cm³). A distinct kind so the panel / report-composer can
@@ -185,7 +196,7 @@ class Marker(Base):
 
     __table_args__ = (
         CheckConstraint(
-            "target_kind IN ('study','series','instance')",
+            "target_kind IN ('study','series','instance','pathology_slide')",
             name="ck_markers_target_kind",
         ),
         CheckConstraint(

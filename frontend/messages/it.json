@@ -1395,7 +1395,10 @@
     "sourceFormatLabel": "Formato sorgente",
     "collectionLabel": "Collezione sorgente",
     "dimensionsLabel": "Dimensioni a piena risoluzione",
-    "viewerHint": "Scorri o usa la pinch per lo zoom, trascina per spostarti."
+    "viewerHint": "Scorri o usa la pinch per lo zoom, trascina per spostarti.",
+    "colorManaged": "Colore: sRGB",
+    "colorManagedHint": "I tile sono gestiti in sRGB lato server (profilo ICC dello scanner applicato al tiling).",
+    "uncalibrated": "Non calibrato — nessuna scala fisica"
   },
   "studyDetail": {
     "downloadDicomZip": "Scarica DICOM (ZIP)",

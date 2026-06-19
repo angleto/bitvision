@@ -29,6 +29,7 @@ from datetime import datetime
 from sqlalchemy import (
     BigInteger,
     Boolean,
+    CheckConstraint,
     DateTime,
     Float,
     ForeignKey,
@@ -38,7 +39,9 @@ from sqlalchemy import (
     Text,
     UniqueConstraint,
     func,
+    text,
 )
+from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.dialects.postgresql import UUID as PG_UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -86,6 +89,32 @@ class PathologySlide(Base):
     pyramid_levels: Mapped[int | None] = mapped_column(Integer)
     source_format: Mapped[str] = mapped_column(String(16), nullable=False)
 
+    # Clinical image class. ``wsi`` = a scanned glass slide (pyramidal,
+    # OpenSlide-readable). ``gross`` = a macroscopic photo of the
+    # specimen; ``micrograph`` = a static microscopy capture. The last
+    # two arrive as ordinary RGB images (no native pyramid) and are read
+    # at ingest with Pillow; the tiler builds their pyramid with pyvips
+    # so all three classes are viewed through the same deep-zoom path.
+    slide_class: Mapped[str] = mapped_column(String(16), nullable=False, server_default="wsi")
+
+    # --- DZI deep-zoom pyramid (Step 2 viewer) ------------------------
+    # The ``tile_wsi`` worker renders a DeepZoom tile pyramid into the
+    # derivatives bucket (NEVER exposed: storage isolation) and flips
+    # ``dzi_ready``. The ``ck_pathology_slides_dzi_ready_complete`` CHECK
+    # makes a half-written ready row impossible, so the serving
+    # endpoints trust ``dzi_ready`` as a single gate.
+    s3_dzi_key: Mapped[str | None] = mapped_column(String(512))
+    dzi_ready: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default="false")
+    dzi_levels: Mapped[int | None] = mapped_column(Integer)
+    dzi_tile_size: Mapped[int | None] = mapped_column(Integer)
+    dzi_overlap: Mapped[int | None] = mapped_column(Integer)
+    dzi_format: Mapped[str | None] = mapped_column(String(8))
+    dzi_generator_version: Mapped[str | None] = mapped_column(String(32))
+    # Last tiling failure (code + detail). Distinguishes "never tiled"
+    # (NULL) from "tiling failed" (set) so the backfill CLI and the list
+    # endpoint can show + selectively retry. NULL on success.
+    dzi_error: Mapped[dict | None] = mapped_column(JSONB)
+
     s3_bucket: Mapped[str] = mapped_column(String(255), nullable=False)
     s3_source_key: Mapped[str] = mapped_column(String(512), nullable=False)
     size_bytes: Mapped[int] = mapped_column(BigInteger, nullable=False)
@@ -125,7 +154,31 @@ class PathologySlide(Base):
             "slide_instance_uid",
             name="uq_pathology_slides_owner_uid",
         ),
+        CheckConstraint(
+            "slide_class IN ('wsi','gross','micrograph')",
+            name="ck_pathology_slides_slide_class",
+        ),
+        # A ready DZI MUST carry every descriptor field — half-written
+        # ready rows are impossible at the DB layer (same defence-in-depth
+        # as ck_pathology_slides_label_redacted_when_present).
+        CheckConstraint(
+            "dzi_ready = FALSE OR ("
+            "s3_dzi_key IS NOT NULL AND dzi_levels IS NOT NULL "
+            "AND dzi_tile_size IS NOT NULL AND dzi_format IS NOT NULL "
+            "AND dzi_generator_version IS NOT NULL)",
+            name="ck_pathology_slides_dzi_ready_complete",
+        ),
+        CheckConstraint(
+            "dzi_format IS NULL OR dzi_format IN ('jpeg','png')",
+            name="ck_pathology_slides_dzi_format",
+        ),
         Index("ix_pathology_slides_patient", "patient_id"),
         Index("ix_pathology_slides_public", "is_public"),
         Index("ix_pathology_slides_tier", "contribution_tier"),
+        # Backfill scan: find slides whose pyramid is not yet built.
+        Index(
+            "ix_pathology_slides_dzi_pending",
+            "dzi_ready",
+            postgresql_where=text("dzi_ready = FALSE"),
+        ),
     )

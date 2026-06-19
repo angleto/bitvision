@@ -124,6 +124,7 @@ dependencies = [
 [project.scripts]
 bvphoenix-import = "bvphoenix.cli.import_dicom:main"
 bvphoenix-import-pathology = "bvphoenix.cli.import_pathology:main"
+bvphoenix-tile-pathology = "bvphoenix.cli.tile_pathology:main"
 bvphoenix-public-import = "bvphoenix.cli.public_import:main"
 bvphoenix-public-import-pathology = "bvphoenix.cli.public_import_pathology:main"
 bvphoenix-export = "bvphoenix.cli.export_dicom:main"
