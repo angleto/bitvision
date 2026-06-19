@@ -29,7 +29,7 @@ from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
 
 from bvworkers.config import get_settings
-from bvworkers.job_safety import mark_job_failed_raw, with_safety_net
+from bvworkers.job_safety import mark_registration_failed_raw, with_registration_safety_net
 
 log = logging.getLogger(__name__)
 
@@ -135,7 +135,7 @@ async def _load_series_image(db: AsyncSession, *, series_id: uuid.UUID, settings
     return await _series_volume(db, series_id=series_id, settings=settings)
 
 
-@with_safety_net("register_series")
+@with_registration_safety_net("register_series")
 async def register_series(
     ctx: dict,  # type: ignore[type-arg]
     registration_id: str,
@@ -160,7 +160,9 @@ async def register_series(
         from bvphoenix.storage import get_s3_storage
     except ImportError as exc:
         log.exception("bvphoenix import failed: %s", exc)
-        await mark_job_failed_raw(registration_id, code="bvphoenix_import_failed", message=str(exc))
+        await mark_registration_failed_raw(
+            registration_id, code="bvphoenix_import_failed", message=str(exc)
+        )
         return {"status": "error", "reason": f"import: {exc}"}
 
     import SimpleITK as sitk  # noqa: N813 — community-standard alias
@@ -200,6 +202,9 @@ async def register_series(
                 await db.commit()
                 return {"status": "error", "reason": "unsupported_kind"}
 
+            if reg.job_id is not None:
+                await jobs_service.update_progress(db, reg.job_id, stage="loading")
+                await db.commit()
             fixed = await _load_series_image(db, series_id=reg.fixed_series_id, settings=settings)
             moving = await _load_series_image(db, series_id=reg.moving_series_id, settings=settings)
             if fixed is None or moving is None:
@@ -225,6 +230,9 @@ async def register_series(
             # images are already in true patient space (LPS) when packed.
             from bvworkers.registration_core import register_pair
 
+            if reg.job_id is not None:
+                await jobs_service.update_progress(db, reg.job_id, stage="registering")
+                await db.commit()
             try:
                 final_transform, result_meta = register_pair(fixed, moving, reg.kind)
             except RuntimeError as exc:
@@ -244,6 +252,10 @@ async def register_series(
                     )
                 await db.commit()
                 return {"status": "error", "reason": "sitk_failed"}
+
+            if reg.job_id is not None:
+                await jobs_service.update_progress(db, reg.job_id, stage="uploading")
+                await db.commit()
 
             # Save the transform to a tempfile then upload.
             import tempfile

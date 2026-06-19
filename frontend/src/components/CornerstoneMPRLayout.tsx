@@ -430,6 +430,11 @@ const CornerstoneMPRLayout = forwardRef<MPRLayoutHandle, ExtendedProps>(
     const sagDivRef = useRef<HTMLDivElement | null>(null);
     const corDivRef = useRef<HTMLDivElement | null>(null);
     const engineRef = useRef<cs.RenderingEngine | null>(null);
+    // One-shot ResizeObserver that fits the camera the moment this pane's
+    // canvas first gets a stable non-zero box — the safety net for a grid
+    // cell (e.g. the 2nd compare pane) that lays out after the rAF settle
+    // loop gives up. Disconnected after the first fit / on unmount.
+    const settleObserverRef = useRef<ResizeObserver | null>(null);
     const initializedRef = useRef(false);
     // ``true`` once ``setup()`` has finished registering the tool
     // group. The activeTool effect bails until then and re-runs
@@ -1128,17 +1133,35 @@ const CornerstoneMPRLayout = forwardRef<MPRLayoutHandle, ExtendedProps>(
         let prevFitW = -1;
         let prevFitH = -1;
         let fitTries = 0;
-        const settleAndFit = () => {
-          if (cancelled) return;
-          const probe = axialDivRef.current ?? sagDivRef.current ?? corDivRef.current;
+        let fitted = false;
+        const probeEl = () => axialDivRef.current ?? sagDivRef.current ?? corDivRef.current;
+        const tryFit = (): boolean => {
+          const eng = engineRef.current;
+          const probe = probeEl();
           const w = probe?.clientWidth ?? 0;
           const h = probe?.clientHeight ?? 0;
-          const stable = w > 0 && h > 0 && w === prevFitW && h === prevFitH;
-          // ~30 frames (≈500 ms) ceiling so a never-settling layout still
-          // gets one fit instead of spinning forever.
+          if (!eng || w <= 0 || h <= 0) return false;
+          fitViewportsToCanvas(eng, visiblePanes());
+          return true;
+        };
+        const settleAndFit = () => {
+          if (cancelled || fitted) return;
+          const probe = probeEl();
+          const w = probe?.clientWidth ?? 0;
+          const h = probe?.clientHeight ?? 0;
+          // While the cell is still 0×0 (e.g. the 2nd grid column hasn't laid
+          // out yet) keep waiting WITHOUT spending the settle budget — a
+          // late-settling pane would otherwise hit the ceiling at 0×0 and
+          // never get fitted (the empty-right-pane bug).
+          if (w <= 0 || h <= 0) {
+            requestAnimationFrame(settleAndFit);
+            return;
+          }
+          const stable = w === prevFitW && h === prevFitH;
+          // ~30 frames (≈500 ms) ceiling once the box is non-zero, so a
+          // never-stabilising layout still gets one fit.
           if (stable || fitTries >= 30) {
-            const eng = engineRef.current;
-            if (eng && w > 0 && h > 0) fitViewportsToCanvas(eng, visiblePanes());
+            fitted = tryFit();
             return;
           }
           prevFitW = w;
@@ -1147,6 +1170,34 @@ const CornerstoneMPRLayout = forwardRef<MPRLayoutHandle, ExtendedProps>(
           requestAnimationFrame(settleAndFit);
         };
         requestAnimationFrame(settleAndFit);
+
+        // Safety net for a cell that only gets its box AFTER the rAF settle
+        // gave up (slow grid reflow, a sibling banner expanding): fit once
+        // when a stable non-zero size is first observed, then disconnect so
+        // we never clobber the user's later zoom/pan.
+        const probe0 = probeEl();
+        if (probe0 && typeof ResizeObserver !== "undefined") {
+          let roW = -1;
+          let roH = -1;
+          const ro = new ResizeObserver(() => {
+            if (cancelled || fitted) {
+              settleObserverRef.current?.disconnect();
+              return;
+            }
+            const probe = probeEl();
+            const w = probe?.clientWidth ?? 0;
+            const h = probe?.clientHeight ?? 0;
+            if (w > 0 && h > 0 && w === roW && h === roH) {
+              fitted = tryFit();
+              if (fitted) settleObserverRef.current?.disconnect();
+            }
+            roW = w;
+            roH = h;
+          });
+          ro.observe(probe0);
+          settleObserverRef.current?.disconnect();
+          settleObserverRef.current = ro;
+        }
       };
 
       // Reset readiness while the new tool group is being wired so
@@ -1159,6 +1210,8 @@ const CornerstoneMPRLayout = forwardRef<MPRLayoutHandle, ExtendedProps>(
       void setup();
       return () => {
         cancelled = true;
+        settleObserverRef.current?.disconnect();
+        settleObserverRef.current = null;
       };
     }, [
       volume,

@@ -120,12 +120,84 @@ async def mark_job_failed_raw(
         # asyncpg returns "UPDATE <n>"
         updated = result.startswith("UPDATE ") and not result.endswith(" 0")
         if updated:
-            log.warning(
-                "mark_job_failed_raw: flipped job %s to failed (%s)", jid, code
-            )
+            log.warning("mark_job_failed_raw: flipped job %s to failed (%s)", jid, code)
         return updated
     except Exception as exc:
         log.error("mark_job_failed_raw: UPDATE failed: %s", exc)
+        return False
+    finally:
+        import contextlib
+
+        with contextlib.suppress(Exception):
+            await conn.close()
+
+
+async def mark_registration_failed_raw(
+    registration_id: str,
+    *,
+    code: str,
+    message: str,
+    db_url_env: str = "BVP_DATABASE_URL_SYNC",
+) -> bool:
+    """Best-effort raw UPDATE of a ``registrations`` row (and its linked
+    ``jobs`` row) to ``failed``.
+
+    The follow-up viewer polls the REGISTRATION status, not the Job — so a
+    crash that escapes the task body must flip the registration, otherwise
+    the UI hangs until its own poll timeout ("L'allineamento sta impiegando
+    troppo"). Gated on ``status IN ('queued','running')`` so a terminal row
+    is left alone. Never raises.
+    """
+    try:
+        rid = uuid.UUID(registration_id)
+    except (TypeError, ValueError):
+        log.error("mark_registration_failed_raw: invalid id %r", registration_id)
+        return False
+
+    dsn_raw = os.environ.get(db_url_env)
+    if not dsn_raw:
+        log.error("mark_registration_failed_raw: %s not set", db_url_env)
+        return False
+
+    try:
+        dsn, kw = _to_asyncpg_dsn(dsn_raw)
+        conn = await asyncpg.connect(dsn, **kw)
+    except Exception as exc:
+        log.error("mark_registration_failed_raw: cannot connect: %s", exc)
+        return False
+
+    try:
+        # registrations.error is TEXT; jobs.error is JSONB.
+        row = await conn.fetchrow(
+            """
+            UPDATE registrations
+            SET status = 'failed', error = $1, finished_at = now()
+            WHERE id = $2 AND status IN ('queued', 'running')
+            RETURNING job_id
+            """,
+            f"{code}: {message}",
+            rid,
+        )
+        if row is None:
+            return False
+        job_id = row["job_id"]
+        if job_id is not None:
+            await conn.execute(
+                """
+                UPDATE jobs
+                SET status = 'failed', error = $1::jsonb,
+                    finished_at = now(), updated_at = now()
+                WHERE id = $2 AND status IN ('queued', 'running')
+                """,
+                json.dumps({"code": code, "message": message}),
+                job_id,
+            )
+        log.warning(
+            "mark_registration_failed_raw: flipped registration %s to failed (%s)", rid, code
+        )
+        return True
+    except Exception as exc:
+        log.error("mark_registration_failed_raw: UPDATE failed: %s", exc)
         return False
     finally:
         import contextlib
@@ -169,6 +241,41 @@ def with_safety_net(
                     message=f"{type(exc).__name__}: {exc}\n{tb[-500:]}",
                 )
                 raise
+
+        return wrapper
+
+    return deco
+
+
+def with_registration_safety_net(
+    task_name: str,
+) -> Callable[[Callable[..., Awaitable[Any]]], Callable[..., Awaitable[Any]]]:
+    """Like :func:`with_safety_net`, but the task's second positional arg is a
+    REGISTRATION id (not a Job id) and the follow-up UI polls the registration
+    row. An unhandled crash flips the registration (and its linked job) to
+    ``failed`` via :func:`mark_registration_failed_raw`, so the viewer sees a
+    terminal error instead of hanging.
+    """
+
+    def deco(fn: Callable[..., Awaitable[Any]]) -> Callable[..., Awaitable[Any]]:
+        @functools.wraps(fn)
+        async def wrapper(ctx: dict, registration_id: str, *args, **kwargs):  # type: ignore[type-arg]
+            try:
+                return await fn(ctx, registration_id, *args, **kwargs)
+            except BaseException as exc:
+                tb = traceback.format_exc()
+                log.exception(
+                    "%s: unhandled exception in registration %s — flipping row to failed",
+                    task_name,
+                    registration_id,
+                )
+                await mark_registration_failed_raw(
+                    registration_id,
+                    code=f"{task_name}_unhandled",
+                    message=f"{type(exc).__name__}: {exc}\n{tb[-500:]}",
+                )
+                raise
+
         return wrapper
 
     return deco

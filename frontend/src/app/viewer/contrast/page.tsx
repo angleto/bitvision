@@ -292,6 +292,10 @@ function ContrastViewerInner() {
   const [busySeries, setBusySeries] = useState<string | null>(null);
   const [aligning, setAligning] = useState<Record<string, boolean>>({});
   const [alignError, setAlignError] = useState<Record<string, boolean>>({});
+  const [alignErrMsg, setAlignErrMsg] = useState<Record<string, string | null>>({});
+  const [alignStage, setAlignStage] = useState<Record<string, string | null>>({});
+  const [activeReg, setActiveReg] = useState<Record<string, string | null>>({});
+  const alignCancelRef = useRef<Record<string, boolean>>({});
   const [alignedSet, setAlignedSet] = useState<Record<string, boolean>>({});
   // Which series to open as panes: null = the auto-classified phases; a list
   // = an explicit manual selection from the picker.
@@ -449,38 +453,70 @@ function ContrastViewerInner() {
     if (!pane || !ref) return;
     const sid = pane.series_id;
     setAlignError((s) => ({ ...s, [sid]: false }));
+    setAlignErrMsg((s) => ({ ...s, [sid]: null }));
+    setAlignStage((s) => ({ ...s, [sid]: "queued" }));
     setAligning((s) => ({ ...s, [sid]: true }));
-    const fail = () => setAlignError((s) => ({ ...s, [sid]: true }));
+    alignCancelRef.current[sid] = false;
+    const fail = (msg?: string) => {
+      setAlignError((s) => ({ ...s, [sid]: true }));
+      setAlignErrMsg((s) => ({ ...s, [sid]: msg ?? t("alignFailed") }));
+    };
     try {
       const reg = await registrationsApi.create({
         fixed_series_id: ref.series_id,
         moving_series_id: sid,
         kind: "rigid",
       });
-      for (let i = 0; i < 60; i++) {
+      setActiveReg((s) => ({ ...s, [sid]: reg.id }));
+      // Poll until terminal. No blind short cap: rigid registration legitimately
+      // runs a few minutes under worker load. ~10 min backstop, live stage shown.
+      for (let i = 0; i < 300; i++) {
+        if (alignCancelRef.current[sid]) return;
         const cur = await registrationsApi.get(reg.id);
+        setAlignStage((s) => ({
+          ...s,
+          [sid]: cur.status === "running" ? (cur.stage ?? "running") : cur.status,
+        }));
         if (cur.status === "succeeded") {
           const m = cur.result_meta?.lps_matrix;
           if (isMat4(m)) {
             grid.setTransform(paneIndex, m);
             setAlignedSet((s) => ({ ...s, [sid]: true }));
           } else {
-            fail();
+            fail(t("noMatrix"));
           }
           return;
         }
-        if (cur.status === "failed" || cur.status === "cancelled") {
-          fail();
+        if (cur.status === "failed") {
+          fail(cur.error ?? undefined);
           return;
         }
+        if (cur.status === "cancelled") return;
         await new Promise((r) => setTimeout(r, 2000));
       }
-      fail();
-    } catch {
-      fail();
+      fail(t("alignTimeout"));
+    } catch (e) {
+      fail(e instanceof ApiError ? e.message : undefined);
     } finally {
       setAligning((s) => ({ ...s, [sid]: false }));
+      setAlignStage((s) => ({ ...s, [sid]: null }));
+      setActiveReg((s) => ({ ...s, [sid]: null }));
     }
+  }
+
+  async function cancelAlign(seriesId: string) {
+    alignCancelRef.current[seriesId] = true;
+    const id = activeReg[seriesId];
+    if (id) {
+      try {
+        await registrationsApi.cancel(id);
+      } catch {
+        /* best-effort */
+      }
+    }
+    setAligning((s) => ({ ...s, [seriesId]: false }));
+    setAlignStage((s) => ({ ...s, [seriesId]: null }));
+    setActiveReg((s) => ({ ...s, [seriesId]: null }));
   }
 
   function handleMeasurements(ms: DrawnMeasurement[]) {
@@ -693,9 +729,44 @@ function ContrastViewerInner() {
                         {t("align")}
                       </button>
                     )}
-                    {a === "aligning" && <span className="meta">{t("aligning")}</span>}
+                    {a === "aligning" && (
+                      <>
+                        <span className="meta">
+                          {alignStage[phase.series_id] &&
+                          t.has(`alignStage.${alignStage[phase.series_id]}`)
+                            ? t(`alignStage.${alignStage[phase.series_id]}`)
+                            : t("aligning")}
+                        </span>
+                        <button
+                          type="button"
+                          className="ghost"
+                          onClick={() => cancelAlign(phase.series_id)}
+                          style={{ fontSize: "0.72rem", padding: "1px 6px" }}
+                        >
+                          {t("alignCancel")}
+                        </button>
+                      </>
+                    )}
                     {a === "aligned" && (
                       <span style={{ color: "var(--bv-success, #047857)" }}>{t("aligned")}</span>
+                    )}
+                    {a === "error" && (
+                      <span
+                        style={{ color: "var(--bv-danger, #f87171)", fontSize: "0.72rem" }}
+                        title={alignErrMsg[phase.series_id] ?? undefined}
+                      >
+                        {alignErrMsg[phase.series_id] ?? t("alignFailed")}
+                      </span>
+                    )}
+                    {a === "error" && (
+                      <button
+                        type="button"
+                        className="ghost"
+                        onClick={() => align(i)}
+                        style={{ fontSize: "0.72rem", padding: "1px 6px" }}
+                      >
+                        {t("alignRetry")}
+                      </button>
                     )}
                     {phase.series_description && (
                       <span

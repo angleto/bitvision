@@ -81,6 +81,15 @@
     "noMatrix": "L'allineamento non ha prodotto una trasformazione.",
     "alignFailed": "Allineamento fallito.",
     "alignTimeout": "L'allineamento sta impiegando troppo; riprova tra poco.",
+    "alignCancel": "Annulla",
+    "alignRetry": "Riprova",
+    "alignStage": {
+      "queued": "In coda…",
+      "running": "Allineamento…",
+      "loading": "Caricamento volumi…",
+      "registering": "Registrazione…",
+      "uploading": "Salvataggio trasformazione…"
+    },
     "align": {
       "sameFrame": "Allineato (stesso frame)",
       "registered": "Allineato (registrazione)",
@@ -138,6 +147,18 @@
     "clear": "Azzera",
     "align": "Allinea",
     "aligning": "Allineamento…",
+    "alignCancel": "Annulla",
+    "alignRetry": "Riprova",
+    "alignFailed": "Allineamento fallito.",
+    "alignTimeout": "L'allineamento sta impiegando troppo; riprova tra poco.",
+    "noMatrix": "L'allineamento non ha prodotto una trasformazione.",
+    "alignStage": {
+      "queued": "In coda…",
+      "running": "Allineamento…",
+      "loading": "Caricamento volumi…",
+      "registering": "Registrazione…",
+      "uploading": "Salvataggio trasformazione…"
+    },
     "needsAlign": "Frame diverso, allinea per sincronizzare",
     "aligned": "Allineata",
     "loadError": "Errore di caricamento: {detail}",

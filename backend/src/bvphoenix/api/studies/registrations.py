@@ -87,6 +87,28 @@ async def create_registration(
             "series belong to different patients",
         )
 
+    # Pre-pack guarantee: the worker registers fastest from packed volume_f32
+    # derivatives (and the viewer reuses them). If a series isn't packed yet,
+    # enqueue pack_volume so the registration hits the fast path instead of
+    # re-stacking raw DICOM — the slow path that can blow the FE poll window.
+    packed_sids = set(
+        (
+            await db.execute(
+                select(Derivative.series_id).where(
+                    Derivative.series_id.in_([fixed_series.id, moving_series.id]),
+                    Derivative.kind == DERIVATIVE_KIND,
+                    Derivative.format == DERIVATIVE_FORMAT,
+                    Derivative.stack_index == 0,
+                )
+            )
+        )
+        .scalars()
+        .all()
+    )
+    series_needing_pack = [
+        sid for sid in (fixed_series.id, moving_series.id) if sid not in packed_sids
+    ]
+
     reg = Registration(
         fixed_series_id=fixed_series.id,
         moving_series_id=moving_series.id,
@@ -117,6 +139,8 @@ async def create_registration(
         try:
             settings = get_settings()
             redis = await _create_pool(_redis_settings(settings.redis_url))
+            for sid in series_needing_pack:
+                await redis.enqueue_job("pack_volume", str(sid))
             arq_handle = await redis.enqueue_job("register_series", str(reg.id))
             await redis.close()
             if arq_handle is not None:
@@ -155,8 +179,9 @@ async def get_registration(
     user: Annotated[User, Depends(require_user)],
 ) -> RegistrationOut:
     """Read a registration row + (when succeeded) a backend URL that
-    streams the saved transform / warp field through this process."""
-    from bvphoenix.db.models import Registration
+    streams the saved transform / warp field through this process. Mirrors
+    the linked Job's stage/progress so the viewer can show live status."""
+    from bvphoenix.db.models import Job, Registration
     from bvphoenix.middleware.problem_details import problem as _problem
 
     reg = (
@@ -167,10 +192,80 @@ async def get_registration(
     if reg.requested_by_subject_id != user.subject_id and not getattr(user, "is_admin", False):
         raise _problem(403, "forbidden", "not your registration")
 
+    stage: str | None = None
+    progress_done: int | None = None
+    progress_total: int | None = None
+    if reg.job_id is not None:
+        job = (await db.execute(select(Job).where(Job.id == reg.job_id))).scalar_one_or_none()
+        if job is not None:
+            stage = job.stage
+            progress_done = job.progress_done
+            progress_total = job.progress_total
+
     download_url: str | None = None
     if reg.s3_bucket and reg.s3_key:
         download_url = f"/api/registrations/{reg.id}/file"
-    return _registration_to_out(reg, download_url=download_url)
+    return _registration_to_out(
+        reg,
+        download_url=download_url,
+        stage=stage,
+        progress_done=progress_done,
+        progress_total=progress_total,
+    )
+
+
+@router.post("/registrations/{registration_id}/cancel", response_model=RegistrationOut)
+async def cancel_registration(
+    registration_id: uuid.UUID,
+    db: Annotated[AsyncSession, Depends(get_db)],
+    user: Annotated[User, Depends(require_user)],
+    audit: AuditDep,
+) -> RegistrationOut:
+    """Cancel a queued/running registration. The viewer calls this when the
+    user dismisses a long-running alignment. Terminal rows are left as-is."""
+    from datetime import UTC, datetime
+
+    from bvphoenix.db.models import Registration
+    from bvphoenix.middleware.problem_details import problem as _problem
+    from bvphoenix.services import jobs as jobs_service
+
+    reg = (
+        await db.execute(select(Registration).where(Registration.id == registration_id))
+    ).scalar_one_or_none()
+    if reg is None:
+        raise _problem(404, "not_found", "registration not found")
+    if reg.requested_by_subject_id != user.subject_id and not getattr(user, "is_admin", False):
+        raise _problem(403, "forbidden", "not your registration")
+
+    if reg.status in ("queued", "running"):
+        reg.status = "cancelled"
+        reg.finished_at = datetime.now(UTC)
+        if reg.job_id is not None:
+            # Best-effort: also cancel the linked Job (no-op if it already
+            # reached a terminal state in the meantime).
+            from bvphoenix.services.jobs import (
+                JobAlreadyTerminalError,
+                JobNotFoundError,
+            )
+
+            try:
+                await jobs_service.request_cancellation(
+                    db,
+                    reg.job_id,
+                    user.subject_id,
+                    is_admin=getattr(user, "is_admin", False),
+                )
+            except (JobNotFoundError, JobAlreadyTerminalError):
+                pass
+        await db.commit()
+        await db.refresh(reg)
+        await audit.log(
+            action="registration_cancel",
+            actor_subject_id=user.subject_id,
+            resource_kind="registration",
+            resource_id=reg.id,
+        )
+    return _registration_to_out(reg)
 
 
 @router.get("/registrations/{registration_id}/file")

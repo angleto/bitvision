@@ -23,7 +23,7 @@ import { useTranslations } from "next-intl";
 import dynamic from "next/dynamic";
 import Link from "next/link";
 import { useSearchParams } from "next/navigation";
-import { Suspense, useEffect, useMemo, useState } from "react";
+import { Suspense, useEffect, useMemo, useRef, useState } from "react";
 
 const CornerstoneMPRLayout = dynamic(() => import("@/components/CornerstoneMPRLayout"), {
   ssr: false,
@@ -205,6 +205,11 @@ function FollowupCompareInner() {
   const [registrationId, setRegistrationId] = useState<string | null>(null);
   const [aligning, setAligning] = useState(false);
   const [alignErr, setAlignErr] = useState<string | null>(null);
+  // Live alignment status/stage for the UI (queued/loading/registering/…) and
+  // the in-flight registration id so the user can cancel it.
+  const [alignStage, setAlignStage] = useState<string | null>(null);
+  const [activeRegId, setActiveRegId] = useState<string | null>(null);
+  const alignCancelRef = useRef(false);
 
   // RECIST authoring: bidirectional measure mode + the target panel, plus
   // the completed measurements emitted by each pane.
@@ -311,15 +316,22 @@ function FollowupCompareInner() {
     if (!baselineId || !followupId) return;
     setAligning(true);
     setAlignErr(null);
+    setAlignStage("queued");
+    alignCancelRef.current = false;
     try {
       const reg = await registrationsApi.create({
         fixed_series_id: baselineId,
         moving_series_id: followupId,
         kind: "rigid",
       });
-      // Poll until terminal (registration runs on a worker).
-      for (let i = 0; i < 60; i++) {
+      setActiveRegId(reg.id);
+      // Poll until a terminal state. No blind short cap: a rigid registration
+      // legitimately takes a few minutes under worker load. We surface the
+      // live stage instead, and keep a generous ~10 min backstop.
+      for (let i = 0; i < 300; i++) {
+        if (alignCancelRef.current) return;
         const cur = await registrationsApi.get(reg.id);
+        setAlignStage(cur.status === "running" ? (cur.stage ?? "running") : cur.status);
         if (cur.status === "succeeded") {
           const m = cur.result_meta?.lps_matrix;
           if (isMat4(m)) {
@@ -328,10 +340,11 @@ function FollowupCompareInner() {
           } else setAlignErr(t("noMatrix"));
           return;
         }
-        if (cur.status === "failed" || cur.status === "cancelled") {
+        if (cur.status === "failed") {
           setAlignErr(cur.error ?? t("alignFailed"));
           return;
         }
+        if (cur.status === "cancelled") return;
         await new Promise((r) => setTimeout(r, 2000));
       }
       setAlignErr(t("alignTimeout"));
@@ -339,7 +352,24 @@ function FollowupCompareInner() {
       setAlignErr(e instanceof ApiError ? e.message : t("alignFailed"));
     } finally {
       setAligning(false);
+      setAlignStage(null);
+      setActiveRegId(null);
     }
+  }
+
+  async function cancelAlign() {
+    alignCancelRef.current = true;
+    const id = activeRegId;
+    if (id) {
+      try {
+        await registrationsApi.cancel(id);
+      } catch {
+        /* best-effort */
+      }
+    }
+    setAligning(false);
+    setAlignStage(null);
+    setActiveRegId(null);
   }
 
   if (!baselineId || !followupId) {
@@ -454,10 +484,22 @@ function FollowupCompareInner() {
         >
           {t(`align.${alignState}`)}
         </span>
-        {!sameFoR && (
-          <button type="button" className="ghost" disabled={aligning} onClick={align}>
-            {aligning ? t("aligning") : t("alignButton")}
+        {!sameFoR && !aligning && (
+          <button type="button" className="ghost" onClick={align}>
+            {t("alignButton")}
           </button>
+        )}
+        {aligning && (
+          <>
+            <span style={{ whiteSpace: "nowrap", opacity: 0.85 }}>
+              {alignStage && t.has(`alignStage.${alignStage}`)
+                ? t(`alignStage.${alignStage}`)
+                : t("aligning")}
+            </span>
+            <button type="button" className="ghost" onClick={cancelAlign}>
+              {t("alignCancel")}
+            </button>
+          </>
         )}
         {alignErr && <span style={{ color: "var(--bv-danger, #f87171)" }}>{alignErr}</span>}
         <span style={{ flex: "1 1 auto" }} />
