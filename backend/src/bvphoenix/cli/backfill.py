@@ -652,5 +652,145 @@ def embed_text(
     click.echo("Run an Arq worker with the `ai` extra to process the queue.")
 
 
+# Acquisition-timing backfill -------------------------------------------
+# Phase 0 of the contrast-CT viewer added series.acquisition_time_of_day /
+# contrast_bolus_agent / contrast_bolus_start_time and populates them at
+# ingest. Series ingested BEFORE that have NULL timing, so the contrast-
+# phase classifier can only use their description. This command reads the
+# first instance's DICOM header from S3 and backfills the timing columns
+# (a real header read — NOT faked). Unlike the enqueue commands above it
+# does the S3 I/O inline, since it is a one-shot operational sweep. Run
+# ``detect_study_phases`` afterwards (or the auto-classify path) to label.
+
+
+def _timing_candidates(
+    session: Session,
+    *,
+    patient_id: uuid.UUID | None,
+    only_missing: bool,
+) -> list[tuple[uuid.UUID, str, str]]:
+    where = ["1=1"]
+    params: dict[str, object] = {}
+    if only_missing:
+        where.append("s.acquisition_time_of_day IS NULL")
+    if patient_id is not None:
+        where.append("st.patient_id = :pid")
+        params["pid"] = patient_id
+    # One representative instance per series (lowest instance number) for
+    # the header read.
+    sql = (
+        "SELECT s.id, i.s3_bucket, i.s3_key FROM series s "
+        "JOIN imaging_studies st ON st.id = s.study_id "
+        "JOIN LATERAL ("
+        "  SELECT s3_bucket, s3_key FROM instances i2 "
+        "  WHERE i2.series_id = s.id "
+        "  ORDER BY i2.instance_number ASC NULLS LAST LIMIT 1"
+        ") i ON true "
+        "WHERE " + " AND ".join(where) + " ORDER BY s.id"
+    )
+    rows = session.execute(text(sql), params).all()
+    return [(uuid.UUID(str(r[0])), r[1], r[2]) for r in rows]
+
+
+@main.command("timing")
+@click.option(
+    "--patient", "patient", default=None, help="Patient UUID. Mutually exclusive with --all."
+)
+@click.option("--all", "all_patients", is_flag=True, default=False, help="Backfill every patient.")
+@click.option(
+    "--only-missing/--all-series",
+    "only_missing",
+    default=True,
+    show_default=True,
+    help="Only series with NULL acquisition timing (default), or re-read every series.",
+)
+@click.option("--dry-run", is_flag=True, help="Count candidates without reading S3 or writing.")
+def timing(
+    patient: str | None,
+    all_patients: bool,
+    only_missing: bool,
+    dry_run: bool,
+) -> None:
+    """Backfill series acquisition timing from the first DICOM header.
+
+    Reads ``AcquisitionTime`` (falling back to SeriesTime / ContentTime),
+    ``ContrastBolusAgent`` and ``ContrastBolusStartTime`` from each series'
+    first instance and writes them to the series row. Idempotent.
+    """
+    import io
+
+    import pydicom
+
+    from bvphoenix.services.dicom_ingest import _parse_dicom_time
+    from bvphoenix.storage import get_s3_storage
+
+    if (patient is None) == (not all_patients):
+        click.echo("specify exactly one of --patient <id> or --all", err=True)
+        sys.exit(2)
+    patient_uuid: uuid.UUID | None = None
+    if patient is not None:
+        try:
+            patient_uuid = uuid.UUID(patient)
+        except ValueError:
+            click.echo(f"--patient must be a UUID, got {patient!r}", err=True)
+            sys.exit(2)
+
+    engine = _engine()
+    with Session(engine) as session:
+        candidates = _timing_candidates(session, patient_id=patient_uuid, only_missing=only_missing)
+
+    scope = f"patient {patient_uuid}" if patient_uuid else "ALL patients"
+    click.echo(f"scope            : {scope}")
+    click.echo(f"only-missing     : {only_missing}")
+    click.echo(f"series candidates: {len(candidates)}")
+    if dry_run:
+        click.echo("DRY RUN — no S3 reads, no writes.")
+        return
+    if not candidates:
+        click.echo("nothing to do")
+        return
+
+    storage = get_s3_storage()
+    updated = 0
+    failed = 0
+    with Session(engine) as session:
+        for i, (sid, bucket, key) in enumerate(candidates, start=1):
+            try:
+                data = storage.get_object_bytes(bucket=bucket, key=key)
+                ds = pydicom.dcmread(io.BytesIO(data), stop_before_pixels=True)
+                acq = (
+                    _parse_dicom_time(getattr(ds, "AcquisitionTime", None))
+                    or _parse_dicom_time(getattr(ds, "SeriesTime", None))
+                    or _parse_dicom_time(getattr(ds, "ContentTime", None))
+                )
+                agent = getattr(ds, "ContrastBolusAgent", None) or None
+                bolus = _parse_dicom_time(getattr(ds, "ContrastBolusStartTime", None))
+                session.execute(
+                    text(
+                        "UPDATE series SET acquisition_time_of_day = :acq, "
+                        "contrast_bolus_agent = :agent, contrast_bolus_start_time = :bolus "
+                        "WHERE id = :id"
+                    ),
+                    {
+                        "acq": acq,
+                        "agent": str(agent) if agent else None,
+                        "bolus": bolus,
+                        "id": sid,
+                    },
+                )
+                updated += 1
+            except Exception as exc:
+                failed += 1
+                click.echo(f"  WARN series {sid}: {exc}", err=True)
+            if i % 50 == 0:
+                session.commit()
+                click.echo(f"  …{i}/{len(candidates)}")
+        session.commit()
+    click.echo(f"updated          : {updated}")
+    if failed:
+        click.echo(f"failed (skipped) : {failed}")
+    click.echo("Run `detect_study_phases` (MCP) or open the contrast viewer to classify.")
+
+
 if __name__ == "__main__":
     main()
