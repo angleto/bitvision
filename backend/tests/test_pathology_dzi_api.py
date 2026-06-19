@@ -118,8 +118,11 @@ async def slides() -> AsyncIterator[tuple[AsyncSession, User, dict[str, Patholog
     owner_sub = Subject(id=uuid.uuid4(), kind="user", display_name="owner")
     session.add(owner_sub)
     await session.flush()
-    user = User(id=uuid.uuid4(), email=f"{uuid.uuid4()}@t.test", subject_id=owner_sub.id)
-    patient = Patient(id=uuid.uuid4(), managed_by_subject_id=None)
+    # User's PK is subject_id (no ``id`` column); mirror conftest.make_user.
+    user = User(subject_id=owner_sub.id, email=f"{uuid.uuid4()}@t.test", password_hash=None)
+    patient = Patient(
+        id=uuid.uuid4(), managed_by_subject_id=owner_sub.id, display_name="Test Patient"
+    )
     session.add(user)
     session.add(patient)
     await session.flush()
