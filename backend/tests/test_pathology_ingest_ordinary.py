@@ -68,9 +68,18 @@ def sync_session() -> Session:
 
 def _make_owner_and_patient(session: Session) -> tuple[uuid.UUID, uuid.UUID]:
     owner = Subject(id=uuid.uuid4(), kind="user", display_name="path-owner")
+    session.add(owner)
+    # Flush the Subject before inserting the Patient. SQLAlchemy's
+    # insert ordering between two brand-new rows is driven by
+    # ``relationship()`` objects, and Patient carries only a scalar
+    # ``managed_by_subject_id`` FK (no relationship to Subject), so
+    # batching both into a single flush does NOT guarantee the parent
+    # goes first — on some backends the Patient insert is emitted first
+    # and trips ``patients_managed_by_subject_id_fkey``. Parent-first is
+    # the same idiom the shared fixtures use (see conftest.make_user).
+    session.flush()
     # Patient.display_name is NOT NULL; managed_by_subject_id is nullable.
     patient = Patient(id=uuid.uuid4(), managed_by_subject_id=owner.id, display_name="Test Patient")
-    session.add(owner)
     session.add(patient)
     session.flush()
     return owner.id, patient.id
