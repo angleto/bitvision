@@ -34,12 +34,17 @@ BurnedInAnnotation, ImageType, BodyPartExamined), all of which precede
 from __future__ import annotations
 
 import io
-from dataclasses import dataclass
+import re
+from dataclasses import dataclass, field
 from typing import Literal
 
+import numpy as np
 import pydicom
+from PIL import Image
 from pydicom.multival import MultiValue
+from pydicom.uid import ExplicitVRLittleEndian
 
+from bvphoenix.services.deidentify import _EMAIL_RE, _PHONE_RE, _TAX_ID_RE
 from bvphoenix.services.thumbnails import NO_PIXEL_DATA_SOP_CLASSES
 
 PixelRiskLevel = Literal["none", "low", "high"]
@@ -218,11 +223,236 @@ def classify_pixel_risk_bytes(blob: bytes) -> PixelRisk:
     return classify_pixel_risk(ds)
 
 
+# ===========================================================================
+# M4: automated burned-in-pixel redaction (Tesseract tier)
+# ===========================================================================
+# The default mode masks EVERY detected text box (over-redaction, recall-first —
+# distinguishing PHI from clinical scan text reliably is the VLM tier, M5).
+# Selective mode keeps only PHI-shaped tokens. Either way a high-risk instance
+# ALWAYS stays residual_suspect (human review) — the redaction reduces what the
+# reviewer sees, it never auto-clears (MIDI-B: no automated pass is 100%).
+
+# Broad PHI shapes for the selective classifier (reuses the header regexes).
+_DATE_ANY_RE = re.compile(r"\b\d{1,4}[/.\-]\d{1,2}[/.\-]\d{1,4}\b")
+_MRN_RE = re.compile(r"\b[A-Z]{0,4}[-/ ]?\d{5,}\b")
+_NAME_RE = re.compile(r"^[A-Za-zÀ-ÖØ-öø-ÿ'’]{2,}$")
+
+
+@dataclass(frozen=True)
+class TextBox:
+    x: int
+    y: int
+    w: int
+    h: int
+    text: str
+    conf: float
+
+
+@dataclass
+class PixelDeidResult:
+    out_bytes: bytes
+    risk: PixelRisk
+    residual_suspect: bool
+    redactions: list[dict] = field(default_factory=list)
+    detected_text: bool = False
+    decode_failed: bool = False
+
+
+def _frames_view(arr: np.ndarray, ds: pydicom.Dataset) -> list[np.ndarray]:
+    """Views into ``arr`` (writes propagate back) split per frame.
+
+    Grayscale: (H,W) or (F,H,W). Colour: (H,W,3) or (F,H,W,3)."""
+    samples = int(getattr(ds, "SamplesPerPixel", 1) or 1)
+    if samples >= 3:
+        return [arr[i] for i in range(arr.shape[0])] if arr.ndim == 4 else [arr]
+    return [arr[i] for i in range(arr.shape[0])] if arr.ndim == 3 else [arr]
+
+
+def _frame_to_ocr_image(frame: np.ndarray, photometric: str) -> Image.Image:
+    a = np.asarray(frame).astype(np.float32)
+    if a.ndim == 3:
+        a = a.mean(axis=2)
+    lo, hi = float(a.min()), float(a.max())
+    a = (a - lo) / (hi - lo) * 255.0 if hi > lo else np.zeros_like(a)
+    if photometric == "MONOCHROME1":
+        a = 255.0 - a
+    return Image.fromarray(np.clip(a, 0, 255).astype(np.uint8), mode="L")
+
+
+def detect_text_boxes(
+    img: Image.Image, *, languages: str = "eng", min_conf: float = 30.0
+) -> list[TextBox]:
+    """Tesseract word boxes above ``min_conf``. Returns [] if the tesseract
+    binary is unavailable — a high-risk image with no detections is treated as
+    residual (human review) by the caller, never as clean."""
+    try:
+        import pytesseract
+
+        data = pytesseract.image_to_data(img, lang=languages, output_type=pytesseract.Output.DICT)
+    except Exception:
+        return []
+    boxes: list[TextBox] = []
+    for i in range(len(data["text"])):
+        text = (data["text"][i] or "").strip()
+        try:
+            conf = float(data["conf"][i])
+        except (TypeError, ValueError):
+            conf = -1.0
+        if text and conf >= min_conf:
+            boxes.append(
+                TextBox(
+                    int(data["left"][i]),
+                    int(data["top"][i]),
+                    int(data["width"][i]),
+                    int(data["height"][i]),
+                    text,
+                    conf,
+                )
+            )
+    return boxes
+
+
+def _looks_like_phi(text: str) -> bool:
+    t = text.strip()
+    return bool(
+        _TAX_ID_RE.search(t)
+        or _EMAIL_RE.search(t)
+        or _PHONE_RE.search(t)
+        or _DATE_ANY_RE.search(t)
+        or _MRN_RE.search(t)
+        or _NAME_RE.match(t)
+    )
+
+
+def classify_text_phi(boxes: list[TextBox]) -> list[TextBox]:
+    """Selective filter: keep only PHI-shaped detections (the default mode masks
+    every detected box)."""
+    return [b for b in boxes if _looks_like_phi(b.text)]
+
+
+def _black_value(ds: pydicom.Dataset) -> int:
+    photometric = str(getattr(ds, "PhotometricInterpretation", "") or "").upper()
+    if photometric == "MONOCHROME1":
+        bits = int(getattr(ds, "BitsStored", 8) or 8)
+        return (1 << bits) - 1  # high value renders black under MONOCHROME1
+    return 0
+
+
+def _clip(x: int, y: int, w: int, h: int, shape: tuple) -> tuple[int, int, int, int]:
+    height, width = int(shape[0]), int(shape[1])
+    x0 = max(0, min(int(x), width))
+    y0 = max(0, min(int(y), height))
+    x1 = max(0, min(int(x + w), width))
+    y1 = max(0, min(int(y + h), height))
+    return x0, y0, x1, y1
+
+
+def redact_frames(
+    frames: list[np.ndarray], boxes_per_frame: list[list[tuple[int, int, int, int]]], *, black: int
+) -> None:
+    for frame, boxes in zip(frames, boxes_per_frame, strict=True):
+        for x, y, w, h in boxes:
+            x0, y0, x1, y1 = _clip(x, y, w, h, frame.shape)
+            if x1 > x0 and y1 > y0:
+                if frame.ndim == 2:
+                    frame[y0:y1, x0:x1] = black
+                else:
+                    frame[y0:y1, x0:x1, :] = 0
+
+
+def reencode_pixel_data(ds: pydicom.Dataset, arr: np.ndarray) -> None:
+    """Write (modified) pixels back as uncompressed Explicit VR Little Endian.
+
+    A compressed source is implicitly decompressed by ``pixel_array``; we re-emit
+    uncompressed (simplest correct round-trip) and fix the transfer syntax."""
+    ds.PixelData = np.ascontiguousarray(arr).tobytes()
+    ds["PixelData"].VR = "OW" if int(getattr(ds, "BitsAllocated", 8) or 8) > 8 else "OB"
+    if getattr(ds, "file_meta", None) is not None:
+        ds.file_meta.TransferSyntaxUID = ExplicitVRLittleEndian
+
+
+def clean_pixel_data(
+    src: bytes, *, languages: str = "eng", min_conf: float = 30.0, selective: bool = False
+) -> PixelDeidResult:
+    """Redact burned-in text from a high-risk instance's pixels.
+
+    Returns the redacted bytes + the redaction boxes. ``residual_suspect`` is
+    ALWAYS True for high-risk (a human must confirm); provenance
+    (BurnedInAnnotation=NO + 113101) is written only after that accept, via
+    :func:`mark_pixels_clean`. ``none``/``low`` risk passes through untouched.
+    """
+    ds = pydicom.dcmread(io.BytesIO(src))
+    risk = classify_pixel_risk(ds)
+    if not risk.is_high:
+        return PixelDeidResult(out_bytes=src, risk=risk, residual_suspect=False)
+    try:
+        arr = np.asarray(ds.pixel_array)
+    except Exception:
+        # Undecodable pixels can't be redacted → block (no output, review).
+        return PixelDeidResult(out_bytes=src, risk=risk, residual_suspect=True, decode_failed=True)
+
+    photometric = str(getattr(ds, "PhotometricInterpretation", "") or "").upper()
+    black = _black_value(ds)
+    frames = _frames_view(arr, ds)
+    redactions: list[dict] = []
+    boxes_per_frame: list[list[tuple[int, int, int, int]]] = []
+    detected = False
+    for frame in frames:
+        boxes = detect_text_boxes(
+            _frame_to_ocr_image(frame, photometric), languages=languages, min_conf=min_conf
+        )
+        if boxes:
+            detected = True
+        keep = classify_text_phi(boxes) if selective else boxes
+        boxes_per_frame.append([(b.x, b.y, b.w, b.h) for b in keep])
+        redactions.extend(
+            {"x": b.x, "y": b.y, "w": b.w, "h": b.h, "text": b.text, "conf": b.conf} for b in keep
+        )
+    redact_frames(frames, boxes_per_frame, black=black)
+    reencode_pixel_data(ds, arr)
+    out = io.BytesIO()
+    ds.save_as(out, write_like_original=False)
+    return PixelDeidResult(
+        out_bytes=out.getvalue(),
+        risk=risk,
+        residual_suspect=True,  # high-risk always needs human confirmation
+        redactions=redactions,
+        detected_text=detected,
+    )
+
+
+# CID 7050 Clean Pixel Data Option — stamped ONLY after a human confirms the
+# redacted result, never automatically.
+_CLEAN_PIXEL_CODE = ("113101", "DCM", "Clean Pixel Data Option")
+
+
+def mark_pixels_clean(ds: pydicom.Dataset) -> None:
+    """Set BurnedInAnnotation=NO + append the Clean Pixel Data Option code. Call
+    ONLY after a human confirms the redacted image carries no residual PHI."""
+    from pydicom.dataset import Dataset as _DS
+    from pydicom.sequence import Sequence as _Seq
+
+    ds.BurnedInAnnotation = "NO"
+    existing = list(getattr(ds, "DeidentificationMethodCodeSequence", []) or [])
+    if not any(getattr(e, "CodeValue", None) == "113101" for e in existing):
+        item = _DS()
+        item.CodeValue, item.CodingSchemeDesignator, item.CodeMeaning = _CLEAN_PIXEL_CODE
+        ds.DeidentificationMethodCodeSequence = _Seq([*existing, item])
+
+
 __all__ = [
     "FACE_RISK_MODALITIES",
     "HIGH_RISK_MODALITIES",
+    "PixelDeidResult",
     "PixelRisk",
     "PixelRiskLevel",
+    "TextBox",
     "classify_pixel_risk",
     "classify_pixel_risk_bytes",
+    "classify_text_phi",
+    "clean_pixel_data",
+    "detect_text_boxes",
+    "mark_pixels_clean",
+    "redact_frames",
+    "reencode_pixel_data",
 ]

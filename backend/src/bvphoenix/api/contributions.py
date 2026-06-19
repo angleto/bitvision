@@ -35,6 +35,7 @@ from bvphoenix.db.session import get_db
 from bvphoenix.services.arq_redis import redis_settings
 from bvphoenix.services.deidentify import deidentify_dicom_bytes
 from bvphoenix.services.etag import enforce_if_match_value
+from bvphoenix.services.pixel_deid import clean_pixel_data
 from bvphoenix.services.public_contribution.profile import PROFILE_NAME, PUBLIC_CONTRIBUTION_PROFILE
 from bvphoenix.services.public_contribution.staging import create_submission
 from bvphoenix.services.review_queue import ReviewDecisionError, ReviewTransitionError
@@ -235,9 +236,10 @@ async def preview_instance(
     db: Annotated[AsyncSession, Depends(get_db)],
     user: Annotated[User, Depends(require_user)],
 ) -> Response:
-    """Stream the header-de-identified DICOM of one staged instance so the
-    reviewer can inspect it. Storage-isolated: the bucket/key never leave the
-    backend. (Pixel-redacted preview lands with the M4 redaction tier.)"""
+    """Stream the de-identified DICOM of one staged instance so the reviewer can
+    inspect it: header scrub + burned-in-pixel redaction (M4). Storage-isolated
+    (bucket/key never leave the backend). The reviewer sees what publishing would
+    expose, then accepts or rejects."""
     _require_admin(user)
     sub = await _load(db, submission_id)
     entry = next(
@@ -254,11 +256,26 @@ async def preview_instance(
     raw = await asyncio.to_thread(
         storage.get_object_bytes, bucket=entry["s3_bucket"], key=entry["s3_key"]
     )
-    scrubbed = await asyncio.to_thread(deidentify_dicom_bytes, raw)
+
+    def _deidentify_for_preview(blob: bytes) -> bytes:
+        # Header scrub first; on an SR/verify exception fall back to the raw
+        # bytes (the reviewer is an authorised admin) so the burned-in-pixel
+        # redaction can still run and show the masked image.
+        try:
+            scrubbed = deidentify_dicom_bytes(blob)
+        except Exception:
+            scrubbed = blob
+        return clean_pixel_data(scrubbed).out_bytes
+
+    served = await asyncio.to_thread(_deidentify_for_preview, raw)
     return Response(
-        content=scrubbed,
+        content=served,
         media_type="application/dicom",
-        headers={"x-deidentified": "true", "cache-control": "no-store"},
+        headers={
+            "x-deidentified": "true",
+            "x-pixel-redacted": "true",
+            "cache-control": "no-store",
+        },
     )
 
 
