@@ -51,6 +51,15 @@ DICOM_META_ALLOWLIST_V1: dict[str, dict[str, Any]] = {
     "ExposureTime": {"tag": (0x0018, 0x1150), "vr": "IS"},
     "XRayTubeCurrent": {"tag": (0x0018, 0x1151), "vr": "IS"},
     "ContrastBolusAgent": {"tag": (0x0018, 0x0010), "vr": "LO"},
+    # ContrastBolusStartTime (0018,1042): time-of-day the IV contrast
+    # injection started. Combined with AcquisitionTime it yields true
+    # seconds-post-injection, the strongest signal for classifying the
+    # contrast phase (arterial / portal-venous / delayed) of a CT series.
+    # This is acquisition timing, not patient-identifying data — same
+    # justification class as the SUV radiopharmaceutical timing tags
+    # below. Added under the quarterly allowlist review for the multiphase
+    # contrast-CT viewer (see services.contrast_phase).
+    "ContrastBolusStartTime": {"tag": (0x0018, 0x1042), "vr": "TM"},
     "SliceLocation": {"tag": (0x0020, 0x1041), "vr": "DS"},
     "ConvolutionKernel": {"tag": (0x0018, 0x1210), "vr": "SH"},
     # ---- MR specific ------------------------------------------------------
