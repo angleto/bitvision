@@ -28,3 +28,27 @@ async def enqueue_tile_jobs(redis, slide_ids: Iterable[str | uuid.UUID]) -> int:
         await redis.enqueue_job("tile_wsi", str(uuid.uuid4()), str(sid))
         count += 1
     return count
+
+
+def enqueue_tile_jobs_sync(redis_url: str, slide_ids: Iterable[str | uuid.UUID]) -> int:
+    """Sync convenience wrapper: open a short-lived arq pool, enqueue
+    ``tile_wsi`` per slide, close. For import CLIs that run outside an event
+    loop and want DZI tiling to start as slides land (the public-pathology
+    importer enqueues per slide so a multi-day bulk run does not leave the
+    viewer at 409 until the whole run finishes). Propagates redis/transport
+    errors so the caller can treat them best-effort.
+    """
+    import asyncio
+
+    from arq import create_pool
+
+    from bvphoenix.services.arq_redis import redis_settings
+
+    async def _run() -> int:
+        redis = await create_pool(redis_settings(redis_url))
+        try:
+            return await enqueue_tile_jobs(redis, slide_ids)
+        finally:
+            await redis.close()
+
+    return asyncio.run(_run())
