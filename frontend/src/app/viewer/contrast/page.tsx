@@ -520,6 +520,15 @@ function ContrastViewerInner() {
     }
   }
 
+  // Close a phase pane the radiologist doesn't need (e.g. keep 2 of 4 loaded
+  // phases). Re-pins the remaining panes as the manual selection (+ URL) so the
+  // choice survives a reload. Never closes the last pane.
+  function closePane(seriesId: string) {
+    const remaining = panes.map((p) => p.series_id).filter((id) => id !== seriesId);
+    if (remaining.length === 0) return;
+    applySelection(remaining);
+  }
+
   // Keep the active (keyboard-driven) pane in range as the pane set changes.
   useEffect(() => {
     if (activePane >= panes.length && panes.length > 0) setActivePane(0);
@@ -794,6 +803,18 @@ function ContrastViewerInner() {
       .then((r) => setWashout(r))
       .catch((err) => setWashoutErr(err instanceof ApiError ? err.message : String(err)))
       .finally(() => setWashoutBusy(false));
+  }
+
+  // Per-voxel wash-out / subtraction heat map for the current lesion ROI; the
+  // panel renders the returned PNG. Null when there is no lesion ROI yet.
+  function fetchWashoutMap(metric: "washout" | "subtraction") {
+    const lesion = lesionRoiRef.current;
+    if (!studyId || !lesion) return Promise.resolve(null);
+    return studiesApi.washoutMap(studyId, {
+      center_lps: lesion.center_lps,
+      radius_mm: lesion.radius_mm,
+      metric,
+    });
   }
 
   function handleMeasurements(ms: DrawnMeasurement[]) {
@@ -1176,7 +1197,14 @@ function ContrastViewerInner() {
                           {phase.series_description}
                         </span>
                       )}
-                      <span style={{ marginLeft: "auto" }}>
+                      <span
+                        style={{
+                          marginLeft: "auto",
+                          display: "inline-flex",
+                          alignItems: "center",
+                          gap: 4,
+                        }}
+                      >
                         <PaneWLControl
                           modality={phase.modality}
                           bodyPart={phase.body_part_examined}
@@ -1185,6 +1213,18 @@ function ContrastViewerInner() {
                           onReset={() => forPaneWL(i, (h) => h.resetWL())}
                           onInvert={() => forPaneWL(i, (h) => h.setInvert(!h.invert))}
                         />
+                        {panes.length > 1 && (
+                          <button
+                            type="button"
+                            className="ghost"
+                            title={t("closePane")}
+                            aria-label={t("closePane")}
+                            onClick={() => closePane(phase.series_id)}
+                            style={{ fontSize: "0.8rem", padding: "1px 6px", lineHeight: 1 }}
+                          >
+                            ✕
+                          </button>
+                        )}
                       </span>
                     </div>
                     <PhasePane
@@ -1242,6 +1282,7 @@ function ContrastViewerInner() {
               onRoiTargetChange={setRoiTarget}
               hasLesion={hasLesion}
               hasParenchyma={hasParenchyma}
+              onRequestMap={fetchWashoutMap}
               onSave={saveWashout}
               onClose={() => {
                 setMeasureMode(false);

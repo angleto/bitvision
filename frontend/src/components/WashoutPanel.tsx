@@ -15,8 +15,9 @@
 // when an ROI's HU std-dev is high (the ROI likely straddles a boundary /
 // fat / air rather than sitting on homogeneous tissue).
 
-import type { PhaseRoiStats, PhaseWashout } from "@/lib/api";
+import type { PhaseMap, PhaseRoiStats, PhaseWashout } from "@/lib/api";
 import { useTranslations } from "next-intl";
+import { useState } from "react";
 
 type Region = "adrenal" | "liver" | "other";
 type RoiTarget = "lesion" | "parenchyma";
@@ -25,6 +26,11 @@ type RoiTarget = "lesion" | "parenchyma";
 // clean parenchyma / lesion ROI sits around 10-20 HU; ~90 HU means the sphere
 // is spanning fat / air / vessel / a boundary and the mean is meaningless.
 const HIGH_SD_HU = 25;
+
+// Wash-out highlight colours: HU dropping phase-to-phase = wash-out (the lesion
+// clears contrast); HU rising = enhancement / persistent uptake.
+const WASHOUT_COLOR = "#34d399";
+const UPTAKE_COLOR = "#e96b1f";
 
 export interface WashoutPanelProps {
   result: PhaseRoiStats | null;
@@ -37,6 +43,7 @@ export interface WashoutPanelProps {
   onRoiTargetChange: (t: RoiTarget) => void;
   hasLesion: boolean;
   hasParenchyma: boolean;
+  onRequestMap: (metric: "washout" | "subtraction") => Promise<PhaseMap | null>;
   onSave: () => void;
   onClose: () => void;
 }
@@ -58,6 +65,7 @@ export default function WashoutPanel({
   onRoiTargetChange,
   hasLesion,
   hasParenchyma,
+  onRequestMap,
   onSave,
   onClose,
 }: WashoutPanelProps) {
@@ -165,6 +173,7 @@ export default function WashoutPanel({
       {!busy && !error && !result && <p className="meta">{t("washoutHint")}</p>}
 
       {result && <WashoutBody result={result} region={region} />}
+      {result && <WashoutMapSection onRequestMap={onRequestMap} />}
 
       {result && result.samples.length > 0 && (
         <button
@@ -181,6 +190,87 @@ export default function WashoutPanel({
   );
 }
 
+function WashoutMapSection({
+  onRequestMap,
+}: {
+  onRequestMap: (metric: "washout" | "subtraction") => Promise<PhaseMap | null>;
+}) {
+  const t = useTranslations("contrast");
+  const [map, setMap] = useState<PhaseMap | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState<string | null>(null);
+
+  const load = (metric: "washout" | "subtraction") => {
+    setBusy(true);
+    setErr(null);
+    onRequestMap(metric)
+      .then((m) => (m ? setMap(m) : setErr(t("mapNeedsRoi"))))
+      .catch((e) => setErr(e instanceof Error ? e.message : String(e)))
+      .finally(() => setBusy(false));
+  };
+
+  return (
+    <div style={{ marginTop: 8, borderTop: "1px solid #1a1f2b", paddingTop: 6 }}>
+      <div style={{ color: "#94a3b8", fontSize: "0.72rem", marginBottom: 3 }}>{t("mapTitle")}</div>
+      <div style={{ display: "flex", gap: 4 }}>
+        <button
+          type="button"
+          className="ghost"
+          disabled={busy}
+          onClick={() => load("washout")}
+          style={{ flex: 1, fontSize: "0.72rem" }}
+        >
+          {t("mapWashout")}
+        </button>
+        <button
+          type="button"
+          className="ghost"
+          disabled={busy}
+          onClick={() => load("subtraction")}
+          style={{ flex: 1, fontSize: "0.72rem" }}
+        >
+          {t("mapSubtraction")}
+        </button>
+      </div>
+      {busy && (
+        <p className="meta" style={{ fontSize: "0.7rem" }}>
+          {t("computing")}
+        </p>
+      )}
+      {err && <p style={{ color: "var(--bv-warning, #fbbf24)", fontSize: "0.7rem" }}>{err}</p>}
+      {map && (
+        <div style={{ marginTop: 4 }}>
+          <img
+            src={`data:image/png;base64,${map.png_base64}`}
+            alt={t("mapTitle")}
+            style={{
+              width: "100%",
+              imageRendering: "pixelated",
+              borderRadius: 4,
+              background: "#11151c",
+            }}
+          />
+          <div
+            style={{
+              display: "flex",
+              justifyContent: "space-between",
+              fontSize: "0.66rem",
+              color: "#94a3b8",
+              marginTop: 2,
+            }}
+          >
+            <span>
+              <span style={{ color: WASHOUT_COLOR }}>■</span> {t("legendWashout")} ·{" "}
+              <span style={{ color: UPTAKE_COLOR }}>■</span> {t("legendUptake")}
+            </span>
+            <span>±{fmt(map.vabs, 0)} HU</span>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
 function WashoutBody({ result, region }: { result: PhaseRoiStats; region: Region }) {
   const t = useTranslations("contrast");
   const w: PhaseWashout = result.washout;
@@ -194,6 +284,7 @@ function WashoutBody({ result, region }: { result: PhaseRoiStats; region: Region
   return (
     <div>
       <WashoutCurve curve={w.curve} parenchyma={region === "liver" ? w.parenchyma_curve : []} />
+      <WashoutTrendChip w={w} />
 
       <table style={{ width: "100%", borderCollapse: "collapse", margin: "6px 0" }}>
         <tbody>
@@ -247,6 +338,31 @@ function WashoutBody({ result, region }: { result: PhaseRoiStats; region: Region
       <p className="meta" style={{ fontSize: "0.68rem", marginTop: 6, opacity: 0.8 }}>
         {t("notDiagnosis")}
       </p>
+    </div>
+  );
+}
+
+function WashoutTrendChip({ w }: { w: PhaseWashout }) {
+  const t = useTranslations("contrast");
+  if (w.enhanced_hu == null || w.delayed_hu == null) return null;
+  // Drop from the enhanced peak to the delayed phase: > 0 = washes out.
+  const drop = w.enhanced_hu - w.delayed_hu;
+  const washes = drop > 0;
+  return (
+    <div
+      style={{
+        display: "inline-block",
+        margin: "0 0 4px",
+        padding: "1px 7px",
+        borderRadius: 10,
+        fontSize: "0.72rem",
+        fontWeight: 600,
+        color: "#0b0e13",
+        background: washes ? WASHOUT_COLOR : UPTAKE_COLOR,
+      }}
+    >
+      {washes ? t("trendWashout") : t("trendPersistent")} {drop > 0 ? "−" : "+"}
+      {fmt(Math.abs(drop), 0)} HU
     </div>
   );
 }
@@ -398,15 +514,41 @@ function WashoutCurve({
           strokeDasharray="3 2"
         />
       )}
-      <polyline points={line(curve)} fill="none" stroke="#e96b1f" strokeWidth={1.5} />
+      {/* Lesion curve, colour-coded per segment: HU dropping = wash-out, rising = uptake. */}
+      {curve.slice(1).map((p, idx) => {
+        const prev = curve[idx];
+        const down = p.hu_mean < prev.hu_mean;
+        return (
+          <line
+            key={`seg-${prev.acquisition_phase}-${p.acquisition_phase}`}
+            x1={x(idx)}
+            y1={y(prev.hu_mean)}
+            x2={x(idx + 1)}
+            y2={y(p.hu_mean)}
+            stroke={down ? WASHOUT_COLOR : UPTAKE_COLOR}
+            strokeWidth={1.8}
+          />
+        );
+      })}
       {curve.map((p, i) => (
         <g key={p.acquisition_phase}>
-          <circle cx={x(i)} cy={y(p.hu_mean)} r={2.5} fill="#e96b1f" />
+          <circle cx={x(i)} cy={y(p.hu_mean)} r={2.5} fill="#cbd5e1" />
           <text x={x(i)} y={H - 1} fontSize={7} fill="#94a3b8" textAnchor="middle">
             {t(`phase.${p.acquisition_phase}`).slice(0, 4)}
           </text>
         </g>
       ))}
+      {/* Legend: wash-out (down) vs uptake (up). */}
+      <g>
+        <line x1={padX} y1={7} x2={padX + 9} y2={7} stroke={WASHOUT_COLOR} strokeWidth={1.8} />
+        <text x={padX + 12} y={9} fontSize={6.5} fill="#94a3b8">
+          {t("legendWashout")}
+        </text>
+        <line x1={W / 2} y1={7} x2={W / 2 + 9} y2={7} stroke={UPTAKE_COLOR} strokeWidth={1.8} />
+        <text x={W / 2 + 12} y={9} fontSize={6.5} fill="#94a3b8">
+          {t("legendUptake")}
+        </text>
+      </g>
     </svg>
   );
 }

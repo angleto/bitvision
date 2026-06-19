@@ -717,3 +717,218 @@ async def compute_phase_roi_stats(
         skipped=skipped,
         washout=washout,
     )
+
+
+# ---- per-voxel wash-out / subtraction heat map ------------------------
+
+
+class PhaseMapIn(BaseModel):
+    center_lps: list[float] = Field(description="[x, y, z] LPS centre of the lesion region")
+    radius_mm: float = Field(description="in-plane half-extent of the cropped map, in mm")
+    # "washout" = enhanced - delayed (green where the lesion clears contrast);
+    # "subtraction" = enhanced - unenhanced (the enhancement map).
+    metric: str = Field(default="washout", description="washout | subtraction")
+    frame_of_reference_uid: str | None = None
+
+
+class PhaseMapOut(BaseModel):
+    metric: str
+    phase_a: str
+    phase_b: str
+    vabs: float  # symmetric HU colour scale
+    width: int
+    height: int
+    png_base64: str
+
+
+_ENHANCED_PHASES = ("portal_venous", "arterial", "corticomedullary")
+_DELAYED_PHASES = ("delayed", "excretory", "hepatobiliary")
+
+
+@router.post("/studies/{study_id}/washout-map", response_model=PhaseMapOut)
+async def compute_washout_map(
+    request: Request,
+    study_id: uuid.UUID,
+    body: PhaseMapIn,
+    db: Annotated[AsyncSession, Depends(get_db)],
+    user: Annotated[User | None, Depends(optional_user)],
+    audit: AuditDep,
+) -> PhaseMapOut:
+    """Per-voxel wash-out / subtraction heat map over the lesion region.
+
+    Highlights WHERE a lesion washes out: the difference between two phases
+    (enhanced-delayed for "washout", enhanced-unenhanced for "subtraction")
+    colour-mapped over the ROI's central slice (green=wash-out, red=uptake).
+    Reuses the ranged-slab read. v1 needs the two phases on a COMMON voxel
+    grid (same geometry/spacing); otherwise 422 (no resampling yet)."""
+    import base64
+
+    import numpy as np
+
+    from bvphoenix.middleware.problem_details import problem as _problem
+    from bvphoenix.services.memory import release_memory
+    from bvphoenix.services.roi_sampling import slab_byte_range, slab_k_range_sphere
+    from bvphoenix.services.volumes import MAX_VOLUME_BYTES
+    from bvphoenix.services.washout_map import diff_map_rgba, encode_png
+
+    if len(body.center_lps) != 3 or body.radius_mm <= 0:
+        raise _problem(422, "invalid_roi", "center_lps[3] and radius_mm > 0 required")
+    metric = body.metric if body.metric in ("washout", "subtraction") else "washout"
+
+    study = (
+        await db.execute(select(ImagingStudy).where(ImagingStudy.id == study_id))
+    ).scalar_one_or_none()
+    if study is None:
+        raise _problem(404, "not_found", "study not found")
+    if not await can(db, user=user, action=READ_PIXELS, study=study):
+        raise _problem(404, "not_found", "study not found")
+    enforce_agent_patient_scope(request, study.patient_id, scope="patient:images")
+
+    rows = [
+        s
+        for s in await _load_study_series_ordered(db, study.id)
+        if (s.modality or "").upper() == "CT" and s.acquisition_phase
+    ]
+    deriv_rows = (
+        (
+            await db.execute(
+                select(Derivative).where(
+                    Derivative.series_id.in_([s.id for s in rows]),
+                    Derivative.kind == DERIVATIVE_KIND,
+                    Derivative.format == DERIVATIVE_FORMAT,
+                    Derivative.stack_index == 0,
+                )
+            )
+        )
+        .scalars()
+        .all()
+        if rows
+        else []
+    )
+    deriv_by_series = {d.series_id: d for d in deriv_rows}
+    # phase -> (bucket, key, geometry) for the first series carrying that phase.
+    by_phase: dict[str, tuple[str, str, dict]] = {}
+    for s in rows:
+        ph = s.acquisition_phase
+        d = deriv_by_series.get(s.id)
+        if (
+            ph is None
+            or d is None
+            or not d.s3_bucket
+            or not d.s3_key
+            or not isinstance(d.geometry, dict)
+        ):
+            continue
+        by_phase.setdefault(ph, (d.s3_bucket, d.s3_key, d.geometry))
+    actor_subject_id = user.subject_id if user else None
+    await db.close()
+
+    def _pick(prefs: tuple[str, ...]) -> tuple[str, str, str, dict] | None:
+        for p in prefs:
+            if p in by_phase:
+                bucket, key, geom = by_phase[p]
+                return (p, bucket, key, geom)
+        return None
+
+    a = _pick(_ENHANCED_PHASES)
+    b = (
+        _pick(_DELAYED_PHASES)
+        if metric == "washout"
+        else (("unenhanced", *by_phase["unenhanced"]) if "unenhanced" in by_phase else None)
+    )
+    if a is None or b is None:
+        raise _problem(
+            422,
+            "phases_unavailable",
+            "the map needs an enhanced phase plus a "
+            + ("delayed" if metric == "washout" else "unenhanced")
+            + " phase; not both present",
+        )
+    phase_a, bucket_a, key_a, geom_a = a
+    phase_b, bucket_b, key_b, geom_b = b
+
+    storage = get_s3_storage()
+    try:
+        hdr_a = await asyncio.to_thread(
+            storage.get_object_range, bucket=bucket_a, key=key_a, start=0, length=HEADER_STRUCT.size
+        )
+        hdr_b = await asyncio.to_thread(
+            storage.get_object_range, bucket=bucket_b, key=key_b, start=0, length=HEADER_STRUCT.size
+        )
+        nxa, nya, nza, sxa, sya, sza, _va0, _va1 = HEADER_STRUCT.unpack(hdr_a)
+        nxb, nyb, nzb, sxb, syb, szb, _vb0, _vb1 = HEADER_STRUCT.unpack(hdr_b)
+    except Exception as exc:
+        raise _problem(422, "volume_unreadable", f"phase volume unreadable ({type(exc).__name__})")
+
+    nxa, nya, nza = int(nxa), int(nya), int(nza)
+    same_grid = (
+        (nxa, nya, nza) == (int(nxb), int(nyb), int(nzb))
+        and np.allclose([sxa, sya, sza], [sxb, syb, szb], atol=1e-3)
+        and geom_a.get("frame_of_reference_uid") == geom_b.get("frame_of_reference_uid")
+        and np.allclose(geom_a.get("origin") or [0, 0, 0], geom_b.get("origin") or [1, 1, 1])
+        and np.allclose(geom_a.get("direction") or [0] * 9, geom_b.get("direction") or [1] * 9)
+    )
+    if not same_grid:
+        raise _problem(
+            422,
+            "not_coregistered",
+            "wash-out map v1 needs the two phases on a common voxel grid "
+            "(same geometry); these differ — registration/resampling is a follow-up",
+        )
+
+    spacing = (float(sxa), float(sya), float(sza))
+    if nxa <= 0 or nya <= 0 or nza <= 0 or nxa * nya * nza * 4 > MAX_VOLUME_BYTES:
+        raise _problem(422, "volume_malformed", "volume malformed or too large")
+
+    ijk = world_to_ijk(
+        (body.center_lps[0], body.center_lps[1], body.center_lps[2]), geom_a, spacing
+    )
+    if ijk is None:
+        raise _problem(422, "no_geometry", "phase volume has no geometry")
+    ci, cj, ck = round(ijk[0]), round(ijk[1]), ijk[2]
+    half_i = max(2, int(np.ceil(body.radius_mm / spacing[0])))
+    half_j = max(2, int(np.ceil(body.radius_mm / spacing[1])))
+    i0, i1 = max(0, ci - half_i), min(nxa - 1, ci + half_i)
+    j0, j1 = max(0, cj - half_j), min(nya - 1, cj + half_j)
+    if i0 > i1 or j0 > j1:
+        raise _problem(422, "roi_outside", "ROI centre falls outside the volume")
+
+    k0, k1 = slab_k_range_sphere(ck, spacing[2], spacing[2], nza)  # 1-slice slab around ck
+    start, length = slab_byte_range(k0, k1, nya, nxa, HEADER_STRUCT.size)
+    try:
+        slab_a = await asyncio.to_thread(
+            storage.get_object_range, bucket=bucket_a, key=key_a, start=start, length=length
+        )
+        slab_b = await asyncio.to_thread(
+            storage.get_object_range, bucket=bucket_b, key=key_b, start=start, length=length
+        )
+        arr_a = np.frombuffer(slab_a, dtype=np.float32).reshape(k1 - k0 + 1, nya, nxa)
+        arr_b = np.frombuffer(slab_b, dtype=np.float32).reshape(k1 - k0 + 1, nya, nxa)
+    except Exception as exc:
+        raise _problem(422, "volume_unreadable", f"phase slab unreadable ({type(exc).__name__})")
+
+    kk = max(0, min(k1 - k0, round(ck) - k0))
+    crop_a = arr_a[kk, j0 : j1 + 1, i0 : i1 + 1]
+    crop_b = arr_b[kk, j0 : j1 + 1, i0 : i1 + 1]
+    rgba, vabs = diff_map_rgba(crop_a, crop_b)
+    scale = max(1, 160 // max(1, rgba.shape[1]))
+    png = encode_png(rgba, scale=scale)
+    del slab_a, slab_b, arr_a, arr_b
+    release_memory()
+
+    await audit.log(
+        action="washout_map",
+        actor_subject_id=actor_subject_id,
+        resource_kind="study",
+        resource_id=study.id,
+        metadata={"metric": metric, "phase_a": phase_a, "phase_b": phase_b},
+    )
+    return PhaseMapOut(
+        metric=metric,
+        phase_a=phase_a,
+        phase_b=phase_b,
+        vabs=round(vabs, 1),
+        width=int(crop_a.shape[1]),
+        height=int(crop_a.shape[0]),
+        png_base64=base64.b64encode(png).decode("ascii"),
+    )

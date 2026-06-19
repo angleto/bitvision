@@ -669,6 +669,7 @@ EXPECTED_TOOL_NAMES = {
     "detect_study_phases",
     "set_series_acquisition_phase",
     "compute_phase_washout",
+    "compute_washout_map",
     "create_phase_enhancement_set",
     "list_phase_enhancement_sets",
     "get_phase_enhancement_set",
