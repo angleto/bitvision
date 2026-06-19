@@ -69,7 +69,7 @@ router = APIRouter(tags=["markers"])
 class MarkerOut(BaseModel):
     id: str
     patient_id: str
-    target_kind: Literal["study", "series", "instance"]
+    target_kind: Literal["study", "series", "instance", "pathology_slide"]
     target_id: str
     kind: str
     geometry: dict | None
@@ -99,7 +99,7 @@ class MarkerRevisionOut(BaseModel):
 
 
 class MarkerCreateIn(BaseModel):
-    target_kind: Literal["study", "series", "instance"]
+    target_kind: Literal["study", "series", "instance", "pathology_slide"]
     target_id: uuid.UUID
     kind: str = Field(min_length=1, max_length=48)
     geometry: dict | None = None
@@ -286,7 +286,7 @@ async def list_markers(
     patient_id: uuid.UUID,
     db: Annotated[AsyncSession, Depends(get_db)],
     user: Annotated[User, Depends(require_user)],
-    target_kind: Literal["study", "series", "instance"] | None = Query(None),
+    target_kind: Literal["study", "series", "instance", "pathology_slide"] | None = Query(None),
     target_id: uuid.UUID | None = Query(None),
     kind: str | None = Query(None, max_length=48),
     include_deleted: bool = Query(

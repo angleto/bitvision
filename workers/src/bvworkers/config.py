@@ -53,6 +53,20 @@ class Settings(BaseSettings):
     llm_default_model: str = Field(default="claude-sonnet-4-6")
     anthropic_api_key: str = Field(default="")
 
+    # --- WSI tiling (tile_wsi task) ----------------------------------
+    # Tiling decodes the source + emits a full DZI tile tree on local
+    # disk, unlike ingest which only streams the source to S3. So the
+    # tiling cap is LOWER than the ingest cap (BVP_WSI_MAX_BYTES, 30 GiB
+    # backend-side): a 30 GiB source co-resident with its tile tree will
+    # not fit a 60 GiB node. Above this, tiling is deferred (the slide
+    # still ingests + serves thumbnail/macro).
+    wsi_tile_max_bytes: int = Field(default=10 * 1024 * 1024 * 1024)
+    # Scratch dir for source download + dzsave output. In production this
+    # points at an emptyDir with a sizeLimit so an oversize render evicts
+    # only this pod instead of tainting the node with DiskPressure. None
+    # falls back to the system temp dir (dev).
+    wsi_scratch_dir: str | None = Field(default=None)
+
     def put_extra_args(self) -> dict[str, Any]:
         if self.s3_encryption == "AES256":
             return {"ServerSideEncryption": "AES256"}

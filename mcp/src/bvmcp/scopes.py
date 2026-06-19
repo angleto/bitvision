@@ -174,6 +174,17 @@ SCOPE_CATALOG: tuple[ScopeDef, ...] = (
         "datasets your studies are in",
     ),
     ScopeDef("datasets:export", "Enqueue a training-cohort byte bundle (ZIP) export job"),
+    # --- Pathology / WSI ------------------------------------------------------
+    # Whole-slide imaging is a distinct artefact class from DICOM imaging,
+    # so it gets its own read scope: an operator can grant a pathology
+    # assistant slide access without also exposing the radiology series.
+    # Slide ANNOTATIONS (polygons / counts) reuse the shared annotations:*
+    # scopes (the Marker layer is one surface across radiology + pathology).
+    ScopeDef(
+        "pathology:read",
+        "Read pathology whole-slide images: metadata, thumbnail, macro, "
+        "and region crops (so a vision LLM can look at the tissue)",
+    ),
     # --- Imaging --------------------------------------------------------------
     ScopeDef("imaging:read", "Read DICOM series metadata, slices, thumbnails"),
     ScopeDef(
@@ -296,6 +307,12 @@ TOOL_SCOPE: dict[str, str] = {
     "get_series_slice": "imaging:read",
     "get_study_thumbnails": "imaging:read",
     "describe_series": "imaging:read",
+    # Pathology / WSI reads
+    "list_pathology_slides": "pathology:read",
+    "get_pathology_slide": "pathology:read",
+    "get_slide_thumbnail": "pathology:read",
+    "get_slide_macro": "pathology:read",
+    "get_slide_region": "pathology:read",
     "list_reports": "reports:read",
     "get_document_text": "documents:read",
     "get_document_references": "documents:read",

@@ -52,8 +52,12 @@ TOOLS = [
                 },
                 "target_kind": {
                     "type": "string",
-                    "enum": ["study", "series", "instance"],
-                    "description": "Type of the target resource.",
+                    "enum": ["study", "series", "instance", "pathology_slide"],
+                    "description": (
+                        "Type of the target resource. ``pathology_slide`` "
+                        "anchors to a whole-slide image (target_id = slide id) "
+                        "for polygon / point annotations drawn in the WSI viewer."
+                    ),
                 },
                 "target_id": {
                     "type": "string",

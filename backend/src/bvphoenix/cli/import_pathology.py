@@ -22,7 +22,7 @@ from sqlalchemy import create_engine, select
 from sqlalchemy.orm import Session
 
 from bvphoenix.config import get_settings
-from bvphoenix.db.models import Patient, Subject, User
+from bvphoenix.db.models import Patient
 from bvphoenix.services.pathology_import import (
     PathologyImportSource,
     import_pathology_slide,
@@ -34,8 +34,13 @@ from bvphoenix.services.pathology_import import (
 # auto-detect via header sniffing: the cost is real I/O, the win is
 # marginal, and a misnamed file is a user error worth surfacing.
 _WSI_SUFFIXES = {".svs", ".ndpi", ".tif", ".tiff", ".mrxs", ".scn", ".dcm"}
+# Ordinary pathology images (gross specimen photos / static micrographs).
+# Read via Pillow at ingest, tiled via pyvips so they share the viewer.
+_ORDINARY_SUFFIXES = {".jpg", ".jpeg", ".png"}
+_PATHOLOGY_SUFFIXES = _WSI_SUFFIXES | _ORDINARY_SUFFIXES
 
 _TIERS = ("t1", "t2", "t3", "t4")
+_SLIDE_CLASSES = ("wsi", "gross", "micrograph")
 
 
 def _iter_candidate_files(root: Path, *, recursive: bool) -> Iterable[Path]:
@@ -44,7 +49,7 @@ def _iter_candidate_files(root: Path, *, recursive: bool) -> Iterable[Path]:
         return
     iterator = root.rglob("*") if recursive else root.iterdir()
     for p in iterator:
-        if p.is_file() and p.suffix.lower() in _WSI_SUFFIXES:
+        if p.is_file() and p.suffix.lower() in _PATHOLOGY_SUFFIXES:
             yield p
 
 
@@ -77,6 +82,16 @@ from bvphoenix.cli._common import resolve_owner_by_email as _resolve_owner
     "--block-label", default=None, help="Block identifier on the gross specimen (e.g. 'A2')."
 )
 @click.option("--slide-label", default=None, help="Slide identifier within the block (e.g. '3').")
+@click.option(
+    "--slide-class",
+    type=click.Choice(_SLIDE_CLASSES),
+    default=None,
+    help=(
+        "Clinical image class. Default: inferred from the suffix "
+        "(WSI formats → wsi; .jpg/.jpeg/.png → micrograph). Pass 'gross' "
+        "for a macroscopic specimen photo."
+    ),
+)
 # OpenData / public-dataset attribution. Required by the DB CHECK
 # whenever --tier=t4 is requested. The CLI validates eagerly so the
 # operator sees the gap before any S3 byte is uploaded.
@@ -100,6 +115,7 @@ def main(
     stain: str | None,
     block_label: str | None,
     slide_label: str | None,
+    slide_class: str | None,
     source_collection: str | None,
     source_subject_id: str | None,
     license_spdx: str | None,
@@ -120,9 +136,9 @@ def main(
 
     candidates = list(_iter_candidate_files(input_path, recursive=recursive))
     if not candidates:
-        click.echo("no WSI files found.", err=True)
+        click.echo("no pathology image files found.", err=True)
         sys.exit(1)
-    click.echo(f"found {len(candidates)} WSI file(s) to ingest")
+    click.echo(f"found {len(candidates)} pathology image file(s) to ingest")
 
     settings = get_settings()
     storage, bucket = storage_target()
@@ -131,6 +147,7 @@ def main(
     inserted = 0
     skipped_existing = 0
     failed: list[tuple[str, str]] = []
+    created_slide_ids: list[str] = []
 
     with Session(engine) as session:
         owner = _resolve_owner(session, owner_email)
@@ -155,6 +172,7 @@ def main(
                 stain=stain,
                 block_label=block_label,
                 slide_label=slide_label,
+                slide_class=slide_class,
                 source_collection=source_collection,
                 source_subject_id=source_subject_id,
                 license_spdx=license_spdx,
@@ -172,6 +190,7 @@ def main(
                 )
                 if result.created:
                     inserted += 1
+                    created_slide_ids.append(str(result.slide_id))
                     click.echo(
                         f"  ✓ slide_id={result.slide_id} "
                         f"event_id={result.clinical_event_id} "
@@ -189,6 +208,14 @@ def main(
         if not dry_run:
             session.commit()
 
+    # Enqueue DZI tiling for the freshly-created slides so the deep-zoom
+    # viewer has its pyramid ready. After commit + outside the session,
+    # mirroring import_dicom's pack/embed enqueue. Best-effort: a redis
+    # outage must not fail an otherwise-successful ingest (the backfill
+    # CLI re-queues any slide left with dzi_ready=false).
+    if not dry_run and created_slide_ids:
+        _enqueue_tile_jobs(settings, created_slide_ids)
+
     click.echo("---")
     click.echo(f"inserted:  {inserted}")
     click.echo(f"existing:  {skipped_existing}")
@@ -197,6 +224,30 @@ def main(
         for p, e in failed:
             click.echo(f"  - {p}: {e}", err=True)
         sys.exit(2)
+
+
+def _enqueue_tile_jobs(settings, slide_ids: list[str]) -> None:
+    """Enqueue ``tile_wsi`` per freshly-created slide. Idempotent (the
+    worker self-skips on dzi_ready); a redis outage only warns."""
+    try:
+        import asyncio
+
+        from arq import create_pool
+
+        from bvphoenix.services.arq_redis import redis_settings
+        from bvphoenix.services.pathology_jobs import enqueue_tile_jobs
+
+        async def _enqueue() -> int:
+            redis = await create_pool(redis_settings(settings.redis_url))
+            try:
+                return await enqueue_tile_jobs(redis, slide_ids)
+            finally:
+                await redis.close()
+
+        n = asyncio.run(_enqueue())
+        click.echo(f"enqueued {n} DZI tiling job(s)")
+    except Exception as exc:
+        click.echo(f"warning: could not enqueue tiling jobs: {exc}", err=True)
 
 
 if __name__ == "__main__":

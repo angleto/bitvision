@@ -242,7 +242,15 @@ export interface PathologySlide {
   patient_id: string;
   stain: string | null;
   magnification: number | null;
+  /** Micrometres per pixel at the base level (null = scale unknown, e.g.
+   *  a gross photo with no calibration → the scale bar hides until the
+   *  user calibrates manually). */
+  mpp_x: number | null;
+  mpp_y: number | null;
   source_format: string;
+  /** wsi | gross | micrograph — drives whether a physical scale is
+   *  expected (gross photos typically have no mpp). */
+  slide_class: string;
   source_collection: string | null;
   license_spdx: string | null;
   license_url: string | null;
@@ -256,6 +264,12 @@ export interface PathologySlide {
    *  as a fallback before the .dzi is parsed. */
   base_width: number | null;
   base_height: number | null;
+  /** Deep-zoom pyramid state. ``dzi_ready`` gates the viewer; when false
+   *  the pyramid is still being built (poll until true). */
+  dzi_ready: boolean;
+  dzi_levels: number | null;
+  dzi_tile_size: number | null;
+  pyramid_levels: number | null;
   created_at: string;
   has_macro: boolean;
 }
@@ -270,11 +284,21 @@ export const pathologySlidesApi = {
       `/api/pathology-slides${qs(merged as Record<string, QSValue>)}`,
     );
   },
+  /** List a patient's slides for the clinical viewer's slide tray. */
+  listForPatient: (patientId: string, params: { limit?: number; offset?: number } = {}) =>
+    request<PathologySlide[]>(
+      `/api/pathology-slides${qs({ patient_id: patientId, public_only: false, ...params } as Record<string, QSValue>)}`,
+    ),
   detail: (id: string) =>
     request<PathologySlide>(`/api/pathology-slides/${encodeURIComponent(id)}`),
   /** Absolute URL of the slide thumbnail JPEG. */
   thumbnailUrl: (id: string) =>
     `${API_BASE_URL}/api/pathology-slides/${encodeURIComponent(id)}/thumbnail`,
+  /** Absolute URL of the macro overview JPEG (1x photo of the glass slide). */
+  macroUrl: (id: string) => `${API_BASE_URL}/api/pathology-slides/${encodeURIComponent(id)}/macro`,
+  /** Absolute URL of a stitched region JPEG at a DZI ``level``. */
+  regionUrl: (id: string, region: { x: number; y: number; w: number; h: number; level: number }) =>
+    `${API_BASE_URL}/api/pathology-slides/${encodeURIComponent(id)}/region${qs(region as Record<string, QSValue>)}`,
   /** Absolute URL of the Deep Zoom ``.dzi`` descriptor (XML). */
   dziUrl: (id: string) => `${API_BASE_URL}/api/pathology-slides/${encodeURIComponent(id)}/dzi`,
   /** Absolute URL of a single Deep Zoom tile. NOTE: slash-separated
@@ -316,6 +340,89 @@ export interface Series {
 
 export interface StudyDetail extends Study {
   series: Series[];
+}
+
+// Multiphase contrast-CT acquisition phase manifest (GET /studies/{id}/phases).
+export interface SeriesPhase {
+  series_id: string;
+  series_number: number | null;
+  modality: string | null;
+  series_description: string | null;
+  body_part_examined: string | null;
+  acquisition_phase: string | null;
+  phase_confidence: number | null;
+  phase_source: string | null;
+  needs_confirmation: boolean;
+  acquisition_time_of_day: string | null;
+  contrast_bolus_agent: string | null;
+  frame_of_reference_uid: string | null;
+}
+
+export interface StudyPhases {
+  study_id: string;
+  phases: SeriesPhase[];
+}
+
+// Cross-phase HU + wash-out (POST /studies/{id}/phase-roi-stats).
+export interface PhaseWashout {
+  unenhanced_phase: string | null;
+  enhanced_phase: string | null;
+  delayed_phase: string | null;
+  unenhanced_hu: number | null;
+  enhanced_hu: number | null;
+  delayed_hu: number | null;
+  absolute_enhancement_hu: number | null;
+  apw: number | null;
+  rpw: number | null;
+  apw_ge_60: boolean | null;
+  rpw_ge_40: boolean | null;
+  unenhanced_below_10hu: boolean | null;
+  curve: Array<{ acquisition_phase: string; hu_mean: number }>;
+}
+
+export interface PhaseSampleStat {
+  series_id: string;
+  acquisition_phase: string | null;
+  hu_mean: number;
+  hu_std: number;
+  voxel_count: number;
+  frame_of_reference_uid: string | null;
+}
+
+export interface PhaseRoiStats {
+  study_id: string;
+  reference_frame_of_reference_uid: string | null;
+  samples: PhaseSampleStat[];
+  skipped: Array<{ series_id: string; acquisition_phase: string | null; reason: string }>;
+  washout: PhaseWashout;
+}
+
+export interface PhaseRoiInput {
+  kind: "sphere" | "bbox";
+  center_lps?: [number, number, number];
+  radius_mm?: number;
+  min_lps?: [number, number, number];
+  max_lps?: [number, number, number];
+  frame_of_reference_uid?: string | null;
+}
+
+export interface PhaseEnhancementSet {
+  id: string;
+  study_id: string;
+  patient_id: string;
+  label: string | null;
+  roi_kind: string;
+  roi: Record<string, unknown>;
+  samples: Array<Record<string, unknown>> | null;
+  washout: PhaseWashout | null;
+  apw: number | null;
+  rpw: number | null;
+  enhanced_phase: string | null;
+  delayed_phase: string | null;
+  author_kind: string;
+  etag: string;
+  deleted_at: string | null;
+  created_at: string | null;
 }
 
 export interface DisplayMetadata {
@@ -444,6 +551,45 @@ export const studiesApi = {
     }),
   displayMetadata: (seriesId: string) =>
     request<DisplayMetadata>(`/api/series/${seriesId}/display-metadata`),
+  // --- Multiphase contrast-CT acquisition phases ---
+  /** Read-only manifest: the study's series ordered by acquisition time,
+   *  each with its classified contrast phase + confidence + source + FoR. */
+  phases: (studyId: string) => request<StudyPhases>(`/api/studies/${studyId}/phases`),
+  /** Run the classifier and persist auto labels (preserves human overrides
+   *  unless ``force``). Returns the refreshed manifest. */
+  detectPhases: (studyId: string, force = false) =>
+    request<StudyPhases>(`/api/studies/${studyId}/phases/detect${force ? "?force=true" : ""}`, {
+      method: "POST",
+    }),
+  /** Human override of one series' contrast phase (phase_source='human'),
+   *  or ``null`` to clear and re-enable auto. */
+  setSeriesPhase: (seriesId: string, acquisitionPhase: string | null, dryRun = false) =>
+    request<SeriesPhase>(`/api/series/${seriesId}/acquisition-phase`, {
+      method: "PATCH",
+      json: { acquisition_phase: acquisitionPhase, dry_run: dryRun },
+    }),
+  /** Sample one world-space (LPS) ROI across the study's phases + wash-out. */
+  phaseRoiStats: (studyId: string, roi: PhaseRoiInput) =>
+    request<PhaseRoiStats>(`/api/studies/${studyId}/phase-roi-stats`, {
+      method: "POST",
+      json: roi,
+    }),
+  /** Persist a wash-out measurement (the samples from phaseRoiStats). */
+  createPhaseEnhancementSet: (
+    studyId: string,
+    body: {
+      roi_kind: "sphere" | "bbox";
+      roi: Record<string, unknown>;
+      label?: string;
+      samples: Array<Record<string, unknown>>;
+    },
+  ) =>
+    request<PhaseEnhancementSet>(`/api/studies/${studyId}/phase-enhancement-sets`, {
+      method: "POST",
+      json: body,
+    }),
+  listPhaseEnhancementSets: (studyId: string) =>
+    request<PhaseEnhancementSet[]>(`/api/studies/${studyId}/phase-enhancement-sets`),
   /**
    * Enqueue an async Job that streams every DICOM in a study into a
    * ZIP archive on S3. Returns the Job descriptor; poll

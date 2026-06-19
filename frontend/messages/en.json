@@ -1395,7 +1395,10 @@
     "sourceFormatLabel": "Source format",
     "collectionLabel": "Source collection",
     "dimensionsLabel": "Base dimensions",
-    "viewerHint": "Scroll or pinch to zoom, drag to pan."
+    "viewerHint": "Scroll or pinch to zoom, drag to pan.",
+    "colorManaged": "Color: sRGB",
+    "colorManagedHint": "Tiles are colour-managed to sRGB server-side (scanner ICC profile applied at tiling).",
+    "uncalibrated": "Uncalibrated — no physical scale"
   },
   "studyDetail": {
     "downloadDicomZip": "Download DICOM (ZIP)",

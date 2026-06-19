@@ -46,6 +46,7 @@ from bvmcp.tools import labs as labs_tools
 from bvmcp.tools import lesion_tracks as lesion_tracks_tools
 from bvmcp.tools import metadata_writes as metadata_writes_tools
 from bvmcp.tools import notifications as notifications_tools
+from bvmcp.tools import pathology as pathology_tools
 from bvmcp.tools import patient_tasks as patient_tasks_tools
 from bvmcp.tools import patient_writes as patient_writes_tools
 from bvmcp.tools import patients as patients_tools
@@ -81,6 +82,7 @@ TOOL_MODULES = (
     folders_tools,
     labs_tools,
     imaging_tools,
+    pathology_tools,
     contrast_phases_tools,
     findings_tools,
     lesion_tracks_tools,

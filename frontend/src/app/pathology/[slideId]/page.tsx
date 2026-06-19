@@ -29,10 +29,12 @@ import { useTranslations } from "next-intl";
 import Link from "next/link";
 import { useParams } from "next/navigation";
 import type OpenSeadragonNS from "openseadragon";
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 
 import LicenseBadge from "@/components/LicenseBadge";
+import PathologyViewerChrome from "@/components/PathologyViewerChrome";
 import { ApiError, type PathologySlide, getPathologySlide, pathologySlidesApi } from "@/lib/api";
+import { baseMagnification, scaleForMagnification } from "@/lib/pathology/scaleMath";
 
 interface DziInfo {
   width: number;
@@ -90,9 +92,29 @@ export default function PathologySlideViewerPage() {
 
   const containerRef = useRef<HTMLDivElement | null>(null);
   const viewerRef = useRef<OpenSeadragonNS.Viewer | null>(null);
+  // CSS pixels per base-level image pixel at the current zoom. A ref for
+  // the imperative magnification handler, mirrored to state for the chrome.
+  const screenScaleRef = useRef(0);
 
   const [slide, setSlide] = useState<PathologySlide | null>(null);
   const [state, setState] = useState<LoadState>("loading");
+  const [screenScale, setScreenScale] = useState(0);
+
+  // Jump to a preset objective magnification. Both the viewport zoom and
+  // the on-screen scale grow linearly with zoom, so the target zoom is
+  // just the current zoom times the ratio of desired/current scale — no
+  // OSD-internal-units math, robust across versions.
+  const goToMagnification = useCallback(
+    (targetMag: number) => {
+      const v = viewerRef.current;
+      const cur = screenScaleRef.current;
+      const baseMag = baseMagnification(slide?.magnification ?? null, slide?.mpp_x ?? null);
+      if (!v || !baseMag || !(cur > 0)) return;
+      const targetScale = scaleForMagnification(targetMag, baseMag);
+      v.viewport.zoomTo(v.viewport.getZoom(false) * (targetScale / cur));
+    },
+    [slide],
+  );
 
   // Fetch metadata + DZI, then init OpenSeadragon. One effect keyed on
   // slideId so navigating between slides tears the old viewer down and
@@ -180,6 +202,28 @@ export default function PathologySlideViewerPage() {
           tileSources: tileSource,
         });
         viewerRef.current = viewer;
+
+        // Track CSS-px-per-image-px so the scale bar + magnification
+        // readout stay live as the user pans/zooms. imageToViewerElement
+        // is the documented image→element pixel projection.
+        const recomputeScale = () => {
+          const v = viewerRef.current;
+          if (!v) return;
+          try {
+            const p0 = v.viewport.imageToViewerElementCoordinates(new OpenSeadragon.Point(0, 0));
+            const p1 = v.viewport.imageToViewerElementCoordinates(new OpenSeadragon.Point(1, 0));
+            const s = Math.hypot(p1.x - p0.x, p1.y - p0.y);
+            screenScaleRef.current = s;
+            if (!cancelled) setScreenScale(s);
+          } catch {
+            /* viewport not ready yet */
+          }
+        };
+        viewer.addHandler("open", recomputeScale);
+        viewer.addHandler("animation", recomputeScale);
+        viewer.addHandler("zoom", recomputeScale);
+        viewer.addHandler("resize", recomputeScale);
+
         if (!cancelled) setState("ready");
       } catch (e) {
         if (cancelled || (e instanceof DOMException && e.name === "AbortError")) return;
@@ -257,22 +301,37 @@ export default function PathologySlideViewerPage() {
       {state === "notfound" && <p className="meta">{t("viewerNotFound")}</p>}
       {state === "error" && <p style={{ color: "var(--bv-error, #cf6e6e)" }}>{t("viewerError")}</p>}
 
-      {/* The OpenSeadragon container is always mounted (the viewer needs
-          a stable DOM node), but hidden until ``ready`` so the loading /
-          error copy reads cleanly above it. */}
+      {/* Relative wrapper so the clinical chrome (scale bar, magnification,
+          colour chip) can overlay the viewer. The OpenSeadragon container
+          is always mounted (the viewer needs a stable DOM node) but hidden
+          until ``ready``. */}
       <div
-        ref={containerRef}
-        aria-label={t("viewerTitle")}
         style={{
+          position: "relative",
           width: "100%",
-          height: "70vh",
-          minHeight: 420,
-          background: "#0c0a09",
-          borderRadius: 8,
-          overflow: "hidden",
           display: state === "ready" ? "block" : "none",
         }}
-      />
+      >
+        <div
+          ref={containerRef}
+          aria-label={t("viewerTitle")}
+          style={{
+            width: "100%",
+            height: "70vh",
+            minHeight: 420,
+            background: "#0c0a09",
+            borderRadius: 8,
+            overflow: "hidden",
+          }}
+        />
+        {state === "ready" && slide && (
+          <PathologyViewerChrome
+            slide={slide}
+            screenPxPerImagePx={screenScale}
+            onSelectMagnification={goToMagnification}
+          />
+        )}
+      </div>
       {state === "ready" && (
         <p className="meta" style={{ fontSize: "0.78rem", marginTop: "0.5rem" }}>
           {t("viewerHint")}

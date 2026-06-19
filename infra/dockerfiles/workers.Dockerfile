@@ -94,6 +94,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         libgl1 \
         libglib2.0-0 \
         procps \
+        libvips42 \
+        libopenslide0 \
         tesseract-ocr \
         tesseract-ocr-bul \
         tesseract-ocr-ces \
@@ -146,6 +148,16 @@ WORKDIR /app/workers
 # (/app/.venv) AND the bvphoenix sibling source (/app/backend/src,
 # referenced by the venv's pth) AND the workers code come along.
 COPY --from=builder --chown=bvp:bvp /app /app
+
+# WSI tiling smoke test: pyvips is an FFI wrapper that dlopen's
+# libvips.so.42 lazily, and ``Image.openslideload`` only exists when
+# libvips was built/linked against libopenslide. A missing native lib
+# must be a BUILD failure here, not a prod 500 when the first
+# ``tile_wsi`` job fires (mirrors the FlagEmbedding import smoke test
+# in the builder stage). ``openslideload`` covers SVS/NDPI/MRXS/DICOM-WSI;
+# the core JPEG/PNG/TIFF loaders (ordinary gross/micrograph images)
+# come with libvips42 unconditionally.
+RUN /app/.venv/bin/python -c "import pyvips; assert pyvips.type_find('VipsOperation', 'openslideload'), 'libvips built without openslide support — apt libopenslide0 missing'"
 
 # Drop root before runtime (matches backend.Dockerfile).
 USER 1000:1000
