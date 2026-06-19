@@ -365,6 +365,7 @@ const CornerstoneMPRLayout = forwardRef<MPRLayoutHandle, ExtendedProps>(
       stackIndex = 0,
       volumeViewerRef,
       modality,
+      suggestedVoi,
       customOpacityStops,
       customRange,
       customColorStops,
@@ -1054,6 +1055,16 @@ const CornerstoneMPRLayout = forwardRef<MPRLayoutHandle, ExtendedProps>(
             // what the PET-CT fusion case sits in front of.
             autoWC = 40;
             autoWW = 400;
+          } else if (suggestedVoi) {
+            // Tier-1 (see windowing.ts): the radiologist's own WC/WW
+            // recovered from the acquisition DICOM tags. Preferred for
+            // MR / CR / DX / MG / OT so the viewer opens on the same
+            // window the manual "DICOM" sidebar button applies, instead
+            // of silently skipping the documented top-priority tier and
+            // jumping to the histogram. (CT/PT keep their tuned
+            // modality defaults above.)
+            autoWC = suggestedVoi.wc;
+            autoWW = suggestedVoi.ww;
           } else {
             // Generic robust 1-99 percentile of nonzero voxels —
             // matches ``computeAutoWL`` legacy behaviour.
@@ -1087,6 +1098,55 @@ const CornerstoneMPRLayout = forwardRef<MPRLayoutHandle, ExtendedProps>(
         // bailed at ``getToolGroup`` returning undefined and
         // wasn't re-triggered when setup completed).
         setToolGroupReady(true);
+
+        // Authoritative initial frame. ``setVolumesForViewports`` above
+        // already fit the camera (via ``addActors({resetCamera:true})``),
+        // but at whatever canvas size existed when this async setup
+        // resolved — and the pane is frequently still settling at that
+        // point (the effect awaits Cornerstone init + GPU texture upload,
+        // which can resolve before the browser performs the first real
+        // flex/grid layout of the canvas cell, or before a sibling like
+        // the identity banner expands). CS3D's ResizeObserver path then
+        // calls ``engine.resize(true)`` with ``keepCamera`` defaulting
+        // true, which — for our orthographic viewports (no displayArea) —
+        // RESTORES that stale camera (``resetCameraForResize()`` then
+        // ``setCamera(prevCamera)``), locking the bad framing. The result
+        // was an image scrolled/zoomed out of view (a tall, left-weighted
+        // mammogram showed only its black background) until the user hit
+        // the per-pane reset by hand.
+        //
+        // Fix: once the visible pane's box has been stable for two frames
+        // (so we never fit mid-reflow), issue an explicit ``resetCamera``
+        // at the settled size. This runs once per volume mount; the setup
+        // effect does NOT re-run on layout toggles (deps below), so it
+        // never clobbers a user's zoom/pan when they switch 1×1 ↔ 2×2.
+        const visiblePanes = () => [
+          { id: vpAxial, el: showAxial ? axialDivRef.current : null },
+          { id: vpSag, el: showSagittal ? sagDivRef.current : null },
+          { id: vpCor, el: showCoronal ? corDivRef.current : null },
+        ];
+        let prevFitW = -1;
+        let prevFitH = -1;
+        let fitTries = 0;
+        const settleAndFit = () => {
+          if (cancelled) return;
+          const probe = axialDivRef.current ?? sagDivRef.current ?? corDivRef.current;
+          const w = probe?.clientWidth ?? 0;
+          const h = probe?.clientHeight ?? 0;
+          const stable = w > 0 && h > 0 && w === prevFitW && h === prevFitH;
+          // ~30 frames (≈500 ms) ceiling so a never-settling layout still
+          // gets one fit instead of spinning forever.
+          if (stable || fitTries >= 30) {
+            const eng = engineRef.current;
+            if (eng && w > 0 && h > 0) fitViewportsToCanvas(eng, visiblePanes());
+            return;
+          }
+          prevFitW = w;
+          prevFitH = h;
+          fitTries += 1;
+          requestAnimationFrame(settleAndFit);
+        };
+        requestAnimationFrame(settleAndFit);
       };
 
       // Reset readiness while the new tool group is being wired so
@@ -4025,6 +4085,50 @@ function applyVoiToAll(
     );
     vp.render();
   }
+}
+
+/**
+ * Re-fit the given panes' cameras to their CURRENT (settled) canvas size.
+ *
+ * ``setVolumesForViewports`` fits the camera once, at whatever size the
+ * canvas has when the async mount resolves — which is often before the
+ * pane has its final layout box. CS3D's ``engine.resize(keepCamera=true)``
+ * then restores that stale camera on the next reflow (``resetCameraForResize``
+ * followed by ``setCamera(prevCamera)``, since our viewports set no
+ * ``displayArea``), so the bad framing sticks. We first sync the canvas
+ * backing store to the live CSS box (``engine.resize``) and then issue an
+ * authoritative ``resetCamera`` on each pane that actually has a non-zero
+ * box — skipping hidden (``display:none``) or not-yet-laid-out panes so a
+ * collapsed pane can't park the camera on empty bounds.
+ *
+ * Returns ``true`` once at least one pane was fitted.
+ */
+function fitViewportsToCanvas(
+  engine: cs.RenderingEngine,
+  panes: Array<{ id: string; el: HTMLElement | null }>,
+): boolean {
+  try {
+    // Sync canvas backing-store dimensions to the current CSS box.
+    // ``keepCamera`` is irrelevant here — we override with an explicit
+    // ``resetCamera`` immediately after.
+    engine.resize(true);
+  } catch {
+    return false;
+  }
+  let fitted = false;
+  for (const { id, el } of panes) {
+    if (!el || el.clientWidth === 0 || el.clientHeight === 0) continue;
+    const vp = engine.getViewport(id) as cs.Types.IVolumeViewport | undefined;
+    if (!vp) continue;
+    try {
+      vp.resetCamera();
+      fitted = true;
+    } catch {
+      /* viewport torn down between frames */
+    }
+  }
+  if (fitted) engine.render();
+  return fitted;
 }
 
 function flipAll(

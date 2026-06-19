@@ -81,6 +81,13 @@ export interface MPRLayoutProps {
   ) => void;
   markerFade?: { enabled: boolean; range: number; opacity: number };
   modality?: string | null;
+  /** Tier-1 window from the acquisition DICOM (WindowCenter/Width),
+   *  pre-validated by ``suggestedFromDicom``. When present it seeds the
+   *  first-mount window for non-CT/PT modalities (MR / CR / DX / MG /
+   *  OT) instead of jumping straight to the histogram auto-window, so
+   *  the viewer opens on the radiologist's own window. ``null`` falls
+   *  back to ``robustAutoWL``. CT/PT keep their modality defaults. */
+  suggestedVoi?: { wc: number; ww: number } | null;
   /** DICOM modality of the fusion overlay. Drives the MIP viewport's
    *  active-volume picker: when the fusion is PT and the primary
    *  isn't, the MIP renders the fusion (PET-CT review convention). */
