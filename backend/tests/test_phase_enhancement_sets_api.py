@@ -77,6 +77,8 @@ async def test_phase_enhancement_set_crud(db_session, make_user, make_study) -> 
                     "roi": roi,
                     "label": "Adrenal nodule",
                     "samples": samples,
+                    # Adrenal scenario: the adenoma verdict flags are adrenal-scoped.
+                    "region": "adrenal",
                 },
             )
             assert r.status_code == 200, r.text
@@ -87,6 +89,7 @@ async def test_phase_enhancement_set_crud(db_session, make_user, make_study) -> 
             assert created["delayed_phase"] == "delayed"
             assert abs(created["apw"] - (100 * 60 / 90)) < 1e-6
             assert abs(created["rpw"] - 60.0) < 1e-6
+            assert created["washout"]["region"] == "adrenal"
             assert created["washout"]["apw_ge_60"] is True
             assert created["etag"] and created["etag"] != "dry-run"
 

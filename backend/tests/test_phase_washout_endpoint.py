@@ -59,6 +59,13 @@ class _FakeStorage:
             raise val
         return val
 
+    def get_object_range(self, *, bucket: str, key: str, start: int, length: int) -> bytes:
+        del bucket
+        val = self._by_key[key]
+        if isinstance(val, Exception):
+            raise val
+        return val[start : start + length]
+
 
 def _client_as(session: AsyncSession, user: User | None) -> AsyncClient:
     async def _db():
@@ -149,11 +156,14 @@ async def test_washout_three_phases_apw_rpw(db_session, make_user, make_study, m
                 "center_lps": [5.0, 5.0, 5.0],
                 "radius_mm": 3.0,
                 "frame_of_reference_uid": _FOR,
+                # Adrenal scenario: the adenoma verdict flags are adrenal-scoped.
+                "region": "adrenal",
             },
         )
     assert r.status_code == 200, r.text
     body = r.json()
 
+    assert body["washout"]["region"] == "adrenal"
     by_phase = {s["acquisition_phase"]: s for s in body["samples"]}
     assert set(by_phase) == {"unenhanced", "portal_venous", "delayed"}
     assert by_phase["unenhanced"]["hu_mean"] == 30.0

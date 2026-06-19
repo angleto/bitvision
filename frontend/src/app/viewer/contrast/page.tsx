@@ -22,6 +22,7 @@ import { isMat4 } from "@/lib/affine";
 import {
   ApiError,
   type Patient,
+  type PhaseRoiInput,
   type PhaseRoiStats,
   type SeriesPhase,
   type StudyDetail,
@@ -413,6 +414,26 @@ function ContrastViewerInner() {
     radius_mm: number;
     frame_of_reference_uid: string | null;
   } | null>(null);
+  // Region scoping the wash-out interpretation (adrenal | liver | other). For
+  // the liver workflow a second "parenchyma" reference ROI is sampled so the
+  // panel reports the lesion-vs-parenchyma relative wash-out (LI-RADS) instead
+  // of the adrenal APW/RPW indices.
+  const [region, setRegion] = useState<"adrenal" | "liver" | "other">("other");
+  const [roiTarget, setRoiTarget] = useState<"lesion" | "parenchyma">("lesion");
+  const [hasLesion, setHasLesion] = useState(false);
+  const [hasParenchyma, setHasParenchyma] = useState(false);
+  const lesionRoiRef = useRef<{
+    center_lps: [number, number, number];
+    radius_mm: number;
+    forUid: string | null;
+    key: string;
+  } | null>(null);
+  const parenchymaRoiRef = useRef<{
+    center_lps: [number, number, number];
+    radius_mm: number;
+    forUid: string | null;
+    key: string;
+  } | null>(null);
 
   useEffect(() => {
     if (!studyId) return;
@@ -726,10 +747,9 @@ function ContrastViewerInner() {
     setActiveReg((s) => ({ ...s, [seriesId]: null }));
   }
 
-  function handleMeasurements(ms: DrawnMeasurement[]) {
-    if (!studyId) return;
-    // Most recent circle ROI: handle[0] = centre, handle[1] = a point on the
-    // perimeter, both in world (LPS); radius = their distance (mm).
+  // Most recent circle ROI in the stream: handle[0] = centre, handle[1] = a
+  // point on the perimeter, both in world (LPS); radius = their distance (mm).
+  function roiFromMeasurements(ms: DrawnMeasurement[]) {
     const circle = [...ms]
       .reverse()
       .find(
@@ -738,30 +758,77 @@ function ContrastViewerInner() {
           (m.worldPoints?.length ?? 0) >= 2,
       );
     const pts = circle?.worldPoints;
-    if (!pts || pts.length < 2) return;
+    if (!pts || pts.length < 2) return null;
     const c = pts[0];
     const e = pts[1];
     const radius = Math.hypot(e[0] - c[0], e[1] - c[1], e[2] - c[2]);
-    if (!(radius > 0)) return;
+    if (!(radius > 0)) return null;
     const forUid = circle?.frameOfReferenceUID ?? referenceFoR ?? null;
     const key = `${c[0].toFixed(3)},${c[1].toFixed(3)},${c[2].toFixed(3)}|${radius.toFixed(3)}`;
-    if (lastRoiRef.current === key) return; // unchanged ROI; don't re-fetch
-    lastRoiRef.current = key;
-    savedRoiRef.current = { center_lps: c, radius_mm: radius, frame_of_reference_uid: forUid };
+    return { center_lps: c, radius_mm: radius, forUid, key };
+  }
+
+  // POST the lesion ROI (and, for the liver workflow, the parenchyma ROI)
+  // with the current region. Called on a new draw and whenever the region
+  // changes; the backend gates the indices/flags by region.
+  function runWashout() {
+    const lesion = lesionRoiRef.current;
+    if (!studyId || !lesion) return;
+    const input: PhaseRoiInput = {
+      kind: "sphere",
+      center_lps: lesion.center_lps,
+      radius_mm: lesion.radius_mm,
+      frame_of_reference_uid: lesion.forUid,
+      region,
+    };
+    const paren = parenchymaRoiRef.current;
+    if (region === "liver" && paren) {
+      input.parenchyma_center_lps = paren.center_lps;
+      input.parenchyma_radius_mm = paren.radius_mm;
+    }
     setWashoutBusy(true);
     setWashoutErr(null);
     setWashoutSaved(false);
     studiesApi
-      .phaseRoiStats(studyId, {
-        kind: "sphere",
-        center_lps: c,
-        radius_mm: radius,
-        frame_of_reference_uid: forUid,
-      })
+      .phaseRoiStats(studyId, input)
       .then((r) => setWashout(r))
       .catch((err) => setWashoutErr(err instanceof ApiError ? err.message : String(err)))
       .finally(() => setWashoutBusy(false));
   }
+
+  function handleMeasurements(ms: DrawnMeasurement[]) {
+    if (!studyId) return;
+    const roi = roiFromMeasurements(ms);
+    if (!roi) return;
+    // In the liver workflow the operator picks which ROI the next drawn circle
+    // fills (lesion vs reference parenchyma); otherwise every circle is the
+    // lesion. Dedup per target so the repeating measurement stream does not
+    // re-post the same draw.
+    const target = region === "liver" ? roiTarget : "lesion";
+    const dedupKey = `${target}|${roi.key}`;
+    if (lastRoiRef.current === dedupKey) return;
+    lastRoiRef.current = dedupKey;
+    if (target === "parenchyma") {
+      parenchymaRoiRef.current = roi;
+      setHasParenchyma(true);
+    } else {
+      lesionRoiRef.current = roi;
+      savedRoiRef.current = {
+        center_lps: roi.center_lps,
+        radius_mm: roi.radius_mm,
+        frame_of_reference_uid: roi.forUid,
+      };
+      setHasLesion(true);
+    }
+    runWashout();
+  }
+
+  // Re-run the wash-out when the region changes (the backend gates the
+  // indices/flags by region) so the displayed result refreshes in place.
+  // biome-ignore lint/correctness/useExhaustiveDependencies: re-run only on region change; runWashout reads current refs.
+  useEffect(() => {
+    if (lesionRoiRef.current) runWashout();
+  }, [region]);
 
   async function saveWashout() {
     const roi = savedRoiRef.current;
@@ -823,6 +890,14 @@ function ContrastViewerInner() {
           flexWrap: "wrap",
         }}
       >
+        <Link
+          href={`/studies/${studyId}`}
+          className="ghost"
+          style={{ fontSize: "0.82rem", textDecoration: "none", whiteSpace: "nowrap" }}
+          title={t("backToStudy")}
+        >
+          ← {t("backToStudy")}
+        </Link>
         <strong style={{ fontSize: "0.9rem" }}>{t("title")}</strong>
         <label
           style={{ display: "inline-flex", alignItems: "center", gap: 4, fontSize: "0.82rem" }}
@@ -1161,11 +1236,22 @@ function ContrastViewerInner() {
               busy={washoutBusy}
               error={washoutErr}
               saved={washoutSaved}
+              region={region}
+              onRegionChange={setRegion}
+              roiTarget={roiTarget}
+              onRoiTargetChange={setRoiTarget}
+              hasLesion={hasLesion}
+              hasParenchyma={hasParenchyma}
               onSave={saveWashout}
               onClose={() => {
                 setMeasureMode(false);
                 setWashout(null);
                 lastRoiRef.current = null;
+                lesionRoiRef.current = null;
+                parenchymaRoiRef.current = null;
+                setHasLesion(false);
+                setHasParenchyma(false);
+                setRoiTarget("lesion");
               }}
             />
           </div>

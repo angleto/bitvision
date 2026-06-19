@@ -372,7 +372,17 @@ export interface StudyPhases {
 }
 
 // Cross-phase HU + wash-out (POST /studies/{id}/phase-roi-stats).
+export interface PhaseRelativePoint {
+  acquisition_phase: string;
+  lesion_hu: number;
+  parenchyma_hu: number;
+  /** lesion − parenchyma; negative ⇒ lesion hypodense vs reference (liver wash-out). */
+  delta_hu: number;
+}
+
 export interface PhaseWashout {
+  /** Region scoping the interpretation: "adrenal" | "liver" | other/null. */
+  region: string | null;
   unenhanced_phase: string | null;
   enhanced_phase: string | null;
   delayed_phase: string | null;
@@ -380,12 +390,18 @@ export interface PhaseWashout {
   enhanced_hu: number | null;
   delayed_hu: number | null;
   absolute_enhancement_hu: number | null;
+  // APW/RPW are adrenal indices: present for adrenal/other, null for liver.
+  // The *_ge_* flags are adenoma verdicts: emitted for adrenal only.
   apw: number | null;
   rpw: number | null;
   apw_ge_60: boolean | null;
   rpw_ge_40: boolean | null;
   unenhanced_below_10hu: boolean | null;
   curve: Array<{ acquisition_phase: string; hu_mean: number }>;
+  // Liver workflow: reference-parenchyma HU per phase + lesion-minus-
+  // parenchyma per phase (the qualitative LI-RADS wash-out signal).
+  parenchyma_curve: Array<{ acquisition_phase: string; hu_mean: number }>;
+  relative_curve: PhaseRelativePoint[];
 }
 
 export interface PhaseSampleStat {
@@ -412,6 +428,11 @@ export interface PhaseRoiInput {
   min_lps?: [number, number, number];
   max_lps?: [number, number, number];
   frame_of_reference_uid?: string | null;
+  /** Anatomical region — scopes the wash-out interpretation. */
+  region?: "adrenal" | "liver" | "other" | null;
+  /** Optional reference-parenchyma sphere (liver workflow), sampled per phase. */
+  parenchyma_center_lps?: [number, number, number];
+  parenchyma_radius_mm?: number;
 }
 
 export interface PhaseEnhancementSet {

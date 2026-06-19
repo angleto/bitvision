@@ -36,6 +36,9 @@ async def compute_series_roi_stats(
     """
     import numpy as np
 
+    from bvphoenix.services.memory import release_memory
+    from bvphoenix.services.volumes import MAX_VOLUME_BYTES
+
     row = (
         await db.execute(
             select(Series, ImagingStudy)
@@ -101,6 +104,11 @@ async def compute_series_roi_stats(
         bucket=derivative.s3_bucket,
         key=derivative.s3_key,
     )
+    if len(cached) > MAX_VOLUME_BYTES:
+        raise HTTPException(
+            status_code=413,
+            detail="volume too large to sample on this server",
+        )
     del settings  # unused but kept for symmetry with screenshot endpoint
 
     nx, ny, nz, sx, sy, sz, _vmin, _vmax = HEADER_STRUCT.unpack_from(cached, 0)
@@ -285,6 +293,15 @@ async def compute_series_roi_stats(
                 # Non-fatal: the raw stats are still useful even when
                 # SUV scaling is unavailable. Keep the fields None.
                 pass
+
+    # Release the packed-volume buffer (100-500 MB), its numpy views, and the
+    # exclusion mask, then hand the freed pages back to the OS before
+    # responding. Otherwise the resident set climbs request-after-request
+    # (glibc arena retention) until a later unpack OOMKills the pod.
+    del arr, sub_bbox, sub, kernel_block, cached
+    if exclusion_full is not None:
+        del exclusion_full
+    release_memory()
 
     await audit.log(
         action="series_roi_stats",

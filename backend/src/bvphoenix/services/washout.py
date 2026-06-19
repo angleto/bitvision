@@ -51,6 +51,23 @@ class PhaseHu:
     time_offset_s: float | None = None
 
 
+@dataclass(frozen=True)
+class PhaseRelativeHu:
+    """Lesion HU minus reference-parenchyma HU in one phase.
+
+    For a liver lesion the clinical "wash-out" is *relative to the
+    surrounding parenchyma* (LI-RADS), not the adrenal APW/RPW formula: the
+    lesion turning hypodense versus liver in the portal/delayed phase
+    (``delta_hu`` going negative) IS the qualitative wash-out.
+    ``delta_hu = lesion_hu - parenchyma_hu``.
+    """
+
+    acquisition_phase: str
+    lesion_hu: float
+    parenchyma_hu: float
+    delta_hu: float
+
+
 @dataclass
 class WashoutResult:
     unenhanced_phase: str | None = None
@@ -65,8 +82,15 @@ class WashoutResult:
     apw_ge_60: bool | None = None
     rpw_ge_40: bool | None = None
     unenhanced_below_10hu: bool | None = None
+    # The anatomical region the operator scoped the measurement to (adrenal /
+    # liver / None=other). Drives which indices/flags are clinically valid.
+    region: str | None = None
     # HU-vs-phase time-attenuation curve, in canonical phase order.
     curve: list[PhaseHu] = field(default_factory=list)
+    # Reference-parenchyma HU per phase (liver workflow), same phase order.
+    parenchyma_curve: list[PhaseHu] = field(default_factory=list)
+    # Lesion-minus-parenchyma HU per phase (the liver wash-out signal).
+    relative_curve: list[PhaseRelativeHu] = field(default_factory=list)
 
 
 def _pick(by_phase: dict[str, PhaseHu], preference: tuple[str, ...]) -> PhaseHu | None:
@@ -76,13 +100,35 @@ def _pick(by_phase: dict[str, PhaseHu], preference: tuple[str, ...]) -> PhaseHu 
     return None
 
 
-def compute_washout(points: list[PhaseHu]) -> WashoutResult:
-    """Compute enhancement + APW/RPW from per-phase mean HU.
+def compute_washout(
+    points: list[PhaseHu],
+    *,
+    region: str | None = None,
+    parenchyma: list[PhaseHu] | None = None,
+) -> WashoutResult:
+    """Compute enhancement + wash-out from per-phase mean HU, region-aware.
 
-    ``points`` is one entry per classified phase (mean HU of the same ROI).
-    Phases not present simply restrict which indices are computable: APW
-    needs unenhanced + enhanced + delayed; RPW needs only enhanced +
-    delayed. Returns NaN-free fields (``None`` when not computable).
+    ``points`` is one entry per classified phase (mean HU of the lesion ROI).
+    APW needs unenhanced + enhanced + delayed; RPW needs enhanced + delayed.
+    Returns NaN-free fields (``None`` when not computable).
+
+    ``region`` scopes the *interpretation* (the maths is identical, the
+    clinical meaning is not):
+
+    * ``"adrenal"`` — the masses APW/RPW were validated on. The adenoma
+      threshold flags (``apw_ge_60`` / ``rpw_ge_40`` / ``unenhanced_below_10hu``)
+      are emitted.
+    * ``"liver"`` — APW/RPW do NOT apply (liver wash-out is qualitative,
+      relative to parenchyma per LI-RADS). The adrenal indices AND flags are
+      withheld; pass ``parenchyma`` (per-phase reference-ROI HU) to populate
+      the lesion-vs-parenchyma ``relative_curve`` instead.
+    * ``None`` / other — the raw APW/RPW numbers are returned as
+      adrenal-derived reference values but with NO verdict flags (they are
+      only meaningful for adrenal masses).
+
+    ``parenchyma`` is an optional second ROI sampled in the same phases (the
+    liver reference); when present, ``relative_curve`` carries the
+    lesion-minus-parenchyma HU per phase regardless of region.
     """
     by_phase: dict[str, PhaseHu] = {}
     for pt in points:
@@ -91,7 +137,7 @@ def compute_washout(points: list[PhaseHu]) -> WashoutResult:
         by_phase.setdefault(pt.acquisition_phase, pt)
 
     curve = sorted(by_phase.values(), key=lambda p: _PHASE_ORDER.get(p.acquisition_phase, 99))
-    res = WashoutResult(curve=curve)
+    res = WashoutResult(curve=curve, region=region)
 
     unenh = by_phase.get("unenhanced")
     enh = _pick(by_phase, _ENHANCED_PREFERENCE)
@@ -110,7 +156,6 @@ def compute_washout(points: list[PhaseHu]) -> WashoutResult:
     if unenh:
         res.unenhanced_phase = unenh.acquisition_phase
         res.unenhanced_hu = unenh.hu_mean
-        res.unenhanced_below_10hu = unenh.hu_mean < UNENHANCED_LIPID_RICH_HU
     if enh:
         res.enhanced_phase = enh.acquisition_phase
         res.enhanced_hu = enh.hu_mean
@@ -126,9 +171,46 @@ def compute_washout(points: list[PhaseHu]) -> WashoutResult:
             denom = e - unenh.hu_mean
             if abs(denom) > 1e-6:
                 res.apw = 100.0 * (e - d) / denom
-                res.apw_ge_60 = res.apw >= APW_ADENOMA_THRESHOLD
         if abs(e) > 1e-6:
             res.rpw = 100.0 * (e - d) / e
+
+    # Region-scoped interpretation. The APW/RPW *numbers* are arithmetic; the
+    # adenoma *verdict* flags (and the "<10 HU lipid-rich" flag) are only valid
+    # for adrenal masses, so they are emitted for adrenal only. Liver discards
+    # the adrenal indices entirely in favour of the parenchyma-relative read.
+    if region == "adrenal":
+        if res.apw is not None:
+            res.apw_ge_60 = res.apw >= APW_ADENOMA_THRESHOLD
+        if res.rpw is not None:
             res.rpw_ge_40 = res.rpw >= RPW_ADENOMA_THRESHOLD
+        if unenh is not None:
+            res.unenhanced_below_10hu = unenh.hu_mean < UNENHANCED_LIPID_RICH_HU
+    elif region == "liver":
+        res.apw = None
+        res.rpw = None
+
+    # Lesion-vs-parenchyma relative enhancement — the actual liver wash-out
+    # signal. A plain factual comparison, so computed whenever a parenchyma
+    # ROI was sampled, independent of region.
+    if parenchyma:
+        p_by_phase: dict[str, PhaseHu] = {}
+        for pt in parenchyma:
+            p_by_phase.setdefault(pt.acquisition_phase, pt)
+        res.parenchyma_curve = sorted(
+            p_by_phase.values(), key=lambda p: _PHASE_ORDER.get(p.acquisition_phase, 99)
+        )
+        rel: list[PhaseRelativeHu] = []
+        for lp in curve:
+            pp = p_by_phase.get(lp.acquisition_phase)
+            if pp is not None:
+                rel.append(
+                    PhaseRelativeHu(
+                        acquisition_phase=lp.acquisition_phase,
+                        lesion_hu=lp.hu_mean,
+                        parenchyma_hu=pp.hu_mean,
+                        delta_hu=lp.hu_mean - pp.hu_mean,
+                    )
+                )
+        res.relative_curve = rel
 
     return res

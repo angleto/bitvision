@@ -24,7 +24,14 @@ from bvphoenix.auth import enforce_agent_patient_scope
 from bvphoenix.db.models.dicom import ACQUISITION_PHASES
 from bvphoenix.services.contrast_phase import CONFIRM_THRESHOLD
 from bvphoenix.services.contrast_phase_classify import classify_and_persist_study
-from bvphoenix.services.roi_sampling import sample_bbox_hu, sample_sphere_hu, world_to_ijk
+from bvphoenix.services.roi_sampling import (
+    sample_bbox_hu,
+    sample_sphere_hu,
+    slab_byte_range,
+    slab_k_range_bbox,
+    slab_k_range_sphere,
+    world_to_ijk,
+)
 from bvphoenix.services.series_kind import is_reviewable_phase, plane_from_direction
 from bvphoenix.services.washout import PhaseHu, compute_washout
 
@@ -334,6 +341,18 @@ class PhaseRoiIn(BaseModel):
     # FrameOfReferenceUID; phases in a different frame are skipped (v1: no
     # per-phase ROI registration).
     frame_of_reference_uid: str | None = None
+    # Anatomical region the operator is measuring — scopes the wash-out
+    # interpretation. "adrenal" emits the APW/RPW adenoma flags; "liver"
+    # withholds them and uses the parenchyma-relative read; None/other returns
+    # the raw indices without verdict flags. Free-form (forward-compatible).
+    region: str | None = Field(default=None, description="adrenal | liver | other")
+    # Optional reference-parenchyma ROI (the liver wash-out workflow): a sphere
+    # in LPS sampled in every phase alongside the lesion ROI, so the panel can
+    # report lesion-minus-parenchyma HU per phase.
+    parenchyma_center_lps: list[float] | None = Field(
+        default=None, description="[x, y, z] LPS centre of the reference-parenchyma sphere"
+    )
+    parenchyma_radius_mm: float | None = None
 
 
 class PhaseSampleOut(BaseModel):
@@ -356,7 +375,16 @@ class PhaseCurvePointOut(BaseModel):
     hu_mean: float
 
 
+class PhaseRelativePointOut(BaseModel):
+    acquisition_phase: str
+    lesion_hu: float
+    parenchyma_hu: float
+    delta_hu: float  # lesion - parenchyma (negative => lesion hypodense vs ref)
+
+
 class PhaseWashoutOut(BaseModel):
+    # Region scoping the interpretation (adrenal | liver | other/None).
+    region: str | None = None
     unenhanced_phase: str | None = None
     enhanced_phase: str | None = None
     delayed_phase: str | None = None
@@ -364,12 +392,18 @@ class PhaseWashoutOut(BaseModel):
     enhanced_hu: float | None = None
     delayed_hu: float | None = None
     absolute_enhancement_hu: float | None = None
+    # APW/RPW are adrenal indices: present for adrenal/other, withheld (None)
+    # for liver. The *_ge_* flags are adenoma verdicts: adrenal-only.
     apw: float | None = None
     rpw: float | None = None
     apw_ge_60: bool | None = None
     rpw_ge_40: bool | None = None
     unenhanced_below_10hu: bool | None = None
     curve: list[PhaseCurvePointOut]
+    # Liver workflow: reference-parenchyma HU per phase + lesion-minus-
+    # parenchyma per phase (the qualitative LI-RADS wash-out signal).
+    parenchyma_curve: list[PhaseCurvePointOut] = []
+    relative_curve: list[PhaseRelativePointOut] = []
 
 
 class PhaseRoiStatsOut(BaseModel):
@@ -400,6 +434,8 @@ async def compute_phase_roi_stats(
     import numpy as np
 
     from bvphoenix.middleware.problem_details import problem as _problem
+    from bvphoenix.services.memory import release_memory
+    from bvphoenix.services.volumes import MAX_VOLUME_BYTES
 
     if body.kind == "sphere":
         if body.center_lps is None or len(body.center_lps) != 3 or body.radius_mm is None:
@@ -478,6 +514,7 @@ async def compute_phase_roi_stats(
     samples: list[PhaseSampleOut] = []
     skipped: list[PhaseSkippedOut] = []
     points: list[PhaseHu] = []
+    parenchyma_points: list[PhaseHu] = []
 
     for series_id, phase, bucket, key, geom in work:
         if bucket is None or key is None:
@@ -504,25 +541,75 @@ async def compute_phase_roi_stats(
         # phase to ``skipped`` — never 500 the whole wash-out (the symptom the
         # radiologist hit). Only one phase failing should not lose the rest.
         try:
-            cached = await asyncio.to_thread(storage.get_object_bytes, bucket=bucket, key=key)
-            nx, ny, nz, sx, sy, sz, _vmin, _vmax = HEADER_STRUCT.unpack_from(cached, 0)
-            arr = np.frombuffer(cached, dtype=np.float32, offset=HEADER_STRUCT.size).reshape(
-                int(nz), int(ny), int(nx)
+            # Read only the 32-byte header first to learn the geometry/size,
+            # then ranged-GET just the ROI's slice slab — NOT the whole 100-500
+            # MB volume. This is the dominant wash-out latency over the
+            # bandwidth-limited egress, and it also keeps the resident set tiny.
+            header = await asyncio.to_thread(
+                storage.get_object_range, bucket=bucket, key=key, start=0, length=HEADER_STRUCT.size
             )
+            nx, ny, nz, sx, sy, sz, _vmin, _vmax = HEADER_STRUCT.unpack(header)
+            nx, ny, nz = int(nx), int(ny), int(nz)
             spacing = (float(sx), float(sy), float(sz))
+            if nx <= 0 or ny <= 0 or nz <= 0 or nx * ny * nz * 4 > MAX_VOLUME_BYTES:
+                # Header-only reject (no download) of a malformed / pathological
+                # volume instead of slabbing a corrupt size.
+                raise ValueError("volume malformed or too large to sample")
+
+            # Map the lesion ROI into this phase's grid to find the slice slab.
+            ijk: tuple[float, float, float] | None = None
+            ijk_min: tuple[float, float, float] | None = None
+            ijk_max: tuple[float, float, float] | None = None
+            lesion_radius = 0.0
             if body.kind == "sphere":
                 assert body.center_lps is not None and body.radius_mm is not None
-                ijk = world_to_ijk(tuple(body.center_lps), geom, spacing)
+                lesion_radius = float(body.radius_mm)
+                ijk = world_to_ijk(
+                    (body.center_lps[0], body.center_lps[1], body.center_lps[2]), geom, spacing
+                )
                 if ijk is None:
                     raise ValueError("volume has no geometry")
-                stats = sample_sphere_hu(arr, spacing, ijk, float(body.radius_mm))
+                k0, k1 = slab_k_range_sphere(ijk[2], lesion_radius, spacing[2], nz)
             else:
                 assert body.min_lps is not None and body.max_lps is not None
-                ijk_min = world_to_ijk(tuple(body.min_lps), geom, spacing)
-                ijk_max = world_to_ijk(tuple(body.max_lps), geom, spacing)
+                ijk_min = world_to_ijk(
+                    (body.min_lps[0], body.min_lps[1], body.min_lps[2]), geom, spacing
+                )
+                ijk_max = world_to_ijk(
+                    (body.max_lps[0], body.max_lps[1], body.max_lps[2]), geom, spacing
+                )
                 if ijk_min is None or ijk_max is None:
                     raise ValueError("volume has no geometry")
-                stats = sample_bbox_hu(arr, ijk_min, ijk_max)
+                k0, k1 = slab_k_range_bbox(ijk_min[2], ijk_max[2], nz)
+
+            # Widen the slab to also cover the parenchyma ROI (liver workflow)
+            # so a single ranged read serves both spheres.
+            p_centre = body.parenchyma_center_lps
+            p_radius = body.parenchyma_radius_mm
+            p_ijk: tuple[float, float, float] | None = None
+            if phase and p_centre is not None and len(p_centre) == 3 and p_radius is not None:
+                p_ijk = world_to_ijk((p_centre[0], p_centre[1], p_centre[2]), geom, spacing)
+                if p_ijk is not None:
+                    pk0, pk1 = slab_k_range_sphere(p_ijk[2], float(p_radius), spacing[2], nz)
+                    k0, k1 = min(k0, pk0), max(k1, pk1)
+
+            start, length = slab_byte_range(k0, k1, ny, nx, HEADER_STRUCT.size)
+            slab = await asyncio.to_thread(
+                storage.get_object_range, bucket=bucket, key=key, start=start, length=length
+            )
+            arr = np.frombuffer(slab, dtype=np.float32).reshape(k1 - k0 + 1, ny, nx)
+
+            # Sample in slab-local coordinates (slice index shifted by k0).
+            if ijk is not None:
+                stats = sample_sphere_hu(arr, spacing, (ijk[0], ijk[1], ijk[2] - k0), lesion_radius)
+            elif ijk_min is not None and ijk_max is not None:
+                stats = sample_bbox_hu(
+                    arr,
+                    (ijk_min[0], ijk_min[1], ijk_min[2] - k0),
+                    (ijk_max[0], ijk_max[1], ijk_max[2] - k0),
+                )
+            else:  # unreachable: one branch above always sets a lesion ROI
+                raise ValueError("no ROI resolved")
         except ValueError as exc:
             skipped.append(
                 PhaseSkippedOut(series_id=series_id, acquisition_phase=phase, reason=str(exc))
@@ -551,8 +638,35 @@ async def compute_phase_roi_stats(
         if phase:
             points.append(PhaseHu(acquisition_phase=phase, hu_mean=stats.mean))
 
-    result = compute_washout(points)
+        # Reference-parenchyma ROI (liver workflow): sample the SAME slab at the
+        # second sphere (its slices were folded into the slab range above).
+        # Out-of-bounds in this phase simply drops the parenchyma point; it
+        # never fails the lesion measurement.
+        if p_ijk is not None and p_radius is not None:
+            try:
+                p_stats = sample_sphere_hu(
+                    arr, spacing, (p_ijk[0], p_ijk[1], p_ijk[2] - k0), float(p_radius)
+                )
+                parenchyma_points.append(PhaseHu(acquisition_phase=phase, hu_mean=p_stats.mean))
+            except ValueError:
+                pass
+
+        # Drop the slab + its view before the next iteration.
+        del slab, arr
+
+    # Hand the freed volume pages back to the OS. Without this the resident set
+    # climbs request-after-request (glibc arena retention) until a later unpack
+    # OOMKills the pod (the 502s the radiologist hit). MALLOC_ARENA_MAX bounds
+    # the pools; release_memory() (malloc_trim) returns the pages now.
+    release_memory()
+
+    result = compute_washout(
+        points,
+        region=body.region,
+        parenchyma=parenchyma_points or None,
+    )
     washout = PhaseWashoutOut(
+        region=result.region,
         unenhanced_phase=result.unenhanced_phase,
         enhanced_phase=result.enhanced_phase,
         delayed_phase=result.delayed_phase,
@@ -569,6 +683,19 @@ async def compute_phase_roi_stats(
             PhaseCurvePointOut(acquisition_phase=p.acquisition_phase, hu_mean=p.hu_mean)
             for p in result.curve
         ],
+        parenchyma_curve=[
+            PhaseCurvePointOut(acquisition_phase=p.acquisition_phase, hu_mean=p.hu_mean)
+            for p in result.parenchyma_curve
+        ],
+        relative_curve=[
+            PhaseRelativePointOut(
+                acquisition_phase=r.acquisition_phase,
+                lesion_hu=r.lesion_hu,
+                parenchyma_hu=r.parenchyma_hu,
+                delta_hu=r.delta_hu,
+            )
+            for r in result.relative_curve
+        ],
     )
 
     await audit.log(
@@ -576,7 +703,12 @@ async def compute_phase_roi_stats(
         actor_subject_id=actor_subject_id,
         resource_kind="study",
         resource_id=study_id_val,
-        metadata={"kind": body.kind, "phases_sampled": len(samples), "skipped": len(skipped)},
+        metadata={
+            "kind": body.kind,
+            "region": body.region,
+            "phases_sampled": len(samples),
+            "skipped": len(skipped),
+        },
     )
     return PhaseRoiStatsOut(
         study_id=study_id_val,
