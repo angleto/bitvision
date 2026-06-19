@@ -171,16 +171,20 @@ TOOLS: list[Tool] = [
         ),
         description=(
             "Sample ONE patient-space (LPS) ROI in every classified CT phase "
-            "of a study and compute the wash-out: the HU-vs-phase curve plus "
-            "Absolute Percentage Washout APW = 100*(E-D)/(E-U) and Relative "
-            "Percentage Washout RPW = 100*(E-D)/E (E=enhanced/portal-venous, "
-            "D=delayed, U=unenhanced). Returns the per-phase HU samples, the "
-            "computed indices, and FACTUAL threshold flags (apw_ge_60, "
-            "rpw_ge_40, unenhanced_below_10hu) — literature reference values "
-            "(Korobkin 1998; Szolar 1998), NOT a diagnosis. ROI in 'sphere' "
-            "(center_lps + radius_mm) or 'bbox' (min_lps + max_lps). Phases in "
-            "a different frame of reference are reported under 'skipped'. "
-            "Volumes must be packed (open the viewer or GET volume.raw first)."
+            "of a study and compute the wash-out, REGION-AWARE. APW = "
+            "100*(E-D)/(E-U), RPW = 100*(E-D)/E (E=enhanced/portal-venous, "
+            "D=delayed, U=unenhanced). ``region`` scopes the interpretation: "
+            "'adrenal' emits the adenoma threshold flags (apw_ge_60, "
+            "rpw_ge_40, unenhanced_below_10hu — Korobkin 1998; Szolar 1998, "
+            "NOT a diagnosis); 'liver' WITHHOLDS the adrenal indices/flags "
+            "(liver wash-out is qualitative, relative to parenchyma per "
+            "LI-RADS) and, given a parenchyma_center_lps + parenchyma_radius_mm "
+            "reference sphere, returns the lesion-vs-parenchyma relative_curve "
+            "(delta_hu<0 ⇒ lesion hypodense vs liver); omitted returns the raw "
+            "indices without verdict flags. Lesion ROI in 'sphere' (center_lps "
+            "+ radius_mm) or 'bbox' (min_lps + max_lps). Phases in a different "
+            "frame of reference are reported under 'skipped'. Volumes must be "
+            "packed (open the viewer or GET volume.raw first)."
         ),
         inputSchema={
             "type": "object",
@@ -216,6 +220,31 @@ TOOLS: list[Tool] = [
                 "frame_of_reference_uid": {
                     "type": "string",
                     "description": "Frame the ROI is defined in (default: first packed phase).",
+                },
+                "region": {
+                    "type": "string",
+                    "enum": ["adrenal", "liver", "other"],
+                    "description": (
+                        "Anatomical region — scopes the interpretation. 'adrenal' emits the "
+                        "APW/RPW adenoma flags; 'liver' withholds them (liver wash-out is "
+                        "relative-to-parenchyma per LI-RADS, qualitative) and uses the "
+                        "parenchyma ROI below; omitted/'other' returns raw indices, no flags."
+                    ),
+                },
+                "parenchyma_center_lps": {
+                    "type": "array",
+                    "items": {"type": "number"},
+                    "minItems": 3,
+                    "maxItems": 3,
+                    "description": (
+                        "[x, y, z] LPS centre of the reference-parenchyma sphere (liver "
+                        "workflow): sampled in every phase to report lesion-vs-parenchyma."
+                    ),
+                },
+                "parenchyma_radius_mm": {
+                    "type": "number",
+                    "exclusiveMinimum": 0,
+                    "description": "Radius of the reference-parenchyma sphere in mm.",
                 },
             },
             "required": ["study_id"],
@@ -261,6 +290,15 @@ TOOLS: list[Tool] = [
                         },
                         "required": ["series_id", "acquisition_phase", "hu_mean"],
                     },
+                },
+                "region": {
+                    "type": "string",
+                    "enum": ["adrenal", "liver", "other"],
+                    "description": (
+                        "Scopes the recomputed indices/flags: 'adrenal' emits the adenoma "
+                        "flags; 'liver' withholds the adrenal indices; omitted returns the raw "
+                        "numbers without verdict flags. Mirrors compute_phase_washout."
+                    ),
                 },
                 "dry_run": {"type": "boolean", "default": False},
             },
@@ -395,7 +433,16 @@ async def _set_series_acquisition_phase(args: dict[str, Any]) -> str:
 async def _compute_phase_washout(args: dict[str, Any]) -> str:
     study_id = args["study_id"]
     body: dict[str, Any] = {"kind": args.get("kind", "sphere")}
-    for k in ("center_lps", "radius_mm", "min_lps", "max_lps", "frame_of_reference_uid"):
+    for k in (
+        "center_lps",
+        "radius_mm",
+        "min_lps",
+        "max_lps",
+        "frame_of_reference_uid",
+        "region",
+        "parenchyma_center_lps",
+        "parenchyma_radius_mm",
+    ):
         if args.get(k) is not None:
             body[k] = args[k]
     try:
@@ -417,6 +464,8 @@ async def _create_phase_enhancement_set(args: dict[str, Any]) -> str:
     }
     if args.get("label") is not None:
         body["label"] = args["label"]
+    if args.get("region") is not None:
+        body["region"] = args["region"]
     if args.get("dry_run"):
         body["dry_run"] = True
     try:

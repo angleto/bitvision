@@ -67,6 +67,42 @@ def world_to_ijk(
     return (i, j, k)
 
 
+# ---- ranged-read slab helpers -----------------------------------------------
+#
+# A packed volume is ``[header][float32 z,y,x]`` and slice k is one contiguous
+# ``ny*nx*4`` block. An ROI only touches a few slices, so the wash-out endpoint
+# can ranged-GET just those slices instead of downloading the whole 100-500 MB
+# volume (the dominant wash-out latency over the bandwidth-limited egress).
+
+
+def slab_k_range_sphere(ck: float, radius_mm: float, sz: float, nz: int) -> tuple[int, int]:
+    """Inclusive slice range [k0, k1] that fully contains a sphere of
+    ``radius_mm`` centred at fractional slice ``ck`` — so a ranged read of just
+    these slices suffices to sample the ROI."""
+    if sz <= 0 or nz <= 0:
+        return (0, max(0, nz - 1))
+    half_k = max(1, int(np.ceil(radius_mm / sz)))
+    k0 = max(0, int(np.floor(ck)) - half_k)
+    k1 = min(nz - 1, int(np.ceil(ck)) + half_k)
+    return (k0, k1)
+
+
+def slab_k_range_bbox(k_a: float, k_b: float, nz: int) -> tuple[int, int]:
+    """Inclusive slice range covering a bbox spanning fractional slices."""
+    if nz <= 0:
+        return (0, 0)
+    k0 = max(0, int(np.floor(min(k_a, k_b))))
+    k1 = min(nz - 1, int(np.ceil(max(k_a, k_b))))
+    return (k0, k1)
+
+
+def slab_byte_range(k0: int, k1: int, ny: int, nx: int, header_size: int) -> tuple[int, int]:
+    """Byte ``(start, length)`` of inclusive slices ``k0..k1`` in a packed
+    Float32 volume (slice k is contiguous after the header)."""
+    per_slice = ny * nx * 4
+    return (header_size + k0 * per_slice, (k1 - k0 + 1) * per_slice)
+
+
 def sample_sphere_hu(
     arr_zyx: np.ndarray,
     spacing: tuple[float, float, float],

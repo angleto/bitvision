@@ -53,6 +53,17 @@ FROM python:3.12-slim
 # script resolves.
 ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1 PATH="/app/.venv/bin:$PATH" HF_HOME=/app/.cache/huggingface
 
+# Memory: bound glibc's per-thread malloc arenas. Unpacking a packed
+# DICOM volume allocates 100-500 MB float32 arrays per ROI/wash-out
+# request; with the default arena count (8 x nproc) glibc keeps the
+# freed chunks on per-arena free lists and the resident set climbs
+# request-after-request (measured: fresh pod ~200 MB, after viewer
+# traffic ~1.6 GB against the 2Gi limit) until the next big unpack
+# OOMKills the pod (exit 137 -> client 502s). MALLOC_ARENA_MAX=2 keeps
+# freed chunks poolable in 2 arenas; services/memory.release_memory()
+# (malloc_trim) hands the free pages back to the kernel after each op.
+ENV MALLOC_ARENA_MAX=2
+
 # Build identity baked into the image; surfaced by GET /api/version
 # and by the build-info card on /settings. Empty outside CI.
 ARG VERSION=""

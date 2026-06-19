@@ -435,7 +435,14 @@ const CornerstoneMPRLayout = forwardRef<MPRLayoutHandle, ExtendedProps>(
     // cell (e.g. the 2nd compare pane) that lays out after the rAF settle
     // loop gives up. Disconnected after the first fit / on unmount.
     const settleObserverRef = useRef<ResizeObserver | null>(null);
-    const initializedRef = useRef(false);
+    // Tracks which volumeId we have already auto-windowed. The modality
+    // auto-WL must re-apply whenever a pane's volume (re)loads or is swapped
+    // — NOT just once. A one-shot boolean here left a re-run of setup() (deps:
+    // volume / volumeId / modality) skipping the auto-WL, so the pane kept the
+    // flat full-range default window (defaultWW = range[1]-range[0]) and a CT
+    // rendered all black (e.g. the basale / tardiva phases of a contrast study
+    // whose volume or modality settled in a second setup pass).
+    const autoWindowedVolumeRef = useRef<string | null>(null);
     // ``true`` once ``setup()`` has finished registering the tool
     // group. The activeTool effect bails until then and re-runs
     // when this flips, so the very first tool selection (e.g. the
@@ -1037,12 +1044,15 @@ const CornerstoneMPRLayout = forwardRef<MPRLayoutHandle, ExtendedProps>(
           bindings: [{ mouseButton: csTools.Enums.MouseBindings.Wheel }],
         });
 
-        // Auto-WL on first mount: the sliders' default (range[0]
+        // Auto-WL on each volume (re)load: the sliders' default (range[0]
         // .. range[1]) is a flat panchromatic window that crushes
-        // contrast — a PT slab looks like a uniform grey blob, a
-        // CT looks washed out. Modality-aware compute lands on a
-        // useful window without the user having to fiddle.
-        if (!initializedRef.current) {
+        // contrast — a PT slab looks like a uniform grey blob, a CT
+        // looks washed out / all black. Modality-aware compute lands on a
+        // useful window without the user having to fiddle. Keyed on
+        // volumeId so a volume swap re-windows the new volume instead of
+        // inheriting the previous one's window — or, worse, the flat
+        // full-range default that a skipped auto-WL leaves behind.
+        if (autoWindowedVolumeRef.current !== volumeId) {
           const m = (modality || "").toUpperCase();
           let autoWC = wc;
           let autoWW = ww;
@@ -1094,7 +1104,7 @@ const CornerstoneMPRLayout = forwardRef<MPRLayoutHandle, ExtendedProps>(
           setFusionWW(r.ww);
           applyVoiToAll(engine, [vpAxial, vpSag, vpCor], r.wc, r.ww, false, fusionVolumeId);
         }
-        initializedRef.current = true;
+        autoWindowedVolumeRef.current = volumeId;
 
         engine.render();
         // Tell the activeTool effect the tool group is now wired

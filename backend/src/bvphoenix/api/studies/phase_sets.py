@@ -41,6 +41,10 @@ class PhaseEnhancementCreateIn(BaseModel):
     roi: dict = Field(description="ROI coords in LPS (center_lps+radius_mm | min_lps+max_lps)")
     label: str | None = None
     samples: list[PhaseSampleIn]
+    # Scopes the recomputed indices/flags: "adrenal" emits the adenoma verdict
+    # flags, "liver" withholds the adrenal indices, None/other returns the raw
+    # numbers without flags. Mirrors POST /phase-roi-stats.
+    region: str | None = Field(default=None, description="adrenal | liver | other")
     dry_run: bool = False
 
 
@@ -72,6 +76,7 @@ def _provenance(request: Request) -> tuple[str, uuid.UUID | None]:
 
 def _washout_to_dict(r) -> dict:  # type: ignore[no-untyped-def]
     return {
+        "region": r.region,
         "unenhanced_phase": r.unenhanced_phase,
         "enhanced_phase": r.enhanced_phase,
         "delayed_phase": r.delayed_phase,
@@ -86,6 +91,19 @@ def _washout_to_dict(r) -> dict:  # type: ignore[no-untyped-def]
         "unenhanced_below_10hu": r.unenhanced_below_10hu,
         "curve": [
             {"acquisition_phase": p.acquisition_phase, "hu_mean": p.hu_mean} for p in r.curve
+        ],
+        "parenchyma_curve": [
+            {"acquisition_phase": p.acquisition_phase, "hu_mean": p.hu_mean}
+            for p in r.parenchyma_curve
+        ],
+        "relative_curve": [
+            {
+                "acquisition_phase": x.acquisition_phase,
+                "lesion_hu": x.lesion_hu,
+                "parenchyma_hu": x.parenchyma_hu,
+                "delta_hu": x.delta_hu,
+            }
+            for x in r.relative_curve
         ],
     }
 
@@ -198,7 +216,8 @@ async def create_phase_enhancement_set(
             )
 
     result = compute_washout(
-        [PhaseHu(acquisition_phase=s.acquisition_phase, hu_mean=s.hu_mean) for s in body.samples]
+        [PhaseHu(acquisition_phase=s.acquisition_phase, hu_mean=s.hu_mean) for s in body.samples],
+        region=body.region,
     )
     author_kind, agent_token_id = _provenance(request)
     pes = PhaseEnhancementSet(

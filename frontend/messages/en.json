@@ -178,6 +178,26 @@
     "skippedPhases": "{count} phase(s) skipped (different frame)",
     "notDiagnosis": "Reference thresholds (Korobkin 1998; Szolar 1998), not a diagnosis.",
     "curveLabel": "HU per phase",
+    "backToStudy": "Back to study",
+    "regionLabel": "Region",
+    "region": {
+      "adrenal": "Adrenal",
+      "liver": "Liver",
+      "other": "Other"
+    },
+    "roiTargetLabel": "Active ROI",
+    "roiTarget": {
+      "lesion": "Lesion",
+      "parenchyma": "Parenchyma"
+    },
+    "drawParenchymaHint": "Draw a second ROI on normal liver parenchyma to measure the lesion-vs-liver wash-out.",
+    "highSdWarn": "High HU std-dev — the ROI is heterogeneous (likely on a boundary / fat / air); reposition it.",
+    "missingEnhanced": "Wash-out not computable: no enhanced (arterial / portal) phase among the sampled phases.",
+    "liverRelativeTitle": "Lesion vs liver (ΔHU)",
+    "liverNote": "Liver wash-out is qualitative, relative to parenchyma (LI-RADS): a lesion turning hypodense vs liver in the portal/delayed phase (ΔHU < 0) is wash-out. Not a diagnosis.",
+    "adrenalScopedNote": "APW/RPW are adrenal-derived indices; not validated outside adrenal masses.",
+    "colLesion": "Lesion",
+    "colLiver": "Liver",
     "chooseSeries": "Choose series",
     "pickTitle": "Choose the contrast phases",
     "pickSubtitle": "Pick the series to open as phases. Reviewable axial volumes are listed; scouts, reformats, recons and dose reports are hidden. Your choice opens exactly those series.",

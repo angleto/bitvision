@@ -46,6 +46,14 @@ DERIVATIVE_KIND_PREVIEW = "volume_f32_preview"
 DERIVATIVE_FORMAT = "raw"
 HEADER_STRUCT = struct.Struct("<3I 3f 2f")  # 32 bytes — do not grow (compat)
 
+# Safety cap for loading a packed Float32 volume into RAM for ROI / wash-out
+# sampling. Unpacking is one contiguous numpy buffer; on the 2Gi-limit
+# backend pod a buffer this large would push the resident set into OOMKill
+# territory anyway, so reject it cleanly (413 / per-phase "skipped") instead
+# of letting the kernel SIGKILL the worker. 1.75 GiB only catches truly
+# pathological volumes — a 512x512x900 float32 CT is ~0.88 GiB, well under.
+MAX_VOLUME_BYTES = 1_879_048_192  # 1.75 GiB
+
 
 # DICOM SOP class UIDs that never represent a stackable 3D volume:
 # secondary captures, presentation states, structured reports,

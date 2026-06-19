@@ -178,6 +178,26 @@
     "skippedPhases": "{count} fase/i saltate (frame diverso)",
     "notDiagnosis": "Soglie di riferimento (Korobkin 1998; Szolar 1998), non una diagnosi.",
     "curveLabel": "HU per fase",
+    "backToStudy": "Torna allo studio",
+    "regionLabel": "Regione",
+    "region": {
+      "adrenal": "Surrene",
+      "liver": "Fegato",
+      "other": "Altro"
+    },
+    "roiTargetLabel": "ROI attiva",
+    "roiTarget": {
+      "lesion": "Lesione",
+      "parenchyma": "Parenchima"
+    },
+    "drawParenchymaHint": "Disegna una seconda ROI sul parenchima epatico sano per misurare il wash-out lesione-vs-fegato.",
+    "highSdWarn": "Deviazione standard HU alta — la ROI è eterogenea (probabile bordo / grasso / aria); riposizionala.",
+    "missingEnhanced": "Wash-out non calcolabile: nessuna fase enhanced (arteriosa / portale) tra le fasi campionate.",
+    "liverRelativeTitle": "Lesione vs fegato (ΔHU)",
+    "liverNote": "Il wash-out epatico è qualitativo e relativo al parenchima (LI-RADS): una lesione che diventa ipodensa rispetto al fegato in fase portale/tardiva (ΔHU < 0) è wash-out. Non è una diagnosi.",
+    "adrenalScopedNote": "APW/RPW sono indici di derivazione surrenalica; non validati fuori dalle masse surrenaliche.",
+    "colLesion": "Lesione",
+    "colLiver": "Fegato",
     "chooseSeries": "Scegli serie",
     "pickTitle": "Scegli le fasi del contrasto",
     "pickSubtitle": "Scegli le serie da aprire come fasi. Sono elencati i volumi assiali rivedibili; scout, reformat, ricostruzioni e dose report sono nascosti. La tua scelta apre esattamente quelle serie.",
