@@ -24,7 +24,7 @@ import io
 import uuid
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
-from datetime import date, datetime
+from datetime import date, datetime, time
 
 import pydicom
 from pydicom.errors import InvalidDicomError
@@ -134,6 +134,39 @@ def _parse_dicom_date(value: str | None) -> date | None:
         return None
     try:
         return datetime.strptime(value, "%Y%m%d").date()
+    except ValueError:
+        return None
+
+
+def _parse_dicom_time(value: object) -> time | None:
+    """Parse a DICOM TM value into ``datetime.time``.
+
+    TM is ``HHMMSS.FFFFFF`` but the standard permits truncated precision
+    (``HH``, ``HHMM``, ``HHMMSS``) and an optional fractional-seconds tail;
+    some legacy vendors also emit ``HH:MM:SS``. Returns ``None`` on
+    absence or anything that does not parse to a valid wall-clock time.
+    """
+    if value is None:
+        return None
+    raw = str(value).strip()
+    if not raw:
+        return None
+    micros = 0
+    if "." in raw:
+        raw, _, frac = raw.partition(".")
+        frac = "".join(ch for ch in frac if ch.isdigit())
+        if frac:
+            micros = int((frac + "000000")[:6])
+    raw = raw.replace(":", "")
+    if not raw.isdigit() or len(raw) < 2:
+        return None
+    try:
+        hh = int(raw[0:2])
+        mm = int(raw[2:4]) if len(raw) >= 4 else 0
+        ss = int(raw[4:6]) if len(raw) >= 6 else 0
+        if hh > 23 or mm > 59 or ss > 59:
+            return None
+        return time(hh, mm, ss, micros)
     except ValueError:
         return None
 
@@ -509,6 +542,21 @@ class DicomIngestor:
                 modality=getattr(ds, "Modality", None),
                 body_part_examined=getattr(ds, "BodyPartExamined", None),
                 series_description=getattr(ds, "SeriesDescription", None),
+                # Acquisition timing for contrast-phase classification. The
+                # header is already parsed here, so persisting it is near-
+                # zero cost and makes "order a study's series by time" a pure
+                # DB query forever (study_date is DATE-only). AcquisitionTime
+                # is the canonical per-acquisition stamp; SeriesTime /
+                # ContentTime are fallbacks for vendors that omit it.
+                acquisition_time_of_day=(
+                    _parse_dicom_time(getattr(ds, "AcquisitionTime", None))
+                    or _parse_dicom_time(getattr(ds, "SeriesTime", None))
+                    or _parse_dicom_time(getattr(ds, "ContentTime", None))
+                ),
+                contrast_bolus_agent=(getattr(ds, "ContrastBolusAgent", None) or None),
+                contrast_bolus_start_time=_parse_dicom_time(
+                    getattr(ds, "ContrastBolusStartTime", None)
+                ),
                 expected_instance_count=None,
             )
             self._db.add(row)

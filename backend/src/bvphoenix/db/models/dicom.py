@@ -18,7 +18,7 @@ so cache invalidation never touches originals.
 from __future__ import annotations
 
 import uuid
-from datetime import date
+from datetime import date, time
 
 from sqlalchemy import (
     BigInteger,
@@ -27,12 +27,14 @@ from sqlalchemy import (
     Computed,
     Date,
     Enum,
+    Float,
     ForeignKey,
     Index,
     Integer,
     SmallInteger,
     String,
     Text,
+    Time,
     UniqueConstraint,
 )
 from sqlalchemy.dialects.postgresql import ARRAY, JSONB, TSVECTOR
@@ -47,6 +49,32 @@ from bvphoenix.db.models._common import (
     UpdatedAtMixin,
     uuid_pk,
 )
+
+# Contrast / acquisition phase of a CT (or dynamic-MR) series, relative to
+# IV contrast injection. A phase is a property OF a series: in multiphase
+# contrast CT each phase is acquired as its own SeriesInstanceUID, so it
+# lives on the series row, NOT on the care-timeline ``CarePhase`` (an
+# unrelated clinical concept that already owns the bare word "phase" in
+# this codebase — keep the names disjoint, hence ``acquisition_phase``).
+# NULL = not yet classified. Order matters: it is the canonical temporal
+# ordering of phases. See ``services.contrast_phase``.
+ACQUISITION_PHASES: tuple[str, ...] = (
+    "unenhanced",  # pre-contrast / basal (no IV agent yet)
+    "arterial",  # late-arterial / hepatic-arterial (~20-40s)
+    "portal_venous",  # portal-venous / hepatic-venous (~60-80s)
+    "delayed",  # delayed / equilibrium (~3-5 min+)
+    "hepatobiliary",  # hepatobiliary / HBP (Gd-EOB, ~20 min)
+    "corticomedullary",  # renal corticomedullary (~30-40s)
+    "nephrographic",  # renal nephrographic (~90-120s)
+    "excretory",  # renal excretory / urographic (~3-10 min)
+    "dynamic",  # generic dynamic / perfusion / 4D frame
+    "other",  # classified but not one of the above
+)
+
+# Who set ``acquisition_phase``: the automatic classifier (low-confidence
+# values render as a "confirm" candidate until a human approves) or a
+# human override (which pins the value and clears ``phase_confidence``).
+PHASE_SOURCES: tuple[str, ...] = ("auto", "human")
 
 
 class ImagingStudy(TimestampMixin, UpdatedAtMixin, Base):
@@ -167,6 +195,27 @@ class Series(TimestampMixin, Base):
     modality: Mapped[str | None] = mapped_column(String(16))
     body_part_examined: Mapped[str | None] = mapped_column(String(64))
     series_description: Mapped[str | None] = mapped_column(Text)
+    # ---- Acquisition timing & contrast phase ----------------------------
+    # Representative time-of-day of the series acquisition (DICOM
+    # AcquisitionTime 0008,0032, falling back to SeriesTime / ContentTime),
+    # persisted at ingest from the already-parsed header. ``study_date`` is
+    # DATE-only, so this is the only intra-study temporal ordering key for
+    # the contrast-phase classifier. NULL when the source tag is absent.
+    acquisition_time_of_day: Mapped[time | None] = mapped_column(Time)
+    # Contrast agent (0018,0010) if any was administered; NULL/empty is the
+    # unenhanced signal. ``contrast_bolus_start_time`` (0018,1042) is the
+    # injection start; AcquisitionTime - start = seconds-post-injection,
+    # the strongest phase discriminator when the vendor records it.
+    contrast_bolus_agent: Mapped[str | None] = mapped_column(Text)
+    contrast_bolus_start_time: Mapped[time | None] = mapped_column(Time)
+    # Classified contrast phase (see ACQUISITION_PHASES). Derived by
+    # ``services.contrast_phase`` from sibling-series timing + description,
+    # or set by a human (``phase_source='human'``). NULL = not classified.
+    acquisition_phase: Mapped[str | None] = mapped_column(String(24))
+    # 0..1 classifier confidence; low values render as a "confirm" badge
+    # and block auto-finalised washout. NULL for human-set or unclassified.
+    phase_confidence: Mapped[float | None] = mapped_column(Float)
+    phase_source: Mapped[str | None] = mapped_column(String(8))
     expected_instance_count: Mapped[int | None] = mapped_column(Integer)
     received_instance_count: Mapped[int] = mapped_column(
         Integer, nullable=False, server_default="0"
@@ -191,8 +240,27 @@ class Series(TimestampMixin, Base):
             "series_instance_uid",
             name="uq_series_study_uid",
         ),
+        CheckConstraint(
+            "acquisition_phase IS NULL OR acquisition_phase IN ("
+            + ",".join(f"'{p}'" for p in ACQUISITION_PHASES)
+            + ")",
+            name="ck_series_acquisition_phase",
+        ),
+        CheckConstraint(
+            "phase_source IS NULL OR phase_source IN ("
+            + ",".join(f"'{s}'" for s in PHASE_SOURCES)
+            + ")",
+            name="ck_series_phase_source",
+        ),
+        CheckConstraint(
+            "phase_confidence IS NULL OR (phase_confidence >= 0 AND phase_confidence <= 1)",
+            name="ck_series_phase_confidence_range",
+        ),
         Index("ix_series_uid", "series_instance_uid"),
         Index("ix_series_description_tsv", "series_description_tsv", postgresql_using="gin"),
+        # Phase-faceted study queries ("show me the portal-venous series")
+        # and the classifier's per-study sweep both filter on phase.
+        Index("ix_series_acquisition_phase", "acquisition_phase"),
     )
 
 

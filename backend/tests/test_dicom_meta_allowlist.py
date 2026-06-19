@@ -7,6 +7,7 @@ from pydicom.dataset import Dataset, FileDataset
 from pydicom.uid import CTImageStorage, ExplicitVRLittleEndian, generate_uid
 
 from bvphoenix.services.dicom_meta_allowlist import (
+    _PHI_TAG_NAMES,
     DICOM_META_ALLOWLIST_V1,
     extract_allowlisted,
 )
@@ -71,3 +72,20 @@ def test_allowlist_is_stable() -> None:
         "RescaleIntercept",
     }
     assert expected_subset.issubset(DICOM_META_ALLOWLIST_V1.keys())
+
+
+def test_contrast_bolus_start_time_allowlisted() -> None:
+    """ContrastBolusStartTime (0018,1042) drives contrast-phase
+    classification (seconds-post-injection). It is acquisition timing,
+    not patient-identifying data, so it must be allowlisted and surfaced
+    — and must NOT be in the PHI denylist."""
+    info = DICOM_META_ALLOWLIST_V1.get("ContrastBolusStartTime")
+    assert info is not None, "ContrastBolusStartTime must be allowlisted"
+    assert info["tag"] == (0x0018, 0x1042)
+    assert info["vr"] == "TM"
+    assert "ContrastBolusStartTime" not in _PHI_TAG_NAMES
+
+    ds = _stub_dataset()
+    ds.ContrastBolusStartTime = "081420.000"
+    out = extract_allowlisted(ds)
+    assert out["ContrastBolusStartTime"] == "081420.000"
