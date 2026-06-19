@@ -39,6 +39,22 @@ const CornerstoneMPRLayout = dynamic(() => import("@/components/CornerstoneMPRLa
 });
 
 const MAX_PANES = 6;
+// Below this instance count a CT "series" is a scout / screenshot / dose
+// report / bolus-prep — not a reviewable phase volume; hidden from the picker.
+const MIN_VOLUME_INSTANCES = 16;
+// Canonical left-to-right ordering of phases in the grid.
+const PHASE_ORDER: Record<string, number> = {
+  unenhanced: 0,
+  arterial: 1,
+  portal_venous: 2,
+  delayed: 3,
+  hepatobiliary: 4,
+  corticomedullary: 5,
+  nephrographic: 6,
+  excretory: 7,
+  dynamic: 8,
+  other: 9,
+};
 
 type AlignState = "same" | "needs" | "aligning" | "aligned" | "error";
 
@@ -151,6 +167,103 @@ function PhasePane({
   );
 }
 
+// Manual series picker: when the study has no auto-classified phases (or the
+// user wants to override which series open), let them choose the volumetric
+// series to load as phase panes — instead of blindly opening every CT series.
+function PhaseSeriesPicker({
+  series,
+  initialSelected,
+  onConfirm,
+  onCancel,
+}: {
+  series: SeriesPhase[];
+  initialSelected: string[];
+  onConfirm: (ids: string[]) => void;
+  onCancel?: () => void;
+}) {
+  const t = useTranslations("contrast");
+  const [sel, setSel] = useState<Set<string>>(() => new Set(initialSelected));
+  const toggle = (id: string) =>
+    setSel((s) => {
+      const n = new Set(s);
+      if (n.has(id)) n.delete(id);
+      else n.add(id);
+      return n;
+    });
+  const chosen = series.filter((p) => sel.has(p.series_id)).map((p) => p.series_id);
+
+  return (
+    <div
+      style={{
+        flex: "1 1 auto",
+        overflowY: "auto",
+        padding: "1rem 1.25rem",
+        color: "#e6ecf3",
+        minHeight: 0,
+      }}
+    >
+      <h2 style={{ fontSize: "0.95rem", margin: "0 0 0.25rem" }}>{t("pickTitle")}</h2>
+      <p className="meta" style={{ margin: "0 0 0.75rem", fontSize: "0.8rem" }}>
+        {t("pickSubtitle")}
+      </p>
+      {series.length === 0 ? (
+        <p className="meta">{t("noPhases")}</p>
+      ) : (
+        <ul style={{ listStyle: "none", padding: 0, margin: 0, display: "grid", gap: 4 }}>
+          {series.map((p) => (
+            <li key={p.series_id}>
+              <label
+                style={{
+                  display: "flex",
+                  alignItems: "center",
+                  gap: 8,
+                  padding: "4px 8px",
+                  background: "#11151c",
+                  border: "1px solid #1a1f2b",
+                  borderRadius: 6,
+                  cursor: "pointer",
+                }}
+              >
+                <input
+                  type="checkbox"
+                  checked={sel.has(p.series_id)}
+                  onChange={() => toggle(p.series_id)}
+                />
+                <span style={{ flex: 1, minWidth: 0 }}>
+                  {p.acquisition_phase && (
+                    <span style={{ color: "var(--bv-accent, #e96b1f)", marginRight: 6 }}>
+                      {t(`phase.${p.acquisition_phase}`)}
+                    </span>
+                  )}
+                  {p.series_description || `series ${p.series_number ?? "?"}`}
+                </span>
+                <span className="meta" style={{ fontSize: "0.72rem", whiteSpace: "nowrap" }}>
+                  {p.instance_count ?? 0} img
+                </span>
+              </label>
+            </li>
+          ))}
+        </ul>
+      )}
+      <div style={{ display: "flex", gap: 8, marginTop: 12 }}>
+        <button
+          type="button"
+          className="ghost"
+          disabled={chosen.length === 0}
+          onClick={() => onConfirm(chosen)}
+        >
+          {t("pickOpen", { count: chosen.length })}
+        </button>
+        {onCancel && (
+          <button type="button" className="ghost" onClick={onCancel}>
+            {t("close")}
+          </button>
+        )}
+      </div>
+    </div>
+  );
+}
+
 export default function ContrastViewerPage() {
   return (
     <Suspense
@@ -180,6 +293,10 @@ function ContrastViewerInner() {
   const [aligning, setAligning] = useState<Record<string, boolean>>({});
   const [alignError, setAlignError] = useState<Record<string, boolean>>({});
   const [alignedSet, setAlignedSet] = useState<Record<string, boolean>>({});
+  // Which series to open as panes: null = the auto-classified phases; a list
+  // = an explicit manual selection from the picker.
+  const [manualIds, setManualIds] = useState<string[] | null>(null);
+  const [showPicker, setShowPicker] = useState(false);
   // Wash-out measurement state.
   const [measureMode, setMeasureMode] = useState(false);
   const [washout, setWashout] = useState<PhaseRoiStats | null>(null);
@@ -230,14 +347,53 @@ function ContrastViewerInner() {
     };
   }, [studyId]);
 
-  // The phase panes: CT series only (the multiphase acquisitions), capped.
-  const panes = useMemo(
-    () => phases.filter((p) => (p.modality || "").toUpperCase() === "CT").slice(0, MAX_PANES),
-    [phases],
-  );
-  const truncated =
-    phases.filter((p) => (p.modality || "").toUpperCase() === "CT").length > MAX_PANES;
+  // The classifier-labelled phase series (one per phase, clinical order) are
+  // the default panes. Scouts / recon kernels / MPR reformats / dose reports
+  // never get a phase label, so they fall away on their own — no blind slice
+  // of every CT series.
+  const classified = useMemo(() => {
+    const byPhase = new Map<string, SeriesPhase>();
+    for (const p of phases) {
+      if (p.acquisition_phase && !byPhase.has(p.acquisition_phase)) {
+        byPhase.set(p.acquisition_phase, p);
+      }
+    }
+    return [...byPhase.values()].sort(
+      (a, b) =>
+        (PHASE_ORDER[a.acquisition_phase ?? "other"] ?? 9) -
+        (PHASE_ORDER[b.acquisition_phase ?? "other"] ?? 9),
+    );
+  }, [phases]);
+
+  // Volumetric CT series the user can pick from manually (drop the scout /
+  // screenshot / dose / bolus-prep clutter); fall back to all CT if the
+  // instance-count signal leaves nothing.
+  const selectable = useMemo(() => {
+    const ct = phases.filter((p) => (p.modality || "").toUpperCase() === "CT");
+    const volumetric = ct.filter((p) => (p.instance_count ?? 0) >= MIN_VOLUME_INSTANCES);
+    return volumetric.length > 0 ? volumetric : ct;
+  }, [phases]);
+
+  // Panes = the manual pick if any, else the classified phases. Never every CT.
+  const panes = useMemo(() => {
+    const base =
+      manualIds != null
+        ? manualIds
+            .map((id) => phases.find((p) => p.series_id === id))
+            .filter((p): p is SeriesPhase => p != null)
+        : classified;
+    return base.slice(0, MAX_PANES);
+  }, [manualIds, classified, phases]);
+  const truncated = (manualIds?.length ?? classified.length) > MAX_PANES;
   const referenceFoR = panes[0]?.frame_of_reference_uid ?? null;
+
+  // Nothing to show and no manual pick yet -> open the picker so the user
+  // chooses the phase series rather than facing an empty viewer.
+  useEffect(() => {
+    if (phases.length > 0 && classified.length === 0 && manualIds == null) {
+      setShowPicker(true);
+    }
+  }, [phases.length, classified.length, manualIds]);
 
   // Assign each pane's sync transform from its FrameOfReferenceUID: same FoR
   // as the reference pane => identity (null, syncable). Different FoR are
@@ -453,6 +609,15 @@ function ContrastViewerInner() {
         >
           {t("measureWashout")}
         </button>
+        <button
+          type="button"
+          className={showPicker ? "viewer-btn viewer-btn--active" : "ghost"}
+          aria-pressed={showPicker}
+          onClick={() => setShowPicker((v) => !v)}
+          title={t("pickSubtitle")}
+        >
+          {t("chooseSeries")}
+        </button>
         {loadErr && <span style={{ color: "var(--bv-danger, #f87171)" }}>{loadErr}</span>}
         {truncated && (
           <span className="meta" style={{ fontSize: "0.76rem" }}>
@@ -462,7 +627,17 @@ function ContrastViewerInner() {
       </div>
 
       <div style={{ flex: "1 1 auto", display: "flex", minHeight: 0 }}>
-        {panes.length === 0 ? (
+        {showPicker ? (
+          <PhaseSeriesPicker
+            series={selectable}
+            initialSelected={manualIds ?? classified.map((p) => p.series_id)}
+            onConfirm={(ids) => {
+              setManualIds(ids);
+              setShowPicker(false);
+            }}
+            onCancel={panes.length > 0 ? () => setShowPicker(false) : undefined}
+          />
+        ) : panes.length === 0 ? (
           <div style={{ color: "#6b7280", padding: "1.5rem" }}>{t("noPhases")}</div>
         ) : (
           <div
