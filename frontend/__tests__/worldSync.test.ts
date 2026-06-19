@@ -3,7 +3,7 @@
 import { describe, expect, test } from "vitest";
 
 import type { Mat4, Vec3 } from "@/lib/affine";
-import { mapWorldAcrossPanes } from "@/lib/worldSync";
+import { mapWorldAcrossPanes, shouldSkipSync } from "@/lib/worldSync";
 
 // Pure translation matrix (reference-world -> pane-world): +[10,20,30].
 const TRANSLATE: Mat4 = [
@@ -37,5 +37,25 @@ describe("mapWorldAcrossPanes", () => {
     expect(out[0]).toBeCloseTo(3);
     expect(out[1]).toBeCloseTo(4);
     expect(out[2]).toBeCloseTo(5);
+  });
+});
+
+describe("shouldSkipSync (no-op / echo guard)", () => {
+  test("skips when the target already sits at the point (exact)", () => {
+    expect(shouldSkipSync([10, 20, 30], [10, 20, 30])).toBe(true);
+  });
+
+  test("skips a sub-epsilon jitter (camera round-trip noise)", () => {
+    expect(shouldSkipSync([10, 20, 30], [10.0001, 19.9999, 30.0001])).toBe(true);
+  });
+
+  test("does NOT skip a genuine single-slice move", () => {
+    // A real slice step is at least one spacing apart (>> 0.01mm).
+    expect(shouldSkipSync([10, 20, 30], [10, 20, 31])).toBe(false);
+  });
+
+  test("never skips when the target has no current world (not packed)", () => {
+    expect(shouldSkipSync(null, [10, 20, 30])).toBe(false);
+    expect(shouldSkipSync(undefined, [10, 20, 30])).toBe(false);
   });
 });

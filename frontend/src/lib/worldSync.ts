@@ -39,3 +39,20 @@ export function mapWorldAcrossPanes(
   }
   return transformJ ? applyAffine(transformJ, wRef) : wRef;
 }
+
+/**
+ * True when ``next`` is essentially the same world point ``current`` already
+ * sits at — within ``eps`` mm on every axis. Used to skip a redundant
+ * ``setCrosshairWorld`` push that would re-issue a camera write (and its
+ * CAMERA_MODIFIED echo) for no visible change. ``eps`` is deliberately tiny:
+ * a genuine single-slice move is at least one slice-spacing apart, far larger
+ * than this, so only true no-ops / echoes are skipped.
+ */
+export function shouldSkipSync(current: Vec3 | null | undefined, next: Vec3, eps = 0.01): boolean {
+  if (!current) return false;
+  return (
+    Math.abs(current[0] - next[0]) < eps &&
+    Math.abs(current[1] - next[1]) < eps &&
+    Math.abs(current[2] - next[2]) < eps
+  );
+}

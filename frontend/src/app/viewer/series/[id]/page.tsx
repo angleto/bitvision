@@ -33,6 +33,8 @@ import type {
   VolumeData,
   VolumeViewerHandle,
 } from "@/components/VolumeViewer";
+import ViewerToolPalette from "@/components/viewer/ViewerToolPalette";
+import type { Tool } from "@/components/viewer/toolTypes";
 import {
   ApiError,
   type AppSetting,
@@ -197,23 +199,8 @@ function parseMeasurementValue(value: string): { value: number; unit: string } |
   return { value: num, unit: (m[2] ?? "").trim() };
 }
 
-type Tool =
-  | "wl"
-  | "pan"
-  | "measure-dist"
-  | "measure-angle"
-  | "measure-area"
-  | "measure-ellipse"
-  | "measure-rect"
-  | "measure-sphere"
-  | "measure-bidirectional"
-  | "measure-freehand"
-  | "measure-arrow"
-  | "measure-text"
-  | "measure-probe"
-  | "measure-lens"
-  | "bbox"
-  | "text";
+// ``Tool`` now lives in @/components/viewer/toolTypes (shared with the
+// multiphase contrast grid). Imported above.
 
 function toolIcon(tool: string): string {
   switch (tool) {
@@ -3522,13 +3509,10 @@ export default function SeriesViewerPage() {
                           defaultOpen={true}
                           hint={`${displayMeta.sub_stacks.length} co-located volumes`}
                         >
-                          <p
-                            className="meta"
-                            style={{ marginTop: "-0.2rem", fontSize: "0.7rem" }}
-                          >
-                            This series packs several co-located volumes (mDIXON /
-                            multi-echo / diffusion) under one acquisition. Pick which
-                            one to view — each reconstructs independently.
+                          <p className="meta" style={{ marginTop: "-0.2rem", fontSize: "0.7rem" }}>
+                            This series packs several co-located volumes (mDIXON / multi-echo /
+                            diffusion) under one acquisition. Pick which one to view — each
+                            reconstructs independently.
                           </p>
                           <div
                             style={{
@@ -3550,9 +3534,7 @@ export default function SeriesViewerPage() {
                                 style={{ fontSize: "0.7rem", padding: "0.15rem 0.5rem" }}
                                 onClick={() => selectStack(s.stack_index)}
                                 title={`${s.label} · ${s.instance_count} slices`}
-                                disabled={
-                                  volumeLoading && selectedStackIndex === s.stack_index
-                                }
+                                disabled={volumeLoading && selectedStackIndex === s.stack_index}
                               >
                                 {s.label}
                               </button>
@@ -3741,80 +3723,17 @@ export default function SeriesViewerPage() {
                         defaultOpen={true}
                         hint="Mouse bindings · measurement tools"
                       >
-                        <div style={{ display: "flex", gap: "0.3rem", flexWrap: "wrap" }}>
-                          {(
-                            [
-                              ["wl", tv("toolWl")],
-                              ["pan", tv("toolPan")],
-                              ["measure-dist", tv("toolDistance")],
-                              ["measure-bidirectional", tv("toolBidirectional")],
-                              ["measure-angle", tv("toolAngle")],
-                              ["measure-area", tv("toolArea")],
-                              ["measure-ellipse", tv("toolEllipse")],
-                              ["measure-rect", tv("toolRect")],
-                              ["measure-sphere", tv("toolSphere")],
-                              ["measure-freehand", tv("toolFreehand")],
-                              ["measure-arrow", tv("toolArrow")],
-                              ["measure-text", tv("toolText")],
-                              ["measure-probe", tv("toolProbe")],
-                              ["measure-lens", tv("toolLens")],
-                            ] as [Tool, string][]
-                          ).map(([t, label]) => (
-                            <button
-                              key={t}
-                              type="button"
-                              style={{ fontSize: "0.7rem", padding: "0.2rem 0.45rem" }}
-                              className={
-                                activeTool === t ? "viewer-btn viewer-btn--active" : "viewer-btn"
-                              }
-                              // Click on the active button = deselect
-                              // (back to the default crosshair-only mode).
-                              onClick={() =>
-                                setActiveTool((cur) => (cur === t ? null : (t as Tool)))
-                              }
-                            >
-                              {label}
-                            </button>
-                          ))}
-                          <button
-                            type="button"
-                            className="viewer-btn"
-                            style={{ fontSize: "0.7rem", padding: "0.2rem 0.45rem", color: "#f66" }}
-                            onClick={() => {
-                              // Drop the SVG overlays first so the next
-                              // ANNOTATION_REMOVED → onMeasurementsChange
-                              // pass doesn't immediately replay them back
-                              // into React state.
-                              mprRef.current?.clearAnnotations();
-                              setAllMeasurements([]);
-                            }}
-                            title={tv("clearAllTitle")}
-                          >
-                            {tv("clearAll")}
-                          </button>
-                        </div>
-                        <p className="meta" style={{ marginTop: "0.3rem", fontSize: "0.65rem" }}>
-                          {(() => {
-                            const hints: Record<string, string> = {
-                              none: tv("hintNone"),
-                              wl: tv("hintWl"),
-                              pan: tv("hintPan"),
-                              "measure-dist": tv("hintDist"),
-                              "measure-bidirectional": tv("hintBidirectional"),
-                              "measure-angle": tv("hintAngle"),
-                              "measure-area": tv("hintArea"),
-                              "measure-ellipse": tv("hintEllipse"),
-                              "measure-rect": tv("hintRect"),
-                              "measure-sphere": tv("hintSphere"),
-                              "measure-freehand": tv("hintFreehand"),
-                              "measure-arrow": tv("hintArrow"),
-                              "measure-text": tv("hintText"),
-                              "measure-probe": tv("hintProbe"),
-                              "measure-lens": tv("hintLens"),
-                            };
-                            return hints[activeTool ?? "none"] ?? tv("hintText");
-                          })()}
-                        </p>
+                        <ViewerToolPalette
+                          activeTool={activeTool}
+                          onChange={(t) => setActiveTool(t)}
+                          onClearAll={() => {
+                            // Drop the SVG overlays first so the next
+                            // ANNOTATION_REMOVED → onMeasurementsChange pass
+                            // doesn't immediately replay them back into state.
+                            mprRef.current?.clearAnnotations();
+                            setAllMeasurements([]);
+                          }}
+                        />
 
                         {/* "Measurements" widget rimosso: era duplicato di
                       ``MarkerListPanel`` (sezione Annotazioni in
