@@ -70,6 +70,13 @@ export interface MPRLayoutProps {
        *  the spatial anchor that makes ``worldPoints`` meaningful across
        *  series. */
       frameOfReferenceUID?: string;
+      /** Bidirectional (RECIST) axes in patient mm: ``longAxisMm`` is the
+       *  longest diameter, ``shortAxisMm`` the perpendicular short axis.
+       *  Populated only for the BidirectionalTool; feed the RECIST target
+       *  persistence (long → ``longest_diameter_mm``, short →
+       *  ``short_axis_mm``). */
+      longAxisMm?: number;
+      shortAxisMm?: number;
     }>,
   ) => void;
   markerFade?: { enabled: boolean; range: number; opacity: number };
