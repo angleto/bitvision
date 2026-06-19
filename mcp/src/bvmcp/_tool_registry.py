@@ -28,6 +28,7 @@ from bvmcp.tools import care_phases as care_phases_tools
 from bvmcp.tools import clinical_event_attachments as clinical_event_attachments_tools
 from bvmcp.tools import clinical_events as clinical_events_tools
 from bvmcp.tools import clinical_notes as clinical_notes_tools
+from bvmcp.tools import contrast_phases as contrast_phases_tools
 from bvmcp.tools import document_reads as document_reads_tools
 from bvmcp.tools import document_writes as document_writes_tools
 from bvmcp.tools import documents as documents_tools
@@ -80,6 +81,7 @@ TOOL_MODULES = (
     folders_tools,
     labs_tools,
     imaging_tools,
+    contrast_phases_tools,
     findings_tools,
     lesion_tracks_tools,
     response_assessments_tools,

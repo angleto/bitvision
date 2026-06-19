@@ -659,6 +659,16 @@ EXPECTED_TOOL_NAMES = {
     "get_segmentations",
     "register_series",
     "get_registration",
+    # --- Multiphase contrast-CT acquisition phases ---
+    "list_study_phases",
+    "detect_study_phases",
+    "set_series_acquisition_phase",
+    "compute_phase_washout",
+    "create_phase_enhancement_set",
+    "list_phase_enhancement_sets",
+    "get_phase_enhancement_set",
+    "delete_phase_enhancement_set",
+    "restore_phase_enhancement_set",
     # --- Patient anagrafica writes (ADR 0019 / patient:write scope) ---
     "update_patient",
     "decode_codice_fiscale",

@@ -378,6 +378,21 @@ TOOL_SCOPE: dict[str, str] = {
     "measure_volume": "imaging:read",
     "find_hot_spots": "imaging:read",
     "compute_roi_stats": "imaging:read",
+    # Multiphase contrast-CT acquisition phases. Reading the manifest is a
+    # metadata read; running the classifier is a "descriptive analysis"
+    # that persists derived labels, so it rides imaging:compute (NOT the
+    # care-timeline phases:* scope).
+    "list_study_phases": "imaging:read",
+    "detect_study_phases": "imaging:compute",
+    "set_series_acquisition_phase": "imaging:compute",
+    "compute_phase_washout": "imaging:read",
+    # Persisted wash-out measurements are a structured imaging finding, so
+    # they ride the findings:* scopes (like lesion_tracks / response_assessments).
+    "create_phase_enhancement_set": "findings:write",
+    "list_phase_enhancement_sets": "findings:read",
+    "get_phase_enhancement_set": "findings:read",
+    "delete_phase_enhancement_set": "findings:write",
+    "restore_phase_enhancement_set": "findings:write",
     "add_tag_to_study": "tags:write",
     "remove_tag_from_study": "tags:write",
     "replace_study_tags": "tags:write",
