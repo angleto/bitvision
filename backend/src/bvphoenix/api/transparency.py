@@ -1,15 +1,30 @@
-"""Transparency endpoint — public aggregate stats (F11).
+"""Transparency endpoints — public + admin aggregate stats (F11).
 
-``GET /api/transparency`` returns platform-level counts designed for the
-public transparency page: how many studies are on the platform, the
-tier split, how many users are registered, how many grants are active,
-and how much LLM activity has happened. No per-user, per-study, or
-per-patient data is ever exposed.
+Two surfaces share the same aggregation helpers but expose different
+slices of the platform:
 
-The endpoint is public (no auth) because transparency is the point.
-Rate-limited at the semantic-search tier to keep a hostile client from
-hammering it into a DoS; the queries are cheap (indexed counts) but we
-do not want to let an enumerator infer a per-minute upload cadence.
+``GET /api/transparency`` (public, no auth) returns only the data the
+platform is willing to show the world: total / public study counts,
+the contribution-tier split, the T3+T4 modality distribution, and the
+governance license. No per-user, per-study, or per-patient data is
+ever exposed.
+
+``GET /api/transparency/admin`` (``require_admin``) adds the
+operational counts that are *not* public — registered-user count,
+active-grant breakdown, and cumulative LLM activity. These are useful
+to the operator but reveal community size and platform activity that
+we do not want to publish, so they live behind the admin gate.
+
+The split is structural, not cosmetic: the public path never runs the
+user / sharing / LLM queries, so there is no code path on the public
+endpoint that could leak those numbers. The two payloads are cached
+under distinct keys so a public response can never be served the admin
+slice and vice versa.
+
+The public endpoint is rate-limited at the semantic-search tier to keep
+a hostile client from hammering it into a DoS; the queries are cheap
+(indexed counts) but we do not want to let an enumerator infer a
+per-minute upload cadence.
 
 The design of the payload is intentionally narrow. Fields we might
 *want* but that risk revealing operator identity or small-N tenant
@@ -23,6 +38,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
+from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime
 from typing import Annotated, Any
 
@@ -37,6 +53,7 @@ except ImportError:  # pragma: no cover — arq pulls redis transitively
     aioredis = None  # type: ignore[assignment]
 
 from bvphoenix import __version__
+from bvphoenix.auth import require_admin
 from bvphoenix.config import get_settings
 from bvphoenix.db.models import (
     Grant,
@@ -65,11 +82,20 @@ router = APIRouter(tags=["transparency"])
 # cache stays decoder-version-agnostic; reconstructing the pydantic
 # model on hit is cheap enough to not bother with a raw-bytes path.
 #
-# Key versioning (`_CACHE_KEY`): bump the suffix when the payload shape
-# changes so an old worker can't serve stale rows with a new schema.
+# The public and admin payloads are cached under *separate* keys
+# (``_PUBLIC_CACHE_KEY`` / ``_ADMIN_CACHE_KEY``). Keying by audience is
+# what keeps the admin slice from ever being served on the public
+# endpoint: there is no single shared entry that a wrong lookup could
+# cross-contaminate.
+#
+# Key versioning: bump the suffix when a payload shape changes so an old
+# worker can't serve stale rows with a new schema. (v2: the public
+# payload dropped users / sharing / llm when those moved to the admin
+# endpoint.)
 
 _CACHE_TTL_SECONDS = 300
-_CACHE_KEY = "transparency:v1"
+_PUBLIC_CACHE_KEY = "transparency:public:v2"
+_ADMIN_CACHE_KEY = "transparency:admin:v2"
 
 
 class _TransparencyCache:
@@ -79,13 +105,16 @@ class _TransparencyCache:
     Redis first (shared across workers), fall back to a dict keyed by
     the same string. Fail-open if Redis throws — transparency staleness
     is not worth a 500.
+
+    Keyed by audience (``transparency:public:*`` vs
+    ``transparency:admin:*``) so the two slices never alias each other.
     """
 
     def __init__(self) -> None:
         self._client: Any | None = None
         self._use_memory: bool = aioredis is None
-        self._mem_value: dict[str, Any] | None = None
-        self._mem_expires_at: float = 0.0
+        # key -> (value, expires_at). Separate entries per audience.
+        self._mem: dict[str, tuple[dict[str, Any], float]] = {}
 
     async def _redis(self) -> Any | None:
         if self._use_memory:
@@ -104,19 +133,21 @@ class _TransparencyCache:
                 self._use_memory = True
         return self._client
 
-    async def get(self) -> dict[str, Any] | None:
+    async def get(self, key: str) -> dict[str, Any] | None:
         client = await self._redis()
         if client is None:
-            if self._mem_value is None:
+            entry = self._mem.get(key)
+            if entry is None:
                 return None
-            if self._mem_expires_at < time.time():
-                self._mem_value = None
+            value, expires_at = entry
+            if expires_at < time.time():
+                self._mem.pop(key, None)
                 return None
-            return self._mem_value
+            return value
         try:
             import json
 
-            raw = await client.get(_CACHE_KEY)
+            raw = await client.get(key)
             if raw is None:
                 return None
             return json.loads(raw)
@@ -124,27 +155,27 @@ class _TransparencyCache:
             logger.warning("transparency cache Redis read failed; treating as miss")
             return None
 
-    async def set(self, value: dict[str, Any]) -> None:
+    async def set(self, key: str, value: dict[str, Any]) -> None:
         client = await self._redis()
         if client is None:
-            self._mem_value = value
-            self._mem_expires_at = time.time() + _CACHE_TTL_SECONDS
+            self._mem[key] = (value, time.time() + _CACHE_TTL_SECONDS)
             return
         try:
             import json
 
-            await client.set(_CACHE_KEY, json.dumps(value), ex=_CACHE_TTL_SECONDS)
+            await client.set(key, json.dumps(value), ex=_CACHE_TTL_SECONDS)
         except Exception:
             logger.warning("transparency cache Redis write failed; keeping memory copy")
-            self._mem_value = value
-            self._mem_expires_at = time.time() + _CACHE_TTL_SECONDS
+            self._mem[key] = (value, time.time() + _CACHE_TTL_SECONDS)
 
 
 _cache = _TransparencyCache()
 # Guard against stampede: if the cache misses on N concurrent requests,
 # only one of them should run the queries. The lock is per-process; the
 # Redis round-trip is cheap enough that cross-worker stampedes are
-# acceptable (a worker that comes up cold re-fetches once).
+# acceptable (a worker that comes up cold re-fetches once). A single
+# lock across both audiences is fine — public and admin builds rarely
+# contend and the double-check inside is keyed.
 _build_lock = asyncio.Lock()
 
 
@@ -201,14 +232,31 @@ class GovernanceLinks(BaseModel):
     license: str = "AGPL-3.0-or-later"
 
 
-class TransparencyOut(BaseModel):
+class PublicTransparencyOut(BaseModel):
+    """Public slice — safe to show anonymous visitors.
+
+    Aggregate study counts + governance only. Community size, sharing
+    activity, and LLM activity are intentionally absent here; they live
+    on :class:`TransparencyOut` behind the admin gate.
+    """
+
     generated_at: str
     version: str
     studies: StudiesStats
+    governance: GovernanceLinks
+
+
+class TransparencyOut(PublicTransparencyOut):
+    """Admin superset — adds the non-public operational counts.
+
+    Served only by ``GET /api/transparency/admin`` (``require_admin``).
+    The extra sections (community / sharing / LLM activity) reveal
+    platform scale and activity that we do not publish.
+    """
+
     users: UsersStats
     sharing: SharingStats
     llm: LLMStats
-    governance: GovernanceLinks
 
 
 async def _studies_stats(db: AsyncSession) -> StudiesStats:
@@ -296,7 +344,19 @@ async def _llm_stats(db: AsyncSession) -> LLMStats:
     return LLMStats(consultations_total=consultations, summaries_total=summaries)
 
 
-async def _build_payload(db: AsyncSession) -> TransparencyOut:
+async def _build_public_payload(db: AsyncSession) -> PublicTransparencyOut:
+    # Only the study aggregation runs here. The user / sharing / LLM
+    # queries are deliberately not reachable on the public path.
+    studies = await _studies_stats(db)
+    return PublicTransparencyOut(
+        generated_at=datetime.now(UTC).isoformat(),
+        version=__version__,
+        studies=studies,
+        governance=GovernanceLinks(),
+    )
+
+
+async def _build_admin_payload(db: AsyncSession) -> TransparencyOut:
     studies = await _studies_stats(db)
     users = await _users_stats(db)
     sharing = await _sharing_stats(db)
@@ -305,41 +365,79 @@ async def _build_payload(db: AsyncSession) -> TransparencyOut:
         generated_at=datetime.now(UTC).isoformat(),
         version=__version__,
         studies=studies,
+        governance=GovernanceLinks(),
         users=users,
         sharing=sharing,
         llm=llm,
-        governance=GovernanceLinks(),
     )
+
+
+async def _serve_cached(
+    db: AsyncSession,
+    cache_key: str,
+    builder: Callable[[AsyncSession], Awaitable[PublicTransparencyOut]],
+) -> dict[str, Any]:
+    """Cache-get → single-flight build → cache-set for one audience.
+
+    Returns the ``model_dump()`` dict; the caller re-validates it into
+    the concrete payload model. The build lock collapses a cache-miss
+    stampede to one query run per process per key.
+    """
+    cached = await _cache.get(cache_key)
+    if cached is not None:
+        return cached
+
+    async with _build_lock:
+        # Double-check: another request may have populated the cache
+        # while we were waiting for the lock.
+        cached = await _cache.get(cache_key)
+        if cached is not None:
+            return cached
+        payload = await builder(db)
+        dumped = payload.model_dump()
+        await _cache.set(cache_key, dumped)
+        return dumped
 
 
 @router.get(
     "/transparency",
-    response_model=TransparencyOut,
+    response_model=PublicTransparencyOut,
     summary="Public aggregate platform stats",
 )
 @limiter.limit(SEARCH_SEMANTIC_LIMIT)
 async def transparency(
     request: Request,
     db: Annotated[AsyncSession, Depends(get_db)],
-) -> TransparencyOut:
-    """Return platform-level aggregate stats for the transparency page.
+) -> PublicTransparencyOut:
+    """Return the public slice of platform stats for the transparency page.
 
     Served from a 5-minute cache (Redis when available, in-process
     otherwise). Freshness is intentional: the payload is a summary of
     the world and the transparency page doesn't need to-the-second
-    numbers. Revalidation is opportunistic — the first request after
-    the TTL recomputes and refills the cache.
+    numbers. No auth is required and no sensitive (community / sharing /
+    LLM) counts are computed on this path.
     """
-    cached = await _cache.get()
-    if cached is not None:
-        return TransparencyOut.model_validate(cached)
+    dumped = await _serve_cached(db, _PUBLIC_CACHE_KEY, _build_public_payload)
+    return PublicTransparencyOut.model_validate(dumped)
 
-    async with _build_lock:
-        # Double-check: another request may have populated the cache
-        # while we were waiting for the lock.
-        cached = await _cache.get()
-        if cached is not None:
-            return TransparencyOut.model_validate(cached)
-        payload = await _build_payload(db)
-        await _cache.set(payload.model_dump())
-    return payload
+
+@router.get(
+    "/transparency/admin",
+    response_model=TransparencyOut,
+    summary="Admin-only platform stats (community / sharing / LLM activity)",
+)
+@limiter.limit(SEARCH_SEMANTIC_LIMIT)
+async def transparency_admin(
+    request: Request,
+    db: Annotated[AsyncSession, Depends(get_db)],
+    admin: Annotated[User, Depends(require_admin)],
+) -> TransparencyOut:
+    """Return the full transparency payload, including the non-public
+    community / sharing / LLM-activity counts.
+
+    Gated by ``require_admin`` (agent tokens are rejected even if the
+    owner is an admin). Cached under a key distinct from the public
+    slice so the two never cross-contaminate.
+    """
+    dumped = await _serve_cached(db, _ADMIN_CACHE_KEY, _build_admin_payload)
+    return TransparencyOut.model_validate(dumped)
