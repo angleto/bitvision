@@ -253,6 +253,13 @@ export default function StudyDetailContent({ studyId, initialStudy }: Props) {
           compareIds.length === 2
             ? `/viewer/followup?baseline=${compareIds[0]}&followup=${compareIds[1]}`
             : "#";
+        // The multiphase contrast viewer is study-scoped (it groups the
+        // study's own CT phases), not selection-scoped: enabled whenever the
+        // study has >= 2 CT series.
+        const ctCount = study.series.filter(
+          (s) => (s.modality ?? "").toUpperCase() === "CT",
+        ).length;
+        const contrastUrl = `/viewer/contrast?study=${studyId}`;
         return (
           <div
             style={{
@@ -360,6 +367,23 @@ export default function StudyDetailContent({ studyId, initialStudy }: Props) {
                 title="Compare two series side-by-side with a synchronised crosshair (baseline vs follow-up)"
               >
                 Compare follow-up →
+              </Link>
+              <Link
+                href={contrastUrl}
+                style={{
+                  fontSize: "0.82rem",
+                  padding: "0.3rem 0.8rem",
+                  borderRadius: 6,
+                  border: "1px solid var(--bv-card-border, #d0d5dd)",
+                  color: "inherit",
+                  background: "transparent",
+                  textDecoration: "none",
+                  opacity: ctCount >= 2 ? 1 : 0.45,
+                  pointerEvents: ctCount >= 2 ? "auto" : "none",
+                }}
+                title="Open this CT study's contrast phases side-by-side, synced by anatomy and auto-windowed (non-contrast / arterial / portal / delayed)"
+              >
+                Contrast phases →
               </Link>
               {study.patient_id && (
                 <ComparePriorButton
