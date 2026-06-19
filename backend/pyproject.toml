@@ -125,6 +125,7 @@ dependencies = [
 bvphoenix-import = "bvphoenix.cli.import_dicom:main"
 bvphoenix-import-pathology = "bvphoenix.cli.import_pathology:main"
 bvphoenix-public-import = "bvphoenix.cli.public_import:main"
+bvphoenix-public-import-pathology = "bvphoenix.cli.public_import_pathology:main"
 bvphoenix-export = "bvphoenix.cli.export_dicom:main"
 bvphoenix-admin = "bvphoenix.cli.admin:main"
 bvphoenix-embed-models = "bvphoenix.cli.embed_models:cli"

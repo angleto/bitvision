@@ -1,0 +1,83 @@
+# OpenData PATHOLOGY (WSI) manifest — see ./README.md for schema.
+#
+# License-clean sources only: CC0 / CC-BY-3.0 / CC-BY-4.0. The licensing
+# gate is identical to the radiology manifest; pathology adds CC0 (CAMELYON,
+# OpenSlide test data). TCGA-via-GDC is intentionally ABSENT: the slide
+# images are open-access but carry no redistribution grant, so they are not
+# eligible for a public, commercially-intended tier without written NCI
+# sign-off (see README "GDC pathology exclusion").
+#
+# Three adapters: `http` (direct per-slide URL), `aws_open_data` (anonymous
+# S3 listing of a public bucket), `gdc` (deferred — refuses to run).
+#
+# Sizes are upstream-stated approximations. Whole-collection ingest is
+# bounded one-slide-at-a-time by the CLI, so a multi-hundred-GB collection
+# never needs more than ~one slide of local scratch.
+
+sources:
+  # ---- OpenSlide freely-distributable test data (CC0) ------------
+  # The clean multi-vendor smoke-test set. CMU-1 (~170 MB) is the
+  # canonical first slide. Verify license at the per-format index.yaml
+  # (`license: CC0-1.0`). These are direct HTTPS downloads.
+  - collection: OpenSlide/test-data
+    adapter: http
+    license_spdx: CC0-1.0
+    license_url: https://creativecommons.org/publicdomain/zero/1.0/
+    citation_required: false
+    citation_text: >-
+      OpenSlide freely-distributable test data
+      (https://openslide.org/), CC0 1.0 public domain.
+    stain: "H&E"
+    slides:
+      - subject_id: CMU-1
+        url: https://openslide.cs.cmu.edu/download/openslide-testdata/Aperio/CMU-1.svs
+        display_name: "Public Demo · Histology (CMU-1, Aperio)"
+      - subject_id: CMU-2
+        url: https://openslide.cs.cmu.edu/download/openslide-testdata/Aperio/CMU-2.svs
+        display_name: "Public Demo · Histology (CMU-2, Aperio)"
+      - subject_id: CMU-3
+        url: https://openslide.cs.cmu.edu/download/openslide-testdata/Aperio/CMU-3.svs
+        display_name: "Public Demo · Histology (CMU-3, Aperio)"
+
+  # ---- CAMELYON16 — lymph-node H&E, normal + metastatic (CC0) ----
+  # Hosted on AWS Open Data. Bucket / region / prefixes are configured
+  # here (not baked into the adapter) so they can be corrected without a
+  # code change if the registry layout moves. Each .tif under the prefix
+  # becomes one platform-owned virtual patient. ~700 GB; ingest is
+  # one-slide-at-a-time so scratch stays bounded.
+  #
+  # NOTE: confirm the bucket name + region + key prefixes against the AWS
+  # Open Data registry entry before a bulk run (a --dry-run lists what the
+  # adapter would fetch without downloading).
+  - collection: CAMELYON/CAMELYON16
+    adapter: aws_open_data
+    license_spdx: CC0-1.0
+    license_url: https://creativecommons.org/publicdomain/zero/1.0/
+    citation_required: true
+    citation_text: >-
+      Ehteshami Bejnordi B, Veta M, Johannes van Diest P, et al. Diagnostic
+      Assessment of Deep Learning Algorithms for Detection of Lymph Node
+      Metastases in Women With Breast Cancer (CAMELYON16). JAMA.
+      2017;318(22):2199-2210. doi:10.1001/jama.2017.14585. Data: CC0 1.0.
+    stain: "H&E"
+    s3_bucket: camelyon-dataset
+    s3_region: eu-west-1
+    s3_prefixes:
+      - CAMELYON16/images/
+
+  # ---- TCGA-via-GDC — DEFERRED (no redistribution grant) ---------
+  # Listed for documentation only. The `gdc` adapter refuses to run: the
+  # slides are open-access but unlicensed for redistribution. Move an
+  # individual slide to the `http` adapter with an explicit licensed URL
+  # if/when NCI sign-off is obtained.
+  - collection: GDC/TCGA-BRCA
+    adapter: gdc
+    license_spdx: UNLICENSED
+    license_url: https://gdc.cancer.gov/about-data/data-sources
+    citation_required: true
+    citation_text: >-
+      The Cancer Genome Atlas (TCGA), NCI Genomic Data Commons. DEFERRED:
+      no redistribution license for the GDC-hosted slide images.
+    stain: "H&E"
+    subjects:
+      - TCGA-A1-A0SB

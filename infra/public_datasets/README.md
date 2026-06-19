@@ -1,82 +1,164 @@
-# Public DICOM datasets — OpenData manifest
+# Public datasets — OpenData manifests
 
-The `bvphoenix-public-import` CLI bootstraps the OpenData demo library
-from curated public DICOM archives. This directory holds the manifests
-it consumes.
+Two CLIs bootstrap the OpenData library from curated public archives:
 
-## Sources currently supported
+- `bvphoenix-public-import` → radiology DICOM, from `manifest.yaml`.
+- `bvphoenix-public-import-pathology` → pathology whole-slide images (WSI),
+  from `manifest-pathology.yaml`.
+
+Both wire everything to the platform-owner subject (read-only OpenData for
+every authenticated user, plus anonymous visitors via `is_public`), record
+license/citation provenance for the viewer badge, and are idempotent.
+
+## License policy (the controlling gate)
+
+The platform redistributes these images to anonymous web visitors and has
+commercial intent, so only redistribution-permissive licenses qualify:
+
+| SPDX | Eligible? | Treatment |
+|---|---|---|
+| `CC-BY-3.0`, `CC-BY-4.0`, `CC0-1.0` | yes | commercial reuse OK |
+| `CC-BY-NC-*` | yes, **labelled** | ingested but flagged non-commercial / educational use only; `commercial_use_allowed` is derived `false` from the SPDX, the badge says so, and a future commercial tier must exclude them |
+| `*-ND`, `CC-BY-(NC-)SA` (viral copyleft) | no | excluded |
+| NIH / TCIA Controlled Access, Kaggle embargo | no | excluded (not redistributable) |
+
+`commercial_use_allowed` is derived centrally in
+`services/licensing.py::license_allows_commercial_use` (`-NC` not in SPDX)
+and surfaced on `StudyOut` / `PathologySlideOut`.
+
+Notes:
+- Brain/head collections are almost all Controlled since TCIA's 2022
+  face-reconstruction policy. `UPENN-GBM` (defaced) and `ReMIND` are the
+  CC-BY exceptions.
+- `MIDRC-RICORD-1C` (already loaded) is verified `CC-BY-NC-4.0`, retained
+  under the non-commercial label.
+- **GDC pathology exclusion**: TCGA diagnostic SVS via the NCI GDC are
+  open-access but carry no redistribution grant; the `gdc` adapter refuses
+  to run. Move an individual slide to the `http` adapter only with a
+  licensed per-slide URL (needs written NCI sign-off).
+
+License covers copyright, not privacy: curated TCIA/CAMELYON/OpenSlide sets
+are de-identified upstream (same trust model as the importers). The
+pathology importer never writes the slide label and bottom-crops the macro.
+
+## Radiology manifest (`manifest.yaml`)
 
 | Adapter | What it does |
 |---|---|
-| `tcia` | Pulls from TCIA REST (`services.cancerimagingarchive.net`). Used for TCIA-hosted collections: TCGA-*, LIDC-IDRI, QIN-*, MIDRC-RICORD-1c, COVID-19-AR. Per-series ZIP. |
-| `osirix_zip` | HTTP ZIP from a manifest-supplied URL. Used for Pixmeo educational samples (BRAINIX, MANIX, PHENIX, MAGIX) and any other vendor that ships one ZIP per subject. |
-
-Additional adapters (`idc` gs://, `xnat`, ...) can be added in
-`backend/src/bvphoenix/cli/public_import.py` without changing the
-manifest schema.
-
-## License policy
-
-Only **CC-BY 3.0/4.0** and **TCIA Public Domain** are accepted as
-of 2026-05-20. TCIA Restricted-Use collections require a click-through
-agreement that cannot be transferred to OpenData visitors and are
-therefore excluded — see commit log for rationale. `license_spdx` is
-the SPDX identifier (e.g. `CC-BY-3.0`, `CC-BY-4.0`, `TCIA-PD`).
-
-`citation_text` is the canonical attribution string the license
-requires. The frontend renders it on the study viewer when
-`citation_required=true`.
-
-## Manifest schema
+| `tcia` | TCIA NBIA v1 REST (`services.cancerimagingarchive.net`). One ZIP per series. |
+| `osirix_zip` | HTTP ZIP from a manifest-supplied URL, one ZIP per subject. |
 
 ```yaml
 sources:
-  - collection: TCIA/LIDC-IDRI     # human + machine readable; "/" separates upstream namespace
+  - collection: TCIA/LIDC-IDRI       # "/" separates upstream namespace
     adapter: tcia
     license_spdx: CC-BY-3.0
     license_url: https://creativecommons.org/licenses/by/3.0/
     citation_required: true
     citation_text: |
-      Armato SG 3rd, McLennan G, et al. The Lung Image Database
-      Consortium (LIDC) and Image Database Resource Initiative
-      (IDRI): a completed reference database of lung nodules on
-      CT scans. Med Phys. 2011 Feb;38(2):915-31.
-    subjects:
-      - LIDC-IDRI-0001                # short form for tcia
-      - LIDC-IDRI-0002
-      - LIDC-IDRI-0003
+      Armato SG 3rd, McLennan G, et al. ... Med Phys. 2011;38(2):915-31.
+    subjects: all                    # whole-collection: enumerate every
+                                     # PatientID via NBIA getPatient.
+                                     # (or an explicit list of PatientIDs)
 
-  - collection: OsiriX/BRAINIX
-    adapter: osirix_zip
-    license_spdx: TCIA-PD
-    license_url: https://www.osirix-viewer.com/resources/dicom-image-library/
+  - collection: TCIA/CMB-LCA
+    adapter: tcia
+    license_spdx: CC-BY-4.0
+    license_url: https://creativecommons.org/licenses/by/4.0/
     citation_required: true
-    citation_text: "OsiriX DICOM Image Library, Pixmeo SARL"
-    subjects:
-      - id: BRAINIX                  # long form: required for osirix_zip
-        url: https://www.osirix-viewer.com/.../BRAINIX.zip
-        display_name: "Public Demo · Brain MRI (BRAINIX)"
+    citation_text: "..."
+    exclude_body_parts: [HEAD, BRAIN, SKULL, FACE]   # drop NIH-Controlled
+                                                     # head series before download
+    subjects: all
 ```
+
+- `subjects: all` is the maximal-wave form. The K8s Job defaults to PILOT
+  (a 3-subject smoke set via `--only`); a bulk run clears PILOT.
+- `exclude_body_parts` filters series by `BodyPartExamined` (upper-cased)
+  before download — used for the otherwise-CC-BY CMB collections.
+- New collections are STAGED (commented) at the bottom of `manifest.yaml`
+  until their exact TCIA "Data Citation" string is pasted in. Do not
+  fabricate a DOI for a medical dataset.
+
+## Pathology manifest (`manifest-pathology.yaml`)
+
+| Adapter | What it does |
+|---|---|
+| `http` | Direct per-slide URL. OpenSlide CC0 test data; any TCIA SVS whose licensed HTTPS URL is listed (CPTAC / Post-NAT-BRCA). |
+| `aws_open_data` | Anonymous (unsigned) S3 listing + download of a public AWS Open Data bucket. CAMELYON16/17 (CC0). Bucket / region / prefixes come from the manifest. |
+| `gdc` | DEFERRED — refuses to run (see GDC exclusion above). |
+
+```yaml
+sources:
+  - collection: OpenSlide/test-data
+    adapter: http
+    license_spdx: CC0-1.0
+    license_url: https://creativecommons.org/publicdomain/zero/1.0/
+    citation_required: false
+    citation_text: "OpenSlide freely-distributable test data, CC0 1.0."
+    stain: "H&E"                     # source-level default
+    slides:
+      - subject_id: CMU-1
+        url: https://openslide.cs.cmu.edu/.../Aperio/CMU-1.svs
+        sha256: <optional integrity check>
+        display_name: "Public Demo · Histology (CMU-1)"
+
+  - collection: CAMELYON/CAMELYON16
+    adapter: aws_open_data
+    license_spdx: CC0-1.0
+    license_url: https://creativecommons.org/publicdomain/zero/1.0/
+    citation_required: true
+    citation_text: "Ehteshami Bejnordi B, et al. JAMA. 2017;318(22):2199-2210."
+    stain: "H&E"
+    s3_bucket: camelyon-dataset       # verify against the AWS Open Data registry
+    s3_region: eu-west-1
+    s3_prefixes:
+      - CAMELYON16/images/
+```
+
+Single-file WSI formats only (`.svs/.ndpi/.tif/.tiff/.scn/.dcm`); `.mrxs`
+(multi-file) is rejected over http/aws. A single SVS is 0.5-3 GB, so the
+CLI downloads **one slide at a time** and deletes it after import — scratch
+never holds more than ~1 slide regardless of collection size.
 
 ## Idempotency
 
-The DB enforces a partial UNIQUE on
-`(source_collection, source_subject_id, study_instance_uid)` (migration
-`0004_imaging_studies_provenance`). Re-running the importer with the
-same manifest is a no-op: existing rows are detected and skipped, only
-new subjects/studies/series/instances are added.
+Re-running either importer is a no-op for already-ingested data:
+
+- Radiology: partial UNIQUE on
+  `(source_collection, source_subject_id, study_instance_uid)` (migration
+  `0004`); `completed_series_uids_for_source` skips complete series before
+  the per-series ZIP download.
+- Pathology: partial UNIQUE on
+  `(source_collection, source_subject_id, slide_instance_uid)` (migration
+  `0005`) plus `(owner_subject_id, slide_instance_uid)`;
+  `completed_slide_keys_for_source` skips complete slides before the
+  multi-GB download (keyed on the upstream file id stored in `slide_label`).
 
 ## Pilot vs bulk
 
-For a first prod run, restrict to a handful of subjects with `--only`:
+Radiology:
 
 ```sh
-bvphoenix-public-import \
-  --manifest infra/public_datasets/manifest.yaml \
-  --only TCIA/LIDC-IDRI/LIDC-IDRI-0001 \
-  --only OsiriX/BRAINIX/BRAINIX
+bvphoenix-public-import --manifest infra/public_datasets/manifest.yaml \
+  --only TCIA/Pancreas-CT/PANCREAS_0001 --dry-run
 ```
 
-Then verify in the UI (logged in as a regular user) that the studies
-appear, the badge renders, and pixel data loads. Only after the pilot
-passes should the full manifest run.
+Pathology (one ~170 MB CC0 slide end-to-end):
+
+```sh
+bvphoenix-public-import-pathology \
+  --manifest infra/public_datasets/manifest-pathology.yaml \
+  --only OpenSlide/test-data/CMU-1 --max-slides-per-subject 1 --scratch-dir /scratch
+```
+
+Verify in the UI (badge renders, `commercial_use_allowed` correct, pixel
+data / WSI tiles load) before clearing PILOT for a full run.
+
+## In-cluster Jobs
+
+Both importers run as one-shot K8s Jobs (the dev box is disk-constrained;
+prod S3 is same-region). See
+`deploy/bvphoenix-production-k8s-deploy/public-dataset-import-*.yaml` and
+`public-pathology-import-*.yaml`. The ConfigMaps embed a copy of these
+manifests — keep them in sync with the source-of-truth files here.

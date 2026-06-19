@@ -583,6 +583,24 @@ html.dark .badge--license {
   color: #c7d2fe;
   border-color: #3730a3;
 }
+/* ``.badge--license-nc`` overrides the indigo provenance hue with an
+   amber "restriction" hue when the dataset is CC-BY-NC-* (commercial
+   use forbidden, educational reuse only). It reads as a usage caveat,
+   not a generic provenance chip. */
+.badge--license.badge--license-nc {
+  background: var(--bv-warn-soft, #fef3c7);
+  color: var(--bv-warn, #92400e);
+  border-color: color-mix(in srgb, var(--bv-warn, #d97706) 30%, transparent);
+}
+.badge--license.badge--license-nc:hover,
+.badge--license.badge--license-nc:focus-visible {
+  outline-color: color-mix(in srgb, var(--bv-warn, #d97706) 40%, transparent);
+}
+html.dark .badge--license.badge--license-nc {
+  background: #422006;
+  color: #fcd34d;
+  border-color: #92400e;
+}
 
 /* ---------- tables ---------- */
 

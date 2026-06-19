@@ -26,11 +26,9 @@ Manifest schema is documented in ``infra/public_datasets/README.md``.
 
 from __future__ import annotations
 
-import os
 import shutil
 import sys
 import tempfile
-import time
 import zipfile
 from collections.abc import Iterator
 from contextlib import contextmanager
@@ -44,6 +42,11 @@ import yaml
 from sqlalchemy import create_engine
 from sqlalchemy.orm import Session
 
+from bvphoenix.cli._public_http import (
+    HTTP_TIMEOUT,
+    _http_get_json_with_retry,
+    _http_get_with_retry,
+)
 from bvphoenix.cli.import_dicom import _enqueue_pack_jobs
 from bvphoenix.config import get_settings
 from bvphoenix.services.public_dataset import (
@@ -64,22 +67,11 @@ from bvphoenix.services.public_dataset import (
 # without needing ``format=json``. See nbia.cancerimagingarchive.net.
 TCIA_REST_BASE = "https://services.cancerimagingarchive.net/nbia-api/services/v1"
 
-# HTTP retry policy for download adapters: backs off three times before
-# giving up on a single subject. The CLI logs the failure and proceeds
-# to the next subject; we do not want one bad URL to abort a 100-subject
-# run.
-#
-# Read timeout is intentionally large (default 600s) because the TCIA
-# getImage endpoint does not stream chunked: the server assembles the
-# whole per-series ZIP before sending the first byte, which on a
-# thin-slice CT (hundreds of MB) can sit silent for 1-3 minutes. A
-# 120s read budget tripped reliably during the first pilot run.
-# Env-overridable so we can tune in prod without a rebuild cycle.
-HTTP_CONNECT_TIMEOUT_SEC = float(os.environ.get("BVP_PUBLIC_IMPORT_HTTP_CONNECT_TIMEOUT", "30"))
-HTTP_READ_TIMEOUT_SEC = float(os.environ.get("BVP_PUBLIC_IMPORT_HTTP_READ_TIMEOUT", "600"))
-HTTP_TIMEOUT = httpx.Timeout(HTTP_READ_TIMEOUT_SEC, connect=HTTP_CONNECT_TIMEOUT_SEC)
-HTTP_RETRIES = 3
-RETRY_BACKOFF_SEC = 5.0
+# HTTP retry policy + streaming download helpers live in ``_public_http``
+# so the pathology public-import CLI shares the exact same bounded-retry
+# contract. The functions are imported at module top so the existing
+# ``monkeypatch.setattr(public_import, "_http_get_json_with_retry", ...)``
+# in the adapter tests keeps patching the name the adapters resolve.
 
 
 @dataclass
@@ -106,6 +98,15 @@ class ManifestSource:
     citation_text: str
     citation_required: bool
     subjects: list[ManifestSubject]
+    # ``subjects: all`` in the manifest sets this; the main loop then
+    # enumerates every PatientID in the collection via NBIA getPatient
+    # before iterating (whole-collection ingest for the maximal wave).
+    all_subjects: bool = False
+    # Series whose BodyPartExamined (upper-cased) is in this set are
+    # dropped before download. Used to exclude the NIH-Controlled
+    # head/face series bundled in otherwise-CC-BY collections (CMB-LCA /
+    # CMB-CRC), which are not redistributable.
+    exclude_body_parts: frozenset[str] = frozenset()
 
 
 def _parse_manifest(path: Path) -> list[ManifestSource]:
@@ -115,20 +116,33 @@ def _parse_manifest(path: Path) -> list[ManifestSource]:
     sources: list[ManifestSource] = []
     for entry in raw["sources"]:
         subjects_raw = entry.get("subjects") or []
+        all_subjects = False
         subjects: list[ManifestSubject] = []
-        for s in subjects_raw:
-            if isinstance(s, str):
-                subjects.append(ManifestSubject(identifier=s))
-            elif isinstance(s, dict):
-                subjects.append(
-                    ManifestSubject(
-                        identifier=s["id"],
-                        url=s.get("url"),
-                        display_name=s.get("display_name"),
-                    )
+        # ``subjects: all`` (scalar string) requests whole-collection
+        # enumeration; the explicit-list form stays a list as before.
+        if isinstance(subjects_raw, str):
+            if subjects_raw.strip().lower() != "all":
+                raise click.ClickException(
+                    f"manifest: scalar 'subjects' must be 'all', got {subjects_raw!r}"
                 )
-            else:
-                raise click.ClickException(f"manifest: bad subject entry {s!r}")
+            all_subjects = True
+        else:
+            for s in subjects_raw:
+                if isinstance(s, str):
+                    subjects.append(ManifestSubject(identifier=s))
+                elif isinstance(s, dict):
+                    subjects.append(
+                        ManifestSubject(
+                            identifier=s["id"],
+                            url=s.get("url"),
+                            display_name=s.get("display_name"),
+                        )
+                    )
+                else:
+                    raise click.ClickException(f"manifest: bad subject entry {s!r}")
+        exclude_body_parts = frozenset(
+            str(b).strip().upper() for b in (entry.get("exclude_body_parts") or [])
+        )
         sources.append(
             ManifestSource(
                 collection=entry["collection"],
@@ -138,9 +152,34 @@ def _parse_manifest(path: Path) -> list[ManifestSource]:
                 citation_text=entry["citation_text"],
                 citation_required=bool(entry.get("citation_required", True)),
                 subjects=subjects,
+                all_subjects=all_subjects,
+                exclude_body_parts=exclude_body_parts,
             )
         )
     return sources
+
+
+def _adapter_tcia_list_patients(client: httpx.Client, *, collection: str) -> list[str]:
+    """Return every PatientID NBIA offers for ``collection``.
+
+    Backs ``subjects: all`` so the maximal wave does not require
+    hand-listing every subject. NBIA's getPatient is a cheap JSON call;
+    the field is ``PatientID`` on v1 but some mirrors emit ``PatientId``,
+    so we accept either. Sorted + de-duplicated for stable run order.
+    """
+    tcia_collection = collection.split("/", 1)[1] if "/" in collection else collection
+    url = f"{TCIA_REST_BASE}/getPatient?" + urlencode(
+        {"Collection": tcia_collection, "format": "json"}
+    )
+    data = _http_get_json_with_retry(client, url, what=f"TCIA getPatient {tcia_collection}")
+    if not isinstance(data, list):
+        raise click.ClickException(f"TCIA getPatient: unexpected payload for {tcia_collection!r}")
+    ids = {
+        str(e.get("PatientID") or e.get("PatientId"))
+        for e in data
+        if isinstance(e, dict) and (e.get("PatientID") or e.get("PatientId"))
+    }
+    return sorted(ids)
 
 
 @contextmanager
@@ -150,65 +189,6 @@ def _temp_workdir() -> Iterator[Path]:
         yield d
     finally:
         shutil.rmtree(d, ignore_errors=True)
-
-
-def _http_get_with_retry(client: httpx.Client, url: str, out_path: Path, *, what: str) -> None:
-    """Stream a URL to disk with bounded retries.
-
-    Bandwidth at TCIA is fine but occasionally returns 503; the retry
-    is what lets a 100-subject manifest finish unattended. We do NOT
-    retry on 4xx (the source URL is wrong, fail fast for that subject).
-    """
-    last_exc: Exception | None = None
-    for attempt in range(1, HTTP_RETRIES + 1):
-        try:
-            with client.stream("GET", url) as resp:
-                if 400 <= resp.status_code < 500:
-                    raise click.ClickException(
-                        f"{what}: HTTP {resp.status_code} (client error, no retry) {url}"
-                    )
-                resp.raise_for_status()
-                with out_path.open("wb") as fh:
-                    for chunk in resp.iter_bytes(1024 * 1024):
-                        fh.write(chunk)
-            return
-        except (httpx.HTTPError, httpx.TimeoutException) as exc:
-            last_exc = exc
-            if attempt < HTTP_RETRIES:
-                click.echo(
-                    f"  retry {attempt}/{HTTP_RETRIES} after {RETRY_BACKOFF_SEC}s: {exc}",
-                    err=True,
-                )
-                time.sleep(RETRY_BACKOFF_SEC * attempt)
-    raise click.ClickException(f"{what}: gave up after {HTTP_RETRIES} attempts ({last_exc})")
-
-
-def _http_get_json_with_retry(client: httpx.Client, url: str, *, what: str) -> object:
-    """Same retry contract as :func:`_http_get_with_retry` but for the
-    small JSON listing endpoints (TCIA getSeries). The TCIA REST
-    frontend occasionally drops the connection between connect and
-    first byte ('Server disconnected without sending a response'),
-    which without retry kills the whole subject.
-    """
-    last_exc: Exception | None = None
-    for attempt in range(1, HTTP_RETRIES + 1):
-        try:
-            resp = client.get(url)
-            if 400 <= resp.status_code < 500:
-                raise click.ClickException(
-                    f"{what}: HTTP {resp.status_code} (client error, no retry) {url}"
-                )
-            resp.raise_for_status()
-            return resp.json()
-        except (httpx.HTTPError, httpx.TimeoutException) as exc:
-            last_exc = exc
-            if attempt < HTTP_RETRIES:
-                click.echo(
-                    f"  retry {attempt}/{HTTP_RETRIES} after {RETRY_BACKOFF_SEC}s: {exc}",
-                    err=True,
-                )
-                time.sleep(RETRY_BACKOFF_SEC * attempt)
-    raise click.ClickException(f"{what}: gave up after {HTTP_RETRIES} attempts ({last_exc})")
 
 
 def _unzip(zip_path: Path, out_dir: Path) -> int:
@@ -234,6 +214,7 @@ def _adapter_tcia(
     workdir: Path,
     skip_series: set[str] | None = None,
     keep_series: set[str] | None = None,
+    exclude_body_parts: frozenset[str] = frozenset(),
 ) -> Path | None:
     """Fetch one TCIA subject's worth of DICOMs.
 
@@ -287,12 +268,18 @@ def _adapter_tcia(
     subject_dir.mkdir(parents=True, exist_ok=True)
     fetched = 0
     skipped = 0
+    excluded_body = 0
     for entry in series_list:
         series_uid = entry.get("SeriesInstanceUID")
         if not series_uid:
             continue
         if keep_series and series_uid not in keep_series:
             continue
+        if exclude_body_parts:
+            body = str(entry.get("BodyPartExamined") or "").strip().upper()
+            if body in exclude_body_parts:
+                excluded_body += 1
+                continue
         if series_uid in skip_series:
             skipped += 1
             continue
@@ -308,6 +295,11 @@ def _adapter_tcia(
         fetched += 1
     if skipped:
         click.echo(f"    {skipped} series already imported, {fetched} fetched")
+    if excluded_body:
+        click.echo(
+            f"    {excluded_body} series excluded by body-part filter "
+            f"({', '.join(sorted(exclude_body_parts))})"
+        )
     if fetched == 0:
         # Subject is fully present already — no ZIP downloaded, nothing
         # to scan. Drop the empty dir and signal the caller to skip.
@@ -404,7 +396,6 @@ def main(
     keep_series = set(only_series)
     engine = create_engine(settings.database_url_sync, future=True)
 
-    total_subjects = sum(len(s.subjects) for s in sources)
     processed = 0
     succeeded = 0
     failed: list[tuple[str, str, str]] = []
@@ -414,6 +405,33 @@ def main(
     enqueue_series_ids: list[str] = []
 
     with _temp_workdir() as workdir, httpx.Client(timeout=HTTP_TIMEOUT) as client:
+        # Resolve ``subjects: all`` sources into explicit PatientID lists
+        # before iterating, so the progress counter and --only matching
+        # work the same as for hand-listed manifests. Only tcia supports
+        # whole-collection enumeration.
+        for src in sources:
+            if not src.all_subjects:
+                continue
+            if src.adapter != "tcia":
+                raise click.ClickException(
+                    f"'subjects: all' only supported by the tcia adapter "
+                    f"(collection {src.collection!r} uses {src.adapter!r})"
+                )
+            try:
+                patient_ids = _adapter_tcia_list_patients(client, collection=src.collection)
+            except Exception as exc:
+                click.echo(f"# {src.collection}: enumeration FAILED: {exc}", err=True)
+                failed.append((src.collection, "*", f"getPatient enumeration: {exc}"))
+                src.subjects = []
+                if not continue_on_error:
+                    raise
+                continue
+            src.subjects = [ManifestSubject(identifier=p) for p in patient_ids]
+            click.echo(
+                f"# {src.collection}: enumerated {len(patient_ids)} subjects (subjects: all)"
+            )
+
+        total_subjects = sum(len(s.subjects) for s in sources)
         for src in sources:
             for subj in src.subjects:
                 key = f"{src.collection}/{subj.identifier}"
@@ -445,6 +463,7 @@ def main(
                             workdir=workdir,
                             skip_series=skip_series,
                             keep_series=keep_series,
+                            exclude_body_parts=src.exclude_body_parts,
                         )
                     elif src.adapter == "osirix_zip":
                         # OsiriX ships one ZIP per subject; there is no

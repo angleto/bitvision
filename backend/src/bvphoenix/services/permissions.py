@@ -30,10 +30,11 @@ from datetime import UTC, datetime
 from fastapi import HTTPException, Request
 from sqlalchemy import Select, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import Session
 
 from bvphoenix.auth.deps import enforce_agent_patient_scope
 from bvphoenix.config import get_settings
-from bvphoenix.db.models import Folder, Grant, ImagingStudy, Membership, Patient, User
+from bvphoenix.db.models import Folder, Grant, ImagingStudy, Membership, Patient, Subject, User
 
 
 def platform_owner_subject_id() -> uuid.UUID:
@@ -46,6 +47,26 @@ def platform_owner_subject_id() -> uuid.UUID:
     platform identity itself.
     """
     return uuid.UUID(get_settings().platform_owner_subject_id)
+
+
+def get_or_create_platform_owner_subject(session: Session) -> Subject:
+    """Return the Subject row for the platform-owner sentinel.
+
+    The row is seeded by the bootstrap migration ``0036``; if it is
+    missing (fresh dev DB) it is created. Real prod always has it. Shared
+    by both the radiology (``services.public_dataset``) and pathology
+    (``services.public_pathology``) public-dataset importers so the
+    get-or-create logic lives in exactly one place. Sync-only — the
+    importers build on the sync ingest path.
+    """
+    owner_id = platform_owner_subject_id()
+    row = session.execute(select(Subject).where(Subject.id == owner_id)).scalar_one_or_none()
+    if row is not None:
+        return row
+    row = Subject(id=owner_id, kind="system")
+    session.add(row)
+    session.flush()
+    return row
 
 
 def is_platform_owner(user: User | None) -> bool:

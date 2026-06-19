@@ -216,10 +216,85 @@ export interface Study {
   license_url?: string | null;
   citation_required?: boolean;
   citation_text?: string | null;
+  // False for CC-BY-NC-* licenses (educational / non-commercial reuse
+  // only); true (or undefined) otherwise. Drives the badge's
+  // "Non-commercial" treatment in <LicenseBadge>. Returned server-side
+  // on OpenData imports alongside the other license fields.
+  commercial_use_allowed?: boolean;
   // True iff owner_subject_id is the platform-owner subject. Computed
   // server-side on StudyOut so the FE does not need the platform-owner
   // UUID. Drives the "OpenData" filter distinction in /search.
   is_opendata?: boolean;
+}
+
+// -------- pathology whole-slide images --------
+
+/**
+ * One whole-slide image (WSI) in the pathology library. Mirrors the
+ * backend ``PathologySlideOut`` shape. Public slides (``is_public``)
+ * are served anonymously: the thumbnail / DZI / tile endpoints need no
+ * auth header, so the public library + deep-zoom viewer work without a
+ * session. The license / citation fields drive <LicenseBadge> exactly
+ * as on studies.
+ */
+export interface PathologySlide {
+  id: string;
+  patient_id: string;
+  stain: string | null;
+  magnification: number | null;
+  source_format: string;
+  source_collection: string | null;
+  license_spdx: string | null;
+  license_url: string | null;
+  citation_required: boolean;
+  citation_text: string | null;
+  commercial_use_allowed: boolean;
+  is_opendata: boolean;
+  is_public: boolean;
+  /** Base (level-0) pixel dimensions of the pyramid. Null until the
+   *  slide has been tiled. Used to seed the OpenSeadragon tile source
+   *  as a fallback before the .dzi is parsed. */
+  base_width: number | null;
+  base_height: number | null;
+  created_at: string;
+  has_macro: boolean;
+}
+
+export const pathologySlidesApi = {
+  /** Public library listing. Returns a plain JSON array (not the
+   *  ``Paginated`` envelope) — the backend honours limit/offset for
+   *  cursor-style pagination. */
+  listPublic: (params: { limit?: number; offset?: number } = {}) => {
+    const merged = { public_only: true, ...params };
+    return request<PathologySlide[]>(
+      `/api/pathology-slides${qs(merged as Record<string, QSValue>)}`,
+    );
+  },
+  detail: (id: string) =>
+    request<PathologySlide>(`/api/pathology-slides/${encodeURIComponent(id)}`),
+  /** Absolute URL of the slide thumbnail JPEG. */
+  thumbnailUrl: (id: string) =>
+    `${API_BASE_URL}/api/pathology-slides/${encodeURIComponent(id)}/thumbnail`,
+  /** Absolute URL of the Deep Zoom ``.dzi`` descriptor (XML). */
+  dziUrl: (id: string) => `${API_BASE_URL}/api/pathology-slides/${encodeURIComponent(id)}/dzi`,
+  /** Absolute URL of a single Deep Zoom tile. NOTE: slash-separated
+   *  ``{level}/{col}/{row}`` (not the DZI default ``{col}_{row}.jpeg``),
+   *  so OpenSeadragon must be fed a custom ``getTileUrl`` rather than
+   *  the ``.dzi`` URL directly. */
+  tileUrl: (id: string, level: number, col: number, row: number) =>
+    `${API_BASE_URL}/api/pathology-slides/${encodeURIComponent(id)}/tiles/${level}/${col}/${row}`,
+};
+
+/** Convenience wrapper: list the public pathology library. */
+export function listPublicPathologySlides(
+  params: { limit?: number; offset?: number } = {},
+): Promise<PathologySlide[]> {
+  return pathologySlidesApi.listPublic(params);
+}
+
+/** Convenience wrapper: fetch one pathology slide's metadata. */
+export function getPathologySlide(id: string): Promise<PathologySlide> {
+  return pathologySlidesApi.detail(id);
 }
 
 export interface Series {

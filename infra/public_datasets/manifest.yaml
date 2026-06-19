@@ -1,17 +1,31 @@
-# OpenData public dataset manifest — see ./README.md for schema.
+# OpenData public dataset manifest (RADIOLOGY) — see ./README.md for schema.
 #
-# Curated 2026-05-20. CC-BY / TCIA-PD only. Restricted-Use collections
-# excluded by policy. Subject IDs listed here are STARTER entries used
-# for the pilot; the bulk list is appended after the pilot validates
-# end-to-end (see roadmap task #9 "Bulk run").
+# Licensing gate (the controlling risk):
+#   ELIGIBLE  CC-BY-3.0 / CC-BY-4.0 / CC0-1.0      → commercial reuse OK
+#   ELIGIBLE  CC-BY-NC-*                           → ingested but LABELLED
+#             non-commercial / educational use only (commercial_use_allowed
+#             is derived from the SPDX and excludes these from any
+#             commercial tier). MIDRC-RICORD-1C/1A and NSCLC-Radiomics fall
+#             here.
+#   INELIGIBLE  *-ND, CC-BY-(NC-)SA (viral), NIH/TCIA Controlled Access,
+#             Kaggle embargo. Brain/head collections are almost all
+#             Controlled since the 2022 TCIA face-reconstruction policy;
+#             UPENN-GBM (defaced) and ReMIND are the CC-BY exceptions.
 #
-# To verify an upstream subject exists before adding it here:
-#   curl 'https://services.cancerimagingarchive.net/services/v4/TCIA/query/getSeries?Collection=LIDC-IDRI&PatientID=LIDC-IDRI-0001&format=json'
+# ``subjects: all`` enumerates every PatientID in the collection via NBIA
+# getPatient (whole-collection ingest for the maximal wave). Re-runs are
+# idempotent: already-complete series are skipped before download. The
+# K8s Job defaults to PILOT (a 3-subject smoke set via --only); a bulk run
+# clears PILOT to ingest the full ``subjects: all`` set.
+#
+# Citation integrity: every entry carries the verified SPDX + the canonical
+# citation. New collections are STAGED at the bottom (commented) until their
+# exact TCIA "Data Citation" string is pasted in — we do not fabricate DOIs
+# for a medical dataset.
 
 sources:
-  # ---- Lung CT (LIDC-IDRI) ---------------------------------------
-  # 1018 thoracic CT scans with annotated lung nodules. Largest
-  # publicly available reference set in this space. CC-BY 3.0.
+  # ---- Lung CT (LIDC-IDRI) — CC-BY-3.0 ---------------------------
+  # 1010 thoracic CT scans with annotated lung nodules.
   - collection: TCIA/LIDC-IDRI
     adapter: tcia
     license_spdx: CC-BY-3.0
@@ -21,17 +35,10 @@ sources:
       Armato SG 3rd, McLennan G, et al. The Lung Image Database
       Consortium (LIDC) and Image Database Resource Initiative
       (IDRI): a completed reference database of lung nodules on CT
-      scans. Med Phys. 2011 Feb;38(2):915-31.
-      doi:10.1118/1.3528204
-    subjects:
-      - LIDC-IDRI-0001
-      - LIDC-IDRI-0002
-      - LIDC-IDRI-0003
+      scans. Med Phys. 2011 Feb;38(2):915-31. doi:10.1118/1.3528204
+    subjects: all
 
-  # ---- Breast DCE-MRI (QIN-BREAST) -------------------------------
-  # Dynamic Contrast-Enhanced breast MRI. Replaces QIN-HEADNECK in
-  # the original plan: the latter does not exist as a NBIA collection
-  # under that name (verified 2026-05-20). CC-BY 3.0.
+  # ---- Breast DCE-MRI (QIN-BREAST) — CC-BY-3.0 -------------------
   - collection: TCIA/QIN-BREAST
     adapter: tcia
     license_spdx: CC-BY-3.0
@@ -40,29 +47,39 @@ sources:
     citation_text: >-
       Huang W, et al. Data from QIN-Breast. The Cancer Imaging
       Archive. doi:10.7937/K9/TCIA.2014.A2N1IXOX
-    subjects:
-      - QIN-BREAST-01-0002
-      - QIN-BREAST-01-0003
+    subjects: all
 
-  # ---- COVID chest CR/CT (MIDRC-RICORD-1C) -----------------------
-  # COVID-positive chest. CC-BY 4.0. Hosted on TCIA infrastructure.
-  # Collection name is case-sensitive in NBIA — '1C' uppercase, the
-  # earlier '1c' silently returned empty subject lists.
+  # ---- COVID chest CR/CT (MIDRC-RICORD-1C) — CC-BY-NC-4.0 --------
+  # NON-COMMERCIAL: verified CC-BY-NC-4.0 (not CC-BY-4.0). Retained and
+  # labelled educational-use-only; excluded from any commercial tier.
+  # Collection name is case-sensitive in NBIA — '1C' uppercase.
   - collection: TCIA/MIDRC-RICORD-1C
     adapter: tcia
-    license_spdx: CC-BY-4.0
-    license_url: https://creativecommons.org/licenses/by/4.0/
+    license_spdx: CC-BY-NC-4.0
+    license_url: https://creativecommons.org/licenses/by-nc/4.0/
     citation_required: true
     citation_text: >-
       Tsai EB, Simpson S, Lungren MP, et al. The RSNA International
       COVID-19 Open Radiology Database (RICORD). Radiology. 2021
       Apr;299(1):E204-E213. doi:10.1148/radiol.2021203957
-    subjects:
-      - MIDRC-RICORD-1C-419639-000025
-      - MIDRC-RICORD-1C-419639-001863
+    subjects: all
 
-  # ---- TCIA/UPENN-GBM (20 subjects) --------------------------
-  # Brain mpMRI, de novo glioblastoma (UPENN-GBM). Multiparametric MR.
+  # ---- COVID chest CT (MIDRC-RICORD-1A) — CC-BY-NC-4.0 ----------
+  # Same RICORD source paper; non-commercial like 1C.
+  - collection: TCIA/MIDRC-RICORD-1A
+    adapter: tcia
+    license_spdx: CC-BY-NC-4.0
+    license_url: https://creativecommons.org/licenses/by-nc/4.0/
+    citation_required: true
+    citation_text: >-
+      Tsai EB, Simpson S, Lungren MP, et al. The RSNA International
+      COVID-19 Open Radiology Database (RICORD). Radiology. 2021
+      Apr;299(1):E204-E213. doi:10.1148/radiol.2021203957
+    subjects: all
+
+  # ---- Brain mpMRI, glioblastoma (UPENN-GBM) — CC-BY-4.0 --------
+  # Defaced multiparametric MR with tumour + brain segmentations. The
+  # CC-BY brain exception under the 2022 face-reconstruction policy.
   - collection: TCIA/UPENN-GBM
     adapter: tcia
     license_spdx: CC-BY-4.0
@@ -73,30 +90,10 @@ sources:
       glioblastoma (UPenn-GBM) cohort: advanced MRI, clinical, genomics, &
       radiomics. Sci Data. 2022;9(1). doi:10.1038/s41597-022-01560-7. Data:
       The Cancer Imaging Archive, doi:10.7937/TCIA.709X-DN49
-    subjects:
-      - UPENN-GBM-00001
-      - UPENN-GBM-00002
-      - UPENN-GBM-00003
-      - UPENN-GBM-00004
-      - UPENN-GBM-00005
-      - UPENN-GBM-00006
-      - UPENN-GBM-00007
-      - UPENN-GBM-00008
-      - UPENN-GBM-00009
-      - UPENN-GBM-00010
-      - UPENN-GBM-00011
-      - UPENN-GBM-00012
-      - UPENN-GBM-00013
-      - UPENN-GBM-00014
-      - UPENN-GBM-00015
-      - UPENN-GBM-00016
-      - UPENN-GBM-00017
-      - UPENN-GBM-00018
-      - UPENN-GBM-00019
-      - UPENN-GBM-00020
+    subjects: all
 
-  # ---- TCIA/ReMIND (20 subjects) -----------------------------
-  # Brain tumour resection: pre-op MR, intra-op ultrasound (US) and SEG (ReMIND).
+  # ---- Brain resection multimodal (ReMIND) — CC-BY-4.0 ----------
+  # Pre-op MR, intra-op ultrasound (US) and SEG.
   - collection: TCIA/ReMIND
     adapter: tcia
     license_spdx: CC-BY-4.0
@@ -107,30 +104,9 @@ sources:
       Multimodal Imaging Database. Sci Data. 2024;11(1).
       doi:10.1038/s41597-024-03295-z. Data: The Cancer Imaging Archive,
       doi:10.7937/3RAG-D070
-    subjects:
-      - ReMIND-001
-      - ReMIND-002
-      - ReMIND-003
-      - ReMIND-004
-      - ReMIND-005
-      - ReMIND-006
-      - ReMIND-007
-      - ReMIND-008
-      - ReMIND-009
-      - ReMIND-010
-      - ReMIND-011
-      - ReMIND-012
-      - ReMIND-013
-      - ReMIND-014
-      - ReMIND-015
-      - ReMIND-016
-      - ReMIND-017
-      - ReMIND-018
-      - ReMIND-019
-      - ReMIND-020
+    subjects: all
 
-  # ---- TCIA/PROSTATEx (20 subjects) --------------------------
-  # Prostate MR (T2/DWI/DCE) from the SPIE-AAPM-NCI PROSTATEx challenge.
+  # ---- Prostate MR (PROSTATEx) — CC-BY-3.0 ----------------------
   - collection: TCIA/PROSTATEx
     adapter: tcia
     license_spdx: CC-BY-3.0
@@ -142,30 +118,9 @@ sources:
       2014;33(5):1083-1092. doi:10.1109/tmi.2014.2303821. Data: SPIE-AAPM
       PROSTATEx Challenge, The Cancer Imaging Archive,
       doi:10.7937/K9TCIA.2017.MURS5CL
-    subjects:
-      - ProstateX-0000
-      - ProstateX-0001
-      - ProstateX-0002
-      - ProstateX-0003
-      - ProstateX-0004
-      - ProstateX-0005
-      - ProstateX-0006
-      - ProstateX-0007
-      - ProstateX-0008
-      - ProstateX-0009
-      - ProstateX-0010
-      - ProstateX-0011
-      - ProstateX-0012
-      - ProstateX-0013
-      - ProstateX-0014
-      - ProstateX-0015
-      - ProstateX-0016
-      - ProstateX-0017
-      - ProstateX-0018
-      - ProstateX-0019
+    subjects: all
 
-  # ---- TCIA/Pancreas-CT (20 subjects) ------------------------
-  # Contrast-enhanced abdominal CT, pancreas (NIH Pancreas-CT).
+  # ---- Abdominal CT, pancreas (Pancreas-CT) — CC-BY-3.0 ---------
   - collection: TCIA/Pancreas-CT
     adapter: tcia
     license_spdx: CC-BY-3.0
@@ -176,30 +131,9 @@ sources:
       Convolutional Networks for Automated Pancreas Segmentation. MICCAI
       2015, LNCS 9349:556-564. doi:10.1007/978-3-319-24553-9_68. Data: The
       Cancer Imaging Archive, doi:10.7937/K9/TCIA.2016.tNB1kqBU
-    subjects:
-      - PANCREAS_0001
-      - PANCREAS_0002
-      - PANCREAS_0003
-      - PANCREAS_0004
-      - PANCREAS_0005
-      - PANCREAS_0006
-      - PANCREAS_0007
-      - PANCREAS_0008
-      - PANCREAS_0009
-      - PANCREAS_0010
-      - PANCREAS_0011
-      - PANCREAS_0012
-      - PANCREAS_0013
-      - PANCREAS_0014
-      - PANCREAS_0015
-      - PANCREAS_0016
-      - PANCREAS_0017
-      - PANCREAS_0018
-      - PANCREAS_0019
-      - PANCREAS_0020
+    subjects: all
 
-  # ---- TCIA/C4KC-KiTS (20 subjects) --------------------------
-  # Kidney tumour contrast CT with segmentations (KiTS19 / C4KC-KiTS).
+  # ---- Kidney tumour CT + SEG (C4KC-KiTS) — CC-BY-3.0 -----------
   - collection: TCIA/C4KC-KiTS
     adapter: tcia
     license_spdx: CC-BY-3.0
@@ -211,30 +145,9 @@ sources:
       Results of the KiTS19 challenge. Med Image Anal. 2021;67:101821.
       doi:10.1016/j.media.2020.101821. Data: C4KC-KiTS, The Cancer Imaging
       Archive, doi:10.7937/TCIA.2019.IX49E8NX
-    subjects:
-      - KiTS-00000
-      - KiTS-00001
-      - KiTS-00002
-      - KiTS-00003
-      - KiTS-00004
-      - KiTS-00005
-      - KiTS-00006
-      - KiTS-00007
-      - KiTS-00008
-      - KiTS-00009
-      - KiTS-00010
-      - KiTS-00011
-      - KiTS-00012
-      - KiTS-00013
-      - KiTS-00014
-      - KiTS-00015
-      - KiTS-00016
-      - KiTS-00017
-      - KiTS-00018
-      - KiTS-00019
+    subjects: all
 
-  # ---- TCIA/HCC-TACE-Seg (20 subjects) -----------------------
-  # Hepatocellular carcinoma multiphase liver CT with segmentations (HCC-TACE-Seg).
+  # ---- Liver multiphase CT + SEG (HCC-TACE-Seg) — CC-BY-4.0 -----
   - collection: TCIA/HCC-TACE-Seg
     adapter: tcia
     license_spdx: CC-BY-4.0
@@ -246,30 +159,9 @@ sources:
       Chemoembolization. Radiol Artif Intell. 2019;1(5):e180021.
       doi:10.1148/ryai.2019180021. Data: The Cancer Imaging Archive,
       doi:10.7937/TCIA.5FNA-0924
-    subjects:
-      - HCC_001
-      - HCC_002
-      - HCC_003
-      - HCC_004
-      - HCC_005
-      - HCC_006
-      - HCC_007
-      - HCC_008
-      - HCC_009
-      - HCC_010
-      - HCC_011
-      - HCC_012
-      - HCC_013
-      - HCC_014
-      - HCC_015
-      - HCC_016
-      - HCC_017
-      - HCC_018
-      - HCC_019
-      - HCC_020
+    subjects: all
 
-  # ---- TCIA/CMMD (20 subjects) -------------------------------
-  # Digital mammography (MG) with biopsy-confirmed types (Chinese Mammography Database).
+  # ---- Digital mammography (CMMD) — CC-BY-4.0 -------------------
   - collection: TCIA/CMMD
     adapter: tcia
     license_spdx: CC-BY-4.0
@@ -281,35 +173,15 @@ sources:
       Comput Math Methods Med. 2019;2019:2717454. doi:10.1155/2019/2717454.
       Data: The Chinese Mammography Database (CMMD), The Cancer Imaging
       Archive, doi:10.7937/tcia.eqde-4b16
-    subjects:
-      - D1-0001
-      - D1-0002
-      - D1-0003
-      - D1-0004
-      - D1-0005
-      - D1-0006
-      - D1-0007
-      - D1-0008
-      - D1-0009
-      - D1-0010
-      - D1-0011
-      - D1-0012
-      - D1-0013
-      - D1-0014
-      - D1-0015
-      - D1-0016
-      - D1-0017
-      - D1-0018
-      - D1-0019
-      - D1-0020
+    subjects: all
 
-  # ---- TCIA/RIDER Lung CT (longitudinal, GT SEG) -----------------
+  # ---- RIDER Lung CT — CC-BY-3.0 (targeted golden) --------------
   # Same-day repeat ("coffee-break" test-retest) thoracic CT with
-  # radiologist tumour segmentations — the reference reproducibility
-  # set for therapy-response measurement. Subject RIDER-1129164940
-  # offers 100 series; the longitudinal-comparison golden ingests only
-  # the test/retest CT pair + their ground-truth SEG via --only-series.
-  # CC-BY 3.0.
+  # radiologist tumour SEG — the reproducibility reference for the
+  # longitudinal-comparison golden. Kept as a single explicit subject so
+  # the golden's --only-series targeting (test/retest CT pair + GT SEG)
+  # stays reproducible; switch to ``subjects: all`` for the full 32-subject
+  # collection in a maximal bulk run.
   - collection: TCIA/RIDER Lung CT
     adapter: tcia
     license_spdx: CC-BY-3.0
@@ -324,9 +196,34 @@ sources:
     subjects:
       - RIDER-1129164940
 
-  # ---- OsiriX educational samples (DROPPED 2026-05-20) -----------
-  # Pixmeo migrated the BRAINIX/MANIX/PHENIX/MAGIX downloads behind
-  # a Zendesk SSO ("download-premium.php") gate; the direct ZIP URLs
-  # return 404 and the redirect target requires a Pixmeo account.
-  # Re-enable only after the Pilot picks a different educational
-  # source (e.g. Visible Human, or TCIA-hosted demo collections).
+# ============================================================================
+# STAGED — verified eligible, ADD when the canonical TCIA "Data Citation"
+# string has been pasted into citation_text. License + page verified in the
+# catalog; only the exact citation string is pending (do NOT fabricate it).
+# Uncomment + fill citation_text per collection, then move above.
+#
+#   TCIA/Pseudo-PHI-DICOM-Data  CC-BY-4.0  (6-modality de-id teaching set)
+#   TCIA/C4KC-KiTS already above
+#   TCIA/CBIS-DDSM              CC-BY-3.0  (MG, mass/calc ROI)
+#   TCIA/CDD-CESM               CC-BY-4.0  (contrast-enhanced MG, BI-RADS)
+#   TCIA/Breast-Lesions-USG     CC-BY-4.0  (breast US + histopath dx)
+#   TCIA/NSCLC-Radiogenomics    CC-BY-3.0  (CT+PET, seg+AIM)
+#   TCIA/SPIE-AAPM-Lung-CT-Challenge  CC-BY-3.0
+#   TCIA/Soft-tissue-Sarcoma    CC-BY-3.0  (CT+PET+MR, GTV contours)
+#   TCIA/Breast-MRI-NACT-Pilot  CC-BY-3.0  (MR + SEG)
+#   TCIA/Prostate-MRI-US-Biopsy CC-BY-4.0  (MR+US, STL seg, Gleason)
+#   TCIA/QIN-PROSTATE-Repeatability CC-BY-4.0 (MR + SEG + SR)
+#   TCIA/CPTAC-LUAD  CC-BY-4.0  (radiology series; pathology via WSI manifest)
+#   TCIA/CPTAC-SAR   CC-BY-4.0
+#   TCIA/NSCLC-Radiomics  CC-BY-NC-3.0  (label non-commercial)
+#
+# CMB-LCA / CMB-CRC are CC-BY-4.0 EXCEPT their head/face series (NIH
+# Controlled). When added, set exclude_body_parts so those series are
+# dropped before download, e.g.:
+#   - collection: TCIA/CMB-LCA
+#     adapter: tcia
+#     license_spdx: CC-BY-4.0
+#     ...
+#     exclude_body_parts: [HEAD, BRAIN, SKULL, FACE]
+#     subjects: all
+# ============================================================================
