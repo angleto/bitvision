@@ -256,6 +256,9 @@ class PixelDeidResult:
     redactions: list[dict] = field(default_factory=list)
     detected_text: bool = False
     decode_failed: bool = False
+    # For the low-risk (face) path: which defacer ran / why it did not. None when
+    # de-facing was not attempted (high-risk path or de-facing disabled).
+    face_deid_reason: str | None = None
 
 
 def _frames_view(arr: np.ndarray, ds: pydicom.Dataset) -> list[np.ndarray]:
@@ -371,25 +374,118 @@ def reencode_pixel_data(ds: pydicom.Dataset, arr: np.ndarray) -> None:
         ds.file_meta.TransferSyntaxUID = ExplicitVRLittleEndian
 
 
+_AUTO = object()  # sentinel: resolve the VLM engine / defacer from config
+
+
+def _deface_low_risk(
+    ds: pydicom.Dataset, src: bytes, risk: PixelRisk, face_defacer: object
+) -> PixelDeidResult:
+    """Low-risk (recognizable-visual-feature) path. With de-facing disabled
+    (default) the instance ships unchanged. With a defacer configured it is
+    masked + flagged for human review; provenance is written only on accept."""
+    from bvphoenix.services.face_deid import get_defacer
+
+    defacer = get_defacer() if face_defacer is _AUTO else face_defacer
+    if defacer is None:
+        # De-facing disabled → preserve today's behaviour (ship as-is).
+        return PixelDeidResult(out_bytes=src, risk=risk, residual_suspect=False)
+    body = _first(ds, "BodyPartExamined") or ""
+    try:
+        arr = np.asarray(ds.pixel_array)
+    except Exception:
+        return PixelDeidResult(
+            out_bytes=src,
+            risk=risk,
+            residual_suspect=True,
+            decode_failed=True,
+            face_deid_reason="decode_failed",
+        )
+    frames = _frames_view(arr, ds)
+    result = defacer.deface(frames, body_part=body)
+    if not result.applied:
+        # Nothing masked (NullDefacer, or an ROI-bearing body part the heuristic
+        # refuses): features NOT removed, so ship as-is but mark residual_suspect
+        # so an egress gate can hold it for review.
+        return PixelDeidResult(
+            out_bytes=src, risk=risk, residual_suspect=True, face_deid_reason=result.reason
+        )
+    redact_frames(frames, result.boxes_per_frame, black=_black_value(ds))
+    reencode_pixel_data(ds, arr)
+    out = io.BytesIO()
+    ds.save_as(out, write_like_original=False)
+    redactions = [
+        {"x": x, "y": y, "w": w, "h": h, "text": "<face>", "conf": -1.0}
+        for boxes in result.boxes_per_frame
+        for (x, y, w, h) in boxes
+    ]
+    return PixelDeidResult(
+        out_bytes=out.getvalue(),
+        risk=risk,
+        residual_suspect=True,  # human confirms before RecognizableVisualFeatures=NO
+        redactions=redactions,
+        face_deid_reason=result.reason,
+    )
+
+
 def clean_pixel_data(
-    src: bytes, *, languages: str = "eng", min_conf: float = 30.0, selective: bool = False
+    src: bytes,
+    *,
+    languages: str = "eng",
+    min_conf: float = 30.0,
+    selective: bool | None = None,
+    vlm_engine: object = _AUTO,
+    face_defacer: object = _AUTO,
 ) -> PixelDeidResult:
     """Redact burned-in text from a high-risk instance's pixels.
 
     Returns the redacted bytes + the redaction boxes. ``residual_suspect`` is
     ALWAYS True for high-risk (a human must confirm); provenance
     (BurnedInAnnotation=NO + 113101) is written only after that accept, via
-    :func:`mark_pixels_clean`. ``none``/``low`` risk passes through untouched.
+    :func:`mark_pixels_clean`. ``none`` risk passes through untouched.
+
+    ``low`` (face) risk is routed to the de-facing seam: with de-facing disabled
+    (default) it ships unchanged; with a defacer configured the result carries
+    ``residual_suspect=True`` + ``face_deid_reason`` (the signal an egress gate
+    consumes to hold it for human review), and ``RecognizableVisualFeatures=NO``
+    + CID 7050 ``113102`` are written only after accept via
+    :func:`mark_visual_features_removed`. NOTE: wiring an egress gate
+    (PixelPhiCheck / training_cohort_export) to that signal is follow-up work;
+    today the signal is produced but not yet consumed (de-facing is off by
+    default, so this is not a current-behavior regression).
+
+    ``selective`` chooses the redaction mode for the high-risk text path:
+    ``None`` resolves from config (``BVP_PIXEL_DEID_REDACTION_MODE``, default
+    over-redact); ``True`` keeps clinical scan text and masks only PHI-shaped
+    boxes; ``False`` masks every detected box.
+
+    ``vlm_engine`` is the M5 hard-case tier: when an OCR-blank high-risk frame is
+    found (dense overlay / OCR miss), the engine is consulted for extra boxes.
+    Default ``_AUTO`` resolves it from config (off unless enabled); pass an
+    engine instance to force it, or ``None`` to disable.
     """
     ds = pydicom.dcmread(io.BytesIO(src))
     risk = classify_pixel_risk(ds)
-    if not risk.is_high:
+    if risk.level == "none":
         return PixelDeidResult(out_bytes=src, risk=risk, residual_suspect=False)
+    if risk.level == "low":
+        return _deface_low_risk(ds, src, risk, face_defacer)
     try:
         arr = np.asarray(ds.pixel_array)
     except Exception:
         # Undecodable pixels can't be redacted → block (no output, review).
         return PixelDeidResult(out_bytes=src, risk=risk, residual_suspect=True, decode_failed=True)
+
+    if selective is None:
+        from bvphoenix.config import get_settings
+
+        selective = (get_settings().pixel_deid_redaction_mode or "").strip().lower() == "selective"
+
+    if vlm_engine is _AUTO:
+        from bvphoenix.services.pixel_phi_engine import get_pixel_phi_engine
+
+        engine = get_pixel_phi_engine()
+    else:
+        engine = vlm_engine
 
     photometric = str(getattr(ds, "PhotometricInterpretation", "") or "").upper()
     black = _black_value(ds)
@@ -398,16 +494,23 @@ def clean_pixel_data(
     boxes_per_frame: list[list[tuple[int, int, int, int]]] = []
     detected = False
     for frame in frames:
-        boxes = detect_text_boxes(
-            _frame_to_ocr_image(frame, photometric), languages=languages, min_conf=min_conf
-        )
+        ocr_img = _frame_to_ocr_image(frame, photometric)
+        boxes = detect_text_boxes(ocr_img, languages=languages, min_conf=min_conf)
         if boxes:
             detected = True
         keep = classify_text_phi(boxes) if selective else boxes
-        boxes_per_frame.append([(b.x, b.y, b.w, b.h) for b in keep])
+        frame_boxes = [(b.x, b.y, b.w, b.h) for b in keep]
         redactions.extend(
             {"x": b.x, "y": b.y, "w": b.w, "h": b.h, "text": b.text, "conf": b.conf} for b in keep
         )
+        # M5 hard-case tier: an OCR-blank high-risk frame (dense overlay the
+        # cheap tier couldn't read) is escalated. NullEngine over-redacts the
+        # frame; HttpEngine queries the in-cluster model. Only when enabled.
+        if engine is not None and not boxes:
+            for x, y, w, h in engine.detect_boxes(np.asarray(ocr_img)):
+                frame_boxes.append((x, y, w, h))
+                redactions.append({"x": x, "y": y, "w": w, "h": h, "text": "<vlm>", "conf": -1.0})
+        boxes_per_frame.append(frame_boxes)
     redact_frames(frames, boxes_per_frame, black=black)
     reencode_pixel_data(ds, arr)
     out = io.BytesIO()
@@ -440,6 +543,26 @@ def mark_pixels_clean(ds: pydicom.Dataset) -> None:
         ds.DeidentificationMethodCodeSequence = _Seq([*existing, item])
 
 
+# CID 7050 Clean Recognizable Visual Features Option, stamped ONLY after a human
+# confirms the defaced image, never automatically.
+_VISUAL_FEATURES_CODE = ("113102", "DCM", "Clean Recognizable Visual Features Option")
+
+
+def mark_visual_features_removed(ds: pydicom.Dataset) -> None:
+    """Set RecognizableVisualFeatures=NO + append the Clean Recognizable Visual
+    Features Option code. Call ONLY after a human confirms the defaced image
+    carries no recognizable face."""
+    from pydicom.dataset import Dataset as _DS
+    from pydicom.sequence import Sequence as _Seq
+
+    ds.RecognizableVisualFeatures = "NO"
+    existing = list(getattr(ds, "DeidentificationMethodCodeSequence", []) or [])
+    if not any(getattr(e, "CodeValue", None) == "113102" for e in existing):
+        item = _DS()
+        item.CodeValue, item.CodingSchemeDesignator, item.CodeMeaning = _VISUAL_FEATURES_CODE
+        ds.DeidentificationMethodCodeSequence = _Seq([*existing, item])
+
+
 __all__ = [
     "FACE_RISK_MODALITIES",
     "HIGH_RISK_MODALITIES",
@@ -453,6 +576,7 @@ __all__ = [
     "clean_pixel_data",
     "detect_text_boxes",
     "mark_pixels_clean",
+    "mark_visual_features_removed",
     "redact_frames",
     "reencode_pixel_data",
 ]

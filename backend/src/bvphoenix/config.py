@@ -333,6 +333,49 @@ class Settings(BaseSettings):
     deid_retain_device_identity: bool = Field(default=False)
     deid_retain_safe_private: bool = Field(default=False)
 
+    # ---- Burned-in-pixel VLM hard-case tier (services/pixel_phi_engine, M5) ----
+    # Opt-in: off by default, the Tesseract tier + human review are the floor.
+    # When on, an OCR-blank high-risk frame is escalated to the engine.
+    pixel_phi_vlm_enabled: bool = Field(default=False)
+    # In-cluster URL of pixelphi-svc (PaddleOCR + small classifier). Empty +
+    # enabled => NullPixelPhiEngine (over-redact uncertain frames, no model).
+    pixel_phi_svc_url: str = Field(default="")
+    # Host allowlist for the engine: a PHI-bearing crop is NEVER POSTed to a host
+    # outside this set (storage isolation, no external API).
+    pixel_phi_allowed_hosts: str = Field(default="localhost,127.0.0.1,bvphoenix-pixelphi-svc")
+
+    # ---- Content-safety screening for public contributions (services/content_safety, M6) ----
+    # Provider selector: "" / "null" => NullScreener (passes, but records that no
+    # screening ran, the absence is visible, never a silent "safe"). "http" =>
+    # HttpContentSafetyScreener calling an in-cluster service.
+    content_safety_provider: str = Field(default="")
+    # In-cluster URL of the screening service (only used when provider == "http").
+    content_safety_endpoint: str = Field(default="")
+    # Host allowlist: an image is NEVER POSTed to a host outside this set
+    # (storage isolation). A configured provider whose host is not allowlisted
+    # fails CLOSED to "block" without any network call.
+    content_safety_allowed_hosts: str = Field(
+        default="localhost,127.0.0.1,bvphoenix-contentsafety-svc"
+    )
+    content_safety_timeout: float = Field(default=8.0)
+
+    # ---- Burned-in-pixel redaction mode (services/pixel_deid, M6) ----
+    # "over_redact" (default, recall-first): mask EVERY detected text box.
+    # "selective": keep clinically-relevant scan text (measurements, scale bars),
+    # mask only PHI-shaped detections. High-risk still routes to human review in
+    # either mode; selective only changes which boxes are blacked out.
+    pixel_deid_redaction_mode: str = Field(default="over_redact")
+
+    # ---- De-facing for recognizable-visual-feature risk (services/face_deid, M6) ----
+    # Off by default: face-risk (head/face CT/MR/PT) ships as today. When enabled,
+    # those instances route through the defacer + human review before any public
+    # egress. Real 3D de-facing is a pluggable future tier; the heuristic masker is
+    # a conservative placeholder.
+    face_deid_enabled: bool = Field(default=False)
+    # "null" (records that de-facing did not run -> review) | "heuristic"
+    # (conservative anterior-face band mask for HEAD/SKULL/BRAIN only).
+    face_deid_mode: str = Field(default="null")
+
     @model_validator(mode="after")
     def _reject_weak_deid_salt_in_production(self) -> Settings:
         """Mirror the JWT-secret guard for the de-identification salt. An empty
