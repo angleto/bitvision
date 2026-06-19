@@ -2178,6 +2178,7 @@ export default function SeriesViewerPage() {
                 measurements={allMeasurements}
                 markerFade={markerFade}
                 modality={series?.modality ?? null}
+                suggestedVoi={suggestedFromDicom(series)}
                 customOpacityStops={vrCustomOpacity}
                 customRange={vrRangeOverride}
                 customColorStops={vrCustomColors}
