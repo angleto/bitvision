@@ -140,6 +140,7 @@ from bvphoenix.db.models.report_contents import (
     ReportContent,
     ReportContentCitation,
 )
+from bvphoenix.db.models.phase_enhancement import PhaseEnhancementSet
 from bvphoenix.db.models.response_assessments import (
     ResponseAssessment,
     ResponseAssessmentRevision,
@@ -312,6 +313,7 @@ __all__ = [
     "ReindexJob",
     "ReportContent",
     "ReportContentCitation",
+    "PhaseEnhancementSet",
     "ResponseAssessment",
     "ResponseAssessmentRevision",
     "RevokedToken",
