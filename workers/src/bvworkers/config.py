@@ -61,6 +61,14 @@ class Settings(BaseSettings):
     # not fit a 60 GiB node. Above this, tiling is deferred (the slide
     # still ingests + serves thumbnail/macro).
     wsi_tile_max_bytes: int = Field(default=10 * 1024 * 1024 * 1024)
+    # Slides ABOVE this are not pre-generated: a full gigapixel DZI pyramid
+    # (CAMELYON-scale: ~150k tiles + per-tile S3 uploads) exceeds the worker
+    # job timeout and would loop forever. The backend serves these on the
+    # fly instead (services.wsi_tiles, OpenSlide random-access from a bounded
+    # S3-source cache). 512 MiB: ordinary slides pre-generate (cached,
+    # cheap); CAMELYON-scale slides are tiled live. The worker marks them
+    # with a non-fatal dzi_error so the backfill (dzi_error IS NULL) skips them.
+    wsi_pregenerate_max_bytes: int = Field(default=512 * 1024 * 1024)
     # Scratch dir for source download + dzsave output. In production this
     # points at an emptyDir with a sizeLimit so an oversize render evicts
     # only this pod instead of tainting the node with DiskPressure. None
