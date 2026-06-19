@@ -298,6 +298,19 @@ async def tile_wsi(ctx: dict, job_id: str, slide_id: str) -> dict[str, Any]:  # 
                 else None
             )
 
+        # Gigapixel slides (CAMELYON-scale) can't pre-generate a full DZI
+        # pyramid inside the worker job timeout — they'd loop forever. Mark
+        # them non-fatally (excludes from the backfill's dzi_error IS NULL
+        # candidate set) and return; the backend tiles them ON THE FLY via
+        # services.wsi_tiles when dzi_ready is false.
+        if size_bytes > settings.wsi_pregenerate_max_bytes:
+            await _set_error(
+                "served_live",
+                f"{size_bytes} > pregenerate cap {settings.wsi_pregenerate_max_bytes}; "
+                "served on the fly by the backend",
+            )
+            return {"status": "served_live", "slide_id": slide_id}
+
         use_openslide = slide_class == "wsi" or source_format in _WSI_READER_FORMATS
         if use_openslide and not _has_openslide_loader():
             await _set_error("engine_unavailable", f"no openslide loader for {source_format}")

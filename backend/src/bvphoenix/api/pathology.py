@@ -202,20 +202,35 @@ async def get_pathology_slide_dzi(
 ) -> Response:
     """DeepZoom ``.dzi`` XML descriptor for the OpenSeadragon viewer.
 
-    Streams the descriptor the ``tile_wsi`` worker pre-generated into the
-    derivatives bucket. 409 (not 404) when the pyramid is not built yet,
-    so the viewer can distinguish "tiling in progress" from "no slide".
+    Hybrid serving:
+
+    * If the ``tile_wsi`` worker pre-generated the pyramid (``dzi_ready``),
+      stream the descriptor from the derivatives bucket — cheap, cached,
+      the default for ordinary-size slides.
+    * Otherwise fall back to ON-THE-FLY tiling (``services.wsi_tiles``):
+      gigapixel slides (CAMELYON, ~150k tiles) exceed the worker's 30-min
+      job timeout and would never pre-generate, so they are tiled live from
+      a bounded S3-source cache rather than 409-ing forever.
     """
     slide = await _load_visible_slide(db, slide_id=slide_id, user=user)
-    if not slide.dzi_ready or not slide.s3_dzi_key:
+    if slide.dzi_ready and slide.s3_dzi_key:
+        storage = get_s3_storage()
+        derivatives = get_settings().s3_bucket_derivatives
+        body = await run_in_threadpool(
+            storage.get_object_bytes, bucket=derivatives, key=slide.s3_dzi_key
+        )
+        return Response(
+            content=body,
+            media_type="application/xml",
+            headers={"Cache-Control": _tile_cache_control(slide.is_public)},
+        )
+    if not slide.s3_source_key:
         raise HTTPException(status_code=409, detail="tiles not ready")
-    storage = get_s3_storage()
-    derivatives = get_settings().s3_bucket_derivatives
-    body = await run_in_threadpool(
-        storage.get_object_bytes, bucket=derivatives, key=slide.s3_dzi_key
-    )
+    from bvphoenix.services.wsi_tiles import get_dzi_xml
+
+    xml = await run_in_threadpool(get_dzi_xml, slide)
     return Response(
-        content=body,
+        content=xml,
         media_type="application/xml",
         headers={"Cache-Control": _tile_cache_control(slide.is_public)},
     )
@@ -230,21 +245,35 @@ async def get_pathology_slide_tile(
     db: Annotated[AsyncSession, Depends(get_db)],
     user: Annotated[User | None, Depends(optional_user)],
 ) -> Response:
-    """Proxy one pre-generated DeepZoom JPEG tile from the derivatives
-    bucket (visibility-gated, storage-isolated)."""
+    """One DeepZoom JPEG tile. Hybrid: pre-generated tile from the
+    derivatives bucket when ``dzi_ready``, else tiled on the fly from the
+    source (gigapixel slides that never pre-generate). Visibility-gated,
+    storage-isolated either way."""
     slide = await _load_visible_slide(db, slide_id=slide_id, user=user)
-    if not slide.dzi_ready:
-        raise HTTPException(status_code=409, detail="tiles not ready")
     if level < 0 or col < 0 or row < 0:
         raise HTTPException(status_code=404, detail="tile out of range")
-    if slide.dzi_levels is not None and level >= slide.dzi_levels:
-        raise HTTPException(status_code=404, detail="tile out of range")
-    storage = get_s3_storage()
-    derivatives = get_settings().s3_bucket_derivatives
-    key = dzi_tile_key(slide_id, level, col, row, fmt="jpg")
+    if slide.dzi_ready:
+        if slide.dzi_levels is not None and level >= slide.dzi_levels:
+            raise HTTPException(status_code=404, detail="tile out of range")
+        storage = get_s3_storage()
+        derivatives = get_settings().s3_bucket_derivatives
+        key = dzi_tile_key(slide_id, level, col, row, fmt="jpg")
+        try:
+            body = await run_in_threadpool(storage.get_object_bytes, bucket=derivatives, key=key)
+        except Exception as exc:  # NoSuchKey for an out-of-grid address
+            raise HTTPException(status_code=404, detail="tile out of range") from exc
+        return Response(
+            content=body,
+            media_type="image/jpeg",
+            headers={"Cache-Control": _tile_cache_control(slide.is_public)},
+        )
+    if not slide.s3_source_key:
+        raise HTTPException(status_code=409, detail="tiles not ready")
+    from bvphoenix.services.wsi_tiles import get_tile_jpeg
+
     try:
-        body = await run_in_threadpool(storage.get_object_bytes, bucket=derivatives, key=key)
-    except Exception as exc:  # NoSuchKey for an out-of-grid address
+        body = await run_in_threadpool(get_tile_jpeg, slide, level=level, col=col, row=row)
+    except KeyError as exc:
         raise HTTPException(status_code=404, detail="tile out of range") from exc
     return Response(
         content=body,
