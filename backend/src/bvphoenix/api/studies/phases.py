@@ -430,53 +430,86 @@ async def compute_phase_roi_stats(
         for s in await _load_study_series_ordered(db, study.id)
         if (s.modality or "").upper() == "CT" and s.acquisition_phase
     ]
+
+    # Load every phase's packed-volume derivative in ONE query, capture the
+    # plain data the rest of the handler needs, then RELEASE the pooled DB
+    # connection BEFORE the S3 fan-out below. Each phase volume is a multi-MB
+    # ranged GET through the bandwidth-limited egress gateway; holding the
+    # connection across N of them drains the pool under even light concurrency,
+    # surfacing as `QueuePool limit ... TimeoutError` 500s here AND on sibling
+    # endpoints that then cannot get a connection. Mirrors api/display_metadata.
+    deriv_rows = (
+        (
+            await db.execute(
+                select(Derivative).where(
+                    Derivative.series_id.in_([s.id for s in rows]),
+                    Derivative.kind == DERIVATIVE_KIND,
+                    Derivative.format == DERIVATIVE_FORMAT,
+                    Derivative.stack_index == 0,
+                )
+            )
+        )
+        .scalars()
+        .all()
+        if rows
+        else []
+    )
+    deriv_by_series = {d.series_id: d for d in deriv_rows}
+    # (series_id, acquisition_phase, s3_bucket, s3_key, geometry) per phase.
+    work: list[tuple[uuid.UUID, str | None, str | None, str | None, dict | None]] = []
+    for s in rows:
+        d = deriv_by_series.get(s.id)
+        geom = d.geometry if (d is not None and isinstance(d.geometry, dict)) else None
+        work.append(
+            (
+                s.id,
+                s.acquisition_phase,
+                d.s3_bucket if d is not None else None,
+                d.s3_key if d is not None else None,
+                geom,
+            )
+        )
+    study_id_val = study.id
+    actor_subject_id = user.subject_id if user else None
+    await db.close()
+
     storage = get_s3_storage()
     ref_for = body.frame_of_reference_uid
     samples: list[PhaseSampleOut] = []
     skipped: list[PhaseSkippedOut] = []
     points: list[PhaseHu] = []
 
-    for s in rows:
-        deriv = (
-            await db.execute(
-                select(Derivative).where(
-                    Derivative.series_id == s.id,
-                    Derivative.kind == DERIVATIVE_KIND,
-                    Derivative.format == DERIVATIVE_FORMAT,
-                    Derivative.stack_index == 0,
-                )
-            )
-        ).scalar_one_or_none()
-        if deriv is None:
+    for series_id, phase, bucket, key, geom in work:
+        if bucket is None or key is None:
             skipped.append(
-                PhaseSkippedOut(
-                    series_id=s.id, acquisition_phase=s.acquisition_phase, reason="not packed"
-                )
+                PhaseSkippedOut(series_id=series_id, acquisition_phase=phase, reason="not packed")
             )
             continue
-        geom = deriv.geometry if isinstance(deriv.geometry, dict) else None
         for_uid = geom.get("frame_of_reference_uid") if geom else None
         if ref_for is None:
             ref_for = for_uid  # first packed phase defines the reference frame
         if ref_for and for_uid and for_uid != ref_for:
             skipped.append(
                 PhaseSkippedOut(
-                    series_id=s.id,
-                    acquisition_phase=s.acquisition_phase,
+                    series_id=series_id,
+                    acquisition_phase=phase,
                     reason="different frame of reference",
                 )
             )
             continue
 
-        cached = await asyncio.to_thread(
-            storage.get_object_bytes, bucket=deriv.s3_bucket, key=deriv.s3_key
-        )
-        nx, ny, nz, sx, sy, sz, _vmin, _vmax = HEADER_STRUCT.unpack_from(cached, 0)
-        arr = np.frombuffer(cached, dtype=np.float32, offset=HEADER_STRUCT.size).reshape(
-            int(nz), int(ny), int(nx)
-        )
-        spacing = (float(sx), float(sy), float(sz))
+        # The S3 fetch + decode + sampling all live inside the try: a missing
+        # blob (S3 NoSuchKey), a truncated/corrupt volume (struct/reshape
+        # error), or a geometry/ROI mismatch (ValueError) must degrade THAT
+        # phase to ``skipped`` — never 500 the whole wash-out (the symptom the
+        # radiologist hit). Only one phase failing should not lose the rest.
         try:
+            cached = await asyncio.to_thread(storage.get_object_bytes, bucket=bucket, key=key)
+            nx, ny, nz, sx, sy, sz, _vmin, _vmax = HEADER_STRUCT.unpack_from(cached, 0)
+            arr = np.frombuffer(cached, dtype=np.float32, offset=HEADER_STRUCT.size).reshape(
+                int(nz), int(ny), int(nx)
+            )
+            spacing = (float(sx), float(sy), float(sz))
             if body.kind == "sphere":
                 assert body.center_lps is not None and body.radius_mm is not None
                 ijk = world_to_ijk(tuple(body.center_lps), geom, spacing)
@@ -492,24 +525,31 @@ async def compute_phase_roi_stats(
                 stats = sample_bbox_hu(arr, ijk_min, ijk_max)
         except ValueError as exc:
             skipped.append(
+                PhaseSkippedOut(series_id=series_id, acquisition_phase=phase, reason=str(exc))
+            )
+            continue
+        except Exception as exc:  # degrade a bad volume, don't 500 the request
+            skipped.append(
                 PhaseSkippedOut(
-                    series_id=s.id, acquisition_phase=s.acquisition_phase, reason=str(exc)
+                    series_id=series_id,
+                    acquisition_phase=phase,
+                    reason=f"volume unreadable ({type(exc).__name__})",
                 )
             )
             continue
 
         samples.append(
             PhaseSampleOut(
-                series_id=s.id,
-                acquisition_phase=s.acquisition_phase,
+                series_id=series_id,
+                acquisition_phase=phase,
                 hu_mean=stats.mean,
                 hu_std=stats.std,
                 voxel_count=stats.voxel_count,
                 frame_of_reference_uid=for_uid,
             )
         )
-        if s.acquisition_phase:
-            points.append(PhaseHu(acquisition_phase=s.acquisition_phase, hu_mean=stats.mean))
+        if phase:
+            points.append(PhaseHu(acquisition_phase=phase, hu_mean=stats.mean))
 
     result = compute_washout(points)
     washout = PhaseWashoutOut(
@@ -533,13 +573,13 @@ async def compute_phase_roi_stats(
 
     await audit.log(
         action="phase_roi_stats",
-        actor_subject_id=user.subject_id if user else None,
+        actor_subject_id=actor_subject_id,
         resource_kind="study",
-        resource_id=study.id,
+        resource_id=study_id_val,
         metadata={"kind": body.kind, "phases_sampled": len(samples), "skipped": len(skipped)},
     )
     return PhaseRoiStatsOut(
-        study_id=study.id,
+        study_id=study_id_val,
         reference_frame_of_reference_uid=ref_for,
         samples=samples,
         skipped=skipped,
