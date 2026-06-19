@@ -3144,7 +3144,10 @@ export async function fetchVolume(
 // Transparency (F11.2) — public aggregate platform stats, no auth required.
 // ---------------------------------------------------------------------------
 
-export type TransparencyOut = {
+// Public slice served by GET /api/transparency (no auth): aggregate
+// study counts + governance only. Community size, sharing activity, and
+// LLM activity are NOT exposed here — they live on the admin superset.
+export type TransparencyPublicOut = {
   generated_at: string;
   version: string;
   studies: {
@@ -3153,6 +3156,14 @@ export type TransparencyOut = {
     public: number;
     by_modality: Record<string, number>;
   };
+  governance: {
+    license: string;
+  };
+};
+
+// Admin superset served by GET /api/transparency/admin (require_admin):
+// the public slice plus the non-public operational counts.
+export type TransparencyOut = TransparencyPublicOut & {
   users: { total: number };
   sharing: {
     grants_active: number;
@@ -3163,14 +3174,14 @@ export type TransparencyOut = {
     consultations_total: number;
     summaries_total: number;
   };
-  governance: {
-    license: string;
-  };
 };
 
 export const transparencyApi = {
-  get(): Promise<TransparencyOut> {
-    return request<TransparencyOut>("/api/transparency");
+  get(): Promise<TransparencyPublicOut> {
+    return request<TransparencyPublicOut>("/api/transparency");
+  },
+  getAdmin(): Promise<TransparencyOut> {
+    return request<TransparencyOut>("/api/transparency/admin");
   },
 };
 
