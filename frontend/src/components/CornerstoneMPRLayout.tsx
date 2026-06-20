@@ -3051,6 +3051,13 @@ const CornerstoneMPRLayout = forwardRef<MPRLayoutHandle, ExtendedProps>(
                 | (cs.Types.IVolumeViewport & { jumpToWorld?: (w: cs.Types.Point3) => boolean })
                 | undefined;
               if (clampedWorld && axialVp?.jumpToWorld) axialVp.jumpToWorld(clampedWorld);
+              // Force the shared engine to repaint EVERY viewport's on-screen
+              // canvas. Verified failure mode: on the shared rendering engine a
+              // per-viewport render after a synced camera move only blits the
+              // ONE pane it was called on — the sibling panes keep a stale frame
+              // (HUD/crosshair read the new slice 153 while the canvas still
+              // shows slice 0). A full engine render flags+copies all tiles.
+              engine.render();
             }
             // false = caller learns the point isn't covered here (still rendered
             // at the nearest slice, never black).
