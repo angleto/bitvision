@@ -99,6 +99,10 @@ function PhasePane({
   const t = useTranslations("contrast");
   const [vol, setVol] = useState<VolumeData | null>(null);
   const [err, setErr] = useState<string | null>(null);
+  // Bytes of the FULL-res volume streamed in behind the preview. A moving
+  // number proves the HD load is progressing (frozen = stalled), so the pane
+  // is never a mute "loading…" or a content-less spinner.
+  const [fullProgress, setFullProgress] = useState<{ loaded: number } | null>(null);
   const localRef = useRef<MPRLayoutHandle | null>(null);
   const lastPhaseRef = useRef<string | null | undefined>(undefined);
   const sid = phase.series_id;
@@ -107,6 +111,7 @@ function PhasePane({
     let cancelled = false;
     setVol(null);
     setErr(null);
+    setFullProgress(null);
     lastPhaseRef.current = undefined;
     void (async () => {
       // Progressive: paint the ~1/8 low-res preview first (≈2s) so the pane
@@ -132,8 +137,13 @@ function PhasePane({
         /* preview is optional — fall through to the full-res load */
       }
       try {
-        const { header, scalars } = await fetchVolume(sid);
+        const { header, scalars } = await fetchVolume(sid, {
+          onProgress: (p) => {
+            if (!cancelled) setFullProgress({ loaded: p.loaded });
+          },
+        });
         if (cancelled) return;
+        setFullProgress(null);
         // Re-arm the phase-preset guard so it re-applies across the
         // preview→full swap: ``vol`` changes but ``acquisition_phase`` does
         // not, and the volumeId flip (:preview→full) re-fits/auto-windows —
@@ -201,21 +211,47 @@ function PhasePane({
     return <div style={{ color: "#6b7280", padding: "1rem" }}>{t("loading")}</div>;
   }
   return (
-    <CornerstoneMPRLayout
-      ref={setRef}
-      volume={vol}
-      showAxial
-      showSagittal={false}
-      showCoronal={false}
-      show3D={false}
-      layout="1x1"
-      seriesId={sid}
-      modality={phase.modality ?? null}
-      seriesDescription={phase.series_description ?? undefined}
-      activeTool={activeTool}
-      onCrosshairChange={onCrosshair}
-      onMeasurementsChange={onMeasurements}
-    />
+    <div style={{ position: "relative", width: "100%", height: "100%" }}>
+      <CornerstoneMPRLayout
+        ref={setRef}
+        volume={vol}
+        showAxial
+        showSagittal={false}
+        showCoronal={false}
+        show3D={false}
+        layout="1x1"
+        seriesId={sid}
+        modality={phase.modality ?? null}
+        seriesDescription={phase.series_description ?? undefined}
+        activeTool={activeTool}
+        onCrosshairChange={onCrosshair}
+        onMeasurementsChange={onMeasurements}
+      />
+      {vol.resolution === "preview" && fullProgress ? (
+        // The pane already shows the low-res preview; this badge proves the
+        // full-res is still streaming in AND advancing (moving MB = progress,
+        // frozen = stalled) rather than a silent low-res image.
+        <div
+          aria-live="polite"
+          style={{
+            position: "absolute",
+            bottom: 6,
+            right: 6,
+            zIndex: 5,
+            background: "rgba(15,20,30,0.78)",
+            color: "#cbd5e1",
+            fontSize: "0.66rem",
+            padding: "0.2rem 0.45rem",
+            borderRadius: 5,
+            border: "1px solid #2a2f3b",
+            fontFamily: "ui-monospace, monospace",
+            pointerEvents: "none",
+          }}
+        >
+          Full-res · {(fullProgress.loaded / 1_048_576).toFixed(1)} MB
+        </div>
+      ) : null}
+    </div>
   );
 }
 
