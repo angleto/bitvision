@@ -423,6 +423,53 @@ async def _enqueue_pack(ids: list[uuid.UUID]) -> int:
         await redis.close()
 
 
+def _preview_candidate_ids(
+    session: Session,
+    *,
+    patient_id: uuid.UUID | None,
+    only_missing: bool,
+) -> list[uuid.UUID]:
+    """Series that have a packed full-res primary volume. With ``only_missing``
+    (default) restrict to those LACKING the 1/8-res ``volume_f32_preview`` the
+    viewer's progressive preview-first load needs."""
+    joins = [
+        "JOIN imaging_studies st ON st.id = s.study_id",
+        "JOIN derivatives d ON d.series_id = s.id",
+    ]
+    where = ["d.kind = 'volume_f32'", "d.stack_index = 0"]
+    params: dict[str, object] = {}
+    if only_missing:
+        joins.append(
+            "LEFT JOIN derivatives p ON p.series_id = s.id AND p.kind = 'volume_f32_preview'"
+        )
+        where.append("p.id IS NULL")
+    if patient_id is not None:
+        where.append("st.patient_id = :pid")
+        params["pid"] = patient_id
+    sql = (
+        "SELECT DISTINCT s.id FROM series s "
+        + " ".join(joins)
+        + " WHERE "
+        + " AND ".join(where)
+        + " ORDER BY s.id"
+    )
+    rows = session.execute(text(sql), params).all()
+    return [uuid.UUID(str(r[0])) for r in rows]
+
+
+async def _enqueue_prefetch(ids: list[uuid.UUID]) -> int:
+    settings = get_settings()
+    redis = await create_pool(redis_settings(settings.redis_url))
+    try:
+        count = 0
+        for sid in ids:
+            await redis.enqueue_job("prefetch_series", str(sid))
+            count += 1
+        return count
+    finally:
+        await redis.close()
+
+
 @main.command("geometry")
 @click.option(
     "--patient",
@@ -492,6 +539,72 @@ def geometry(
 
     n = asyncio.run(_enqueue_pack(ids))
     click.echo(f"enqueued pack_volume: {n} jobs")
+    click.echo("Run an Arq worker to process the queue.")
+
+
+@main.command("previews")
+@click.option(
+    "--patient", "patient", default=None, help="Patient UUID. Mutually exclusive with --all."
+)
+@click.option(
+    "--all",
+    "all_patients",
+    is_flag=True,
+    default=False,
+    help="Generate previews for every patient. Use with care on large datasets.",
+)
+@click.option(
+    "--only-missing/--all-volumes",
+    "only_missing",
+    default=True,
+    show_default=True,
+    help="Only series lacking a volume_f32_preview (default), or refresh every series.",
+)
+@click.option("--dry-run", is_flag=True, help="Count candidate series and print the plan.")
+def previews(
+    patient: str | None,
+    all_patients: bool,
+    only_missing: bool,
+    dry_run: bool,
+) -> None:
+    """Pre-generate the 1/8-res ``volume_f32_preview`` for each series so the
+    viewer's progressive preview-first load is instant (the first open of a
+    series with no preview otherwise builds it on-the-fly, ~30 s over the
+    throttled egress).
+
+    Enqueues ``prefetch_series`` (idempotent — builds the preview from the
+    cached full-res blob, no re-pack). Requires an Arq worker running.
+    """
+    if (patient is None) == (not all_patients):
+        click.echo("specify exactly one of --patient <id> or --all", err=True)
+        sys.exit(2)
+
+    patient_uuid: uuid.UUID | None = None
+    if patient is not None:
+        try:
+            patient_uuid = uuid.UUID(patient)
+        except ValueError:
+            click.echo(f"--patient must be a UUID, got {patient!r}", err=True)
+            sys.exit(2)
+
+    engine = _engine()
+    with Session(engine) as session:
+        ids = _preview_candidate_ids(session, patient_id=patient_uuid, only_missing=only_missing)
+
+    scope = f"patient {patient_uuid}" if patient_uuid else "ALL patients"
+    click.echo(f"scope            : {scope}")
+    click.echo(f"only-missing     : {only_missing}")
+    click.echo(f"series candidates: {len(ids)}")
+
+    if dry_run:
+        click.echo("DRY RUN — no jobs enqueued.")
+        return
+    if not ids:
+        click.echo("nothing to do")
+        return
+
+    n = asyncio.run(_enqueue_prefetch(ids))
+    click.echo(f"enqueued prefetch_series: {n} jobs")
     click.echo("Run an Arq worker to process the queue.")
 
 
