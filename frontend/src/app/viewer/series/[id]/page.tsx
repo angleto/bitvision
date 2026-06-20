@@ -2137,7 +2137,11 @@ export default function SeriesViewerPage() {
                 </div>
               </div>
             )}
-            {volumeLoading ? (
+            {volumeLoading && !volume ? (
+              // Big blocking spinner ONLY while there's nothing to show yet.
+              // Once the progressive low-res preview has populated ``volume``
+              // we render the panes underneath instead (the preview is
+              // visible immediately) and let the full-res stream in + swap.
               <div
                 style={{
                   display: "flex",
