@@ -29,9 +29,13 @@ export default function ViewerToolPalette({
 }: ViewerToolPaletteProps) {
   const tv = useTranslations("viewer");
   const buttons = tools ? TOOL_BUTTONS.filter(([t]) => tools.includes(t)) : TOOL_BUTTONS;
+  // Larger than the old 0.12rem/0.2rem padding so the tool buttons are
+  // legible/clickable (the worst tap-target offenders in the audit). Touch
+  // devices additionally get the 44px min via the ``@media (pointer: coarse)``
+  // rule on ``.viewer-btn`` in globals.css.
   const btnStyle = compact
-    ? { fontSize: "0.66rem", padding: "0.12rem 0.36rem" }
-    : { fontSize: "0.7rem", padding: "0.2rem 0.45rem" };
+    ? { fontSize: "0.72rem", padding: "0.28rem 0.45rem" }
+    : { fontSize: "0.76rem", padding: "0.34rem 0.55rem" };
 
   return (
     <div>
