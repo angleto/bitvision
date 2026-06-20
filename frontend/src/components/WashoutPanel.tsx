@@ -73,6 +73,7 @@ export default function WashoutPanel({
 
   return (
     <aside
+      className="viewer-chrome"
       style={{
         width: 280,
         flex: "0 0 auto",

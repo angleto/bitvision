@@ -784,36 +784,48 @@ table.bv-table,
   color: #94a3b8;
 }
 
-/* The viewer sidebar is always-dark independent of the document theme,
-   so the global ``button.ghost`` (which reads ``--bv-fg``) renders
-   nearly invisible (dark text on dark bg) when the document theme is
-   light. Scope an override that pins ghost-style buttons inside the
-   sidebar to a high-contrast palette regardless of the global theme.
-   The hover / active styles match ``.viewer-btn`` so the look is
-   coherent with the rest of the sidebar tooling. */
-.viewer-layout__sidebar button.ghost {
+/* Viewer chrome is always-dark independent of the document theme, so the
+   global ``button.ghost`` (which reads ``--bv-fg``) renders nearly invisible
+   (dark text on dark bg) when the document theme is light — the classic
+   "black ✕ you only see on hover" bug. Two scopes share one override:
+   ``.viewer-layout__sidebar`` (series viewer) and ``.viewer-chrome`` (the
+   reusable opt-in any always-dark floating viewer widget carries: the
+   multiphase contrast viewer root + the wash-out panel). Both pin ghost-style
+   buttons to a high-contrast palette regardless of the global theme; hover /
+   active match ``.viewer-btn`` so the look stays coherent with the tooling. */
+.viewer-layout__sidebar button.ghost,
+.viewer-chrome button.ghost {
   background: transparent;
   color: #d6deeb;
   border-color: #3a4050;
 }
-.viewer-layout__sidebar button.ghost:hover {
+.viewer-layout__sidebar button.ghost:hover,
+.viewer-chrome button.ghost:hover {
   background: #2a3040;
   border-color: #4a5060;
   color: #fff;
 }
-.viewer-layout__sidebar button.ghost:disabled {
+.viewer-layout__sidebar button.ghost:disabled,
+.viewer-chrome button.ghost:disabled {
   color: #6b7280;
 }
 
-/* Inputs / textareas in the sidebar (used by NotesPanel, ReportComposer
-   inline edit, MarkerListPanel) need the same dark-theme override; the
-   default ``input`` rules are tuned for the light document theme. */
+/* Inputs / textareas inside always-dark viewer chrome (sidebar: NotesPanel,
+   ReportComposer inline edit, MarkerListPanel; ``.viewer-chrome``: the
+   contrast viewer's numeric ROI fields) need the same dark-theme override;
+   the default ``input`` rules are tuned for the light document theme. */
 .viewer-layout__sidebar textarea,
 .viewer-layout__sidebar input[type="text"],
 .viewer-layout__sidebar input[type="search"],
 .viewer-layout__sidebar input[type="email"],
 .viewer-layout__sidebar input[type="tel"],
-.viewer-layout__sidebar input[type="number"] {
+.viewer-layout__sidebar input[type="number"],
+.viewer-chrome textarea,
+.viewer-chrome input[type="text"],
+.viewer-chrome input[type="search"],
+.viewer-chrome input[type="email"],
+.viewer-chrome input[type="tel"],
+.viewer-chrome input[type="number"] {
   background: #0a0d14;
   color: #e6ecf3;
   border-color: #2a2f3b;
@@ -823,7 +835,13 @@ table.bv-table,
 .viewer-layout__sidebar input[type="search"]:focus,
 .viewer-layout__sidebar input[type="email"]:focus,
 .viewer-layout__sidebar input[type="tel"]:focus,
-.viewer-layout__sidebar input[type="number"]:focus {
+.viewer-layout__sidebar input[type="number"]:focus,
+.viewer-chrome textarea:focus,
+.viewer-chrome input[type="text"]:focus,
+.viewer-chrome input[type="search"]:focus,
+.viewer-chrome input[type="email"]:focus,
+.viewer-chrome input[type="tel"]:focus,
+.viewer-chrome input[type="number"]:focus {
   border-color: var(--bv-accent);
 }
 
