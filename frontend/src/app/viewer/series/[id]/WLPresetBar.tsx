@@ -65,6 +65,41 @@ import { type ViewportStateBlob, useViewportState } from "@/lib/viewportState";
 import { computeAutoWL, modalityDefaults, suggestedFromDicom } from "@/lib/windowing";
 import { WL_BTN_STYLE } from "./viewerStyles";
 
+// The handful of general body windows a radiologist reaches for on most CT
+// reads. Everything else (organ-specific / multi-phase sub-presets) is folded
+// behind an "Altri…" expander so the default bar isn't a 30-button wall.
+const COMMON_PRESET_LABELS = new Set([
+  "CT Lung",
+  "CT Mediastinum",
+  "CT Abdomen",
+  "CT Soft Tissue",
+  "CT Bone",
+  "CT Brain",
+  "CT Liver",
+  "CT Angio",
+]);
+const REGION_WORDS = new Set([
+  "Liver",
+  "Kidney",
+  "Lung",
+  "Pancreas",
+  "Adrenal",
+  "Spleen",
+  "Brain",
+  "Bone",
+  "Mediastinum",
+  "Abdomen",
+  "Angio",
+]);
+
+/** Region heading for the grouped "Altri…" section, derived from the label
+ *  (strip the modality prefix, take the leading organ word). */
+function presetRegion(label: string): string {
+  const stripped = label.replace(/^(CT|MRI?|PT|US|CR|DX)\s+/i, "");
+  const first = stripped.split(/\s+/)[0] ?? "Altri";
+  return REGION_WORDS.has(first) ? first : "Altri";
+}
+
 export default function WLPresetBar({
   series,
   volume,
@@ -76,47 +111,104 @@ export default function WLPresetBar({
   onApply: (wc: number, ww: number) => void;
   onReset: () => void;
 }) {
+  const [showMore, setShowMore] = useState(false);
   const dicom = suggestedFromDicom(series);
   const presets = modalityDefaults(series?.modality ?? "", series?.body_part_examined ?? undefined);
+
+  const common = presets.filter((p) => COMMON_PRESET_LABELS.has(p.label));
+  const rest = presets.filter((p) => !COMMON_PRESET_LABELS.has(p.label));
+  // Only collapse a genuinely long list (CT). MR/PT etc. have few presets —
+  // keep them flat so nothing is needlessly hidden behind a click.
+  const collapse = presets.length > 10 && common.length >= 4;
+  const primary = collapse ? common : presets;
+
+  // Group the overflow presets by anatomical region, preserving first-seen order.
+  const groups: Array<[string, typeof rest]> = [];
+  if (collapse) {
+    const byRegion = new Map<string, typeof rest>();
+    for (const p of rest) {
+      const r = presetRegion(p.label);
+      const arr = byRegion.get(r) ?? [];
+      arr.push(p);
+      byRegion.set(r, arr);
+    }
+    groups.push(...byRegion.entries());
+  }
+
+  const presetBtn = (label: string, wc: number, ww: number, title?: string) => (
+    <button
+      key={label}
+      type="button"
+      className="viewer-btn"
+      style={WL_BTN_STYLE}
+      title={title}
+      onClick={() => onApply(wc, ww)}
+    >
+      {label}
+    </button>
+  );
+
   return (
-    <div style={{ display: "flex", gap: "0.3rem", flexWrap: "wrap" }}>
-      <button
-        type="button"
-        className="viewer-btn"
-        style={WL_BTN_STYLE}
-        title="Auto from histogram (1%-99% clip)"
-        onClick={() => {
-          const { wc, ww } = computeAutoWL(volume.scalars, series?.modality ?? undefined);
-          onApply(wc, ww);
-        }}
-      >
-        Auto
-      </button>
-      {dicom && (
+    <div style={{ display: "flex", flexDirection: "column", gap: "0.4rem" }}>
+      <div style={{ display: "flex", gap: "0.3rem", flexWrap: "wrap" }}>
         <button
           type="button"
           className="viewer-btn"
           style={WL_BTN_STYLE}
-          title={`From DICOM tags · WC ${Math.round(dicom.wc)} / WW ${Math.round(dicom.ww)}`}
-          onClick={() => onApply(dicom.wc, dicom.ww)}
+          title="Auto from histogram (1%-99% clip)"
+          onClick={() => {
+            const { wc, ww } = computeAutoWL(volume.scalars, series?.modality ?? undefined);
+            onApply(wc, ww);
+          }}
         >
-          DICOM
+          Auto
         </button>
+        {dicom &&
+          presetBtn(
+            "DICOM",
+            dicom.wc,
+            dicom.ww,
+            `From DICOM tags · WC ${Math.round(dicom.wc)} / WW ${Math.round(dicom.ww)}`,
+          )}
+        {primary.map(({ label, wc, ww }) => presetBtn(label, wc, ww))}
+        {collapse && (
+          <button
+            type="button"
+            className="viewer-btn"
+            style={WL_BTN_STYLE}
+            aria-expanded={showMore}
+            onClick={() => setShowMore((v) => !v)}
+          >
+            {showMore ? "Meno ▲" : `Altri… (${rest.length}) ▾`}
+          </button>
+        )}
+        <button type="button" className="viewer-btn" style={WL_BTN_STYLE} onClick={onReset}>
+          Reset
+        </button>
+      </div>
+      {collapse && showMore && (
+        <div style={{ display: "flex", flexDirection: "column", gap: "0.35rem" }}>
+          {groups.map(([region, items]) => (
+            <div key={region}>
+              <div
+                className="meta"
+                style={{
+                  fontSize: "0.62rem",
+                  textTransform: "uppercase",
+                  letterSpacing: "0.05em",
+                  marginBottom: "0.2rem",
+                  opacity: 0.7,
+                }}
+              >
+                {region}
+              </div>
+              <div style={{ display: "flex", gap: "0.3rem", flexWrap: "wrap" }}>
+                {items.map(({ label, wc, ww }) => presetBtn(label, wc, ww))}
+              </div>
+            </div>
+          ))}
+        </div>
       )}
-      {presets.map(({ label, wc, ww }) => (
-        <button
-          key={label}
-          type="button"
-          className="viewer-btn"
-          style={WL_BTN_STYLE}
-          onClick={() => onApply(wc, ww)}
-        >
-          {label}
-        </button>
-      ))}
-      <button type="button" className="viewer-btn" style={WL_BTN_STYLE} onClick={onReset}>
-        Reset
-      </button>
     </div>
   );
 }
