@@ -62,9 +62,15 @@ let pageErrors: string[] = [];
 let netFailures: string[] = [];
 
 test.describe("Viewer instrumented audit", () => {
+  // Real prod loads (full CT volume fetch + pack + first paint) routinely
+  // exceed the 30 s default; give each audit room to load and settle.
+  test.describe.configure({ timeout: 150_000 });
+
+  // BVP_AUDIT_TOKEN is required: /api/studies/{id} needs auth even for public
+  // OpenData studies, and a private study needs a token that can read it.
   test.skip(
-    !TOKEN || !STUDY_ID || !BASE_URL,
-    "Set BVP_AUDIT_TOKEN + BVP_AUDIT_STUDY_ID + E2E_BASE_URL (+ E2E_USE_REAL_BACKEND=1).",
+    !STUDY_ID || !BASE_URL,
+    "Set BVP_AUDIT_STUDY_ID + E2E_BASE_URL (+ E2E_USE_REAL_BACKEND=1); BVP_AUDIT_TOKEN only for private studies.",
   );
 
   test.beforeAll(() => {
@@ -79,16 +85,25 @@ test.describe("Viewer instrumented audit", () => {
     consoleErrors = [];
     pageErrors = [];
     netFailures = [];
-    await page.addInitScript(
-      ({ token }) => {
-        try {
-          window.localStorage.setItem("bvp.token", token as string);
-        } catch {
-          /* ignore */
-        }
-      },
-      { token: TOKEN },
-    );
+    if (TOKEN && BASE_URL) {
+      // The SPA migrated (2026-05-21) from JWT-in-localStorage to an HttpOnly
+      // ``bvp_session`` cookie whose VALUE is the JWT (api/auth.py
+      // _set_session_cookie). deps.py reads the token from that cookie OR the
+      // Authorization header, so seeding the cookie with our minted token is
+      // what actually authenticates the browser — localStorage is a no-op now.
+      const url = new URL(BASE_URL);
+      await page.context().addCookies([
+        {
+          name: "bvp_session",
+          value: TOKEN,
+          domain: url.hostname,
+          path: "/",
+          httpOnly: true,
+          secure: url.protocol === "https:",
+          sameSite: "Lax",
+        },
+      ]);
+    }
     page.on("console", (msg) => {
       if (msg.type() === "error") consoleErrors.push(msg.text().slice(0, 300));
     });
@@ -141,17 +156,22 @@ test.describe("Viewer instrumented audit", () => {
     let studyTagged = false;
     try {
       const res = await request.get(`${BASE_URL}/api/studies/${STUDY_ID}`, {
-        headers: { Authorization: `Bearer ${TOKEN}` },
+        headers: TOKEN ? { Authorization: `Bearer ${TOKEN}` } : {},
       });
       if (res.ok()) {
         const study = (await res.json()) as {
-          series?: Array<{ id: string; modality?: string }>;
+          series?: Array<{ id: string; modality?: string; instance_count?: number }>;
           tags?: Array<{ namespace: string; value: string }>;
         };
         studyTagged = !!study.tags?.some((t) => t.namespace === "audit" && t.value === "viewer");
         if (!seriesId) {
-          const ct = study.series?.find((s) => (s.modality ?? "").toUpperCase() === "CT");
-          seriesId = ct?.id ?? study.series?.[0]?.id ?? null;
+          // Pick the meatiest CT series (most instances) so we open a real
+          // axial volume, not a 1-2 slice scout / dose-report / screen-save.
+          const cts = (study.series ?? [])
+            .filter((s) => (s.modality ?? "").toUpperCase() === "CT")
+            .sort((a, b) => (b.instance_count ?? 0) - (a.instance_count ?? 0));
+          seriesId = cts[0]?.id ?? study.series?.[0]?.id ?? null;
+          if (cts[0]) emit(`- picked series with ${cts[0].instance_count ?? "?"} instances`);
         }
       } else {
         emit(`- ⚠️ GET /api/studies/${STUDY_ID} → ${res.status()}`);
@@ -239,21 +259,34 @@ test.describe("Viewer instrumented audit", () => {
       waitUntil: "domcontentloaded",
     });
 
+    // Wait for the phases to actually FINISH loading (a pane with a real VOI),
+    // not just mount — the volumes are large and a 2 s screenshot catches only
+    // the "loading…" state. Fall back to any error card.
     await page
       .waitForFunction(
         () => {
-          const v = (window as unknown as { __viewer?: { surface?: string; panes?: object } })
-            .__viewer;
-          return (
-            (v?.surface === "contrast" && !!v.panes) ||
-            !!document.querySelector('[data-testid="viewer-error"]')
-          );
+          const v = (
+            window as unknown as {
+              __viewer?: { surface?: string; panes?: Record<string, { voi?: unknown }> };
+            }
+          ).__viewer;
+          const loaded =
+            v?.surface === "contrast" &&
+            !!v.panes &&
+            Object.values(v.panes).some((p) => p.voi != null);
+          return loaded || !!document.querySelector('[data-testid="viewer-error"]');
         },
         null,
-        { timeout: 45_000 },
+        { timeout: 90_000 },
       )
       .catch(() => {});
-    await page.waitForTimeout(2000);
+    // Also wait for the "loading…" placeholders to clear, then settle.
+    await page
+      .locator("text=/loading/i")
+      .first()
+      .waitFor({ state: "hidden", timeout: 30_000 })
+      .catch(() => {});
+    await page.waitForTimeout(2500);
     emit(`- screenshot: \`${await shot(page, "contrast-loaded")}\``);
 
     const phasePanes = await page.locator('[data-testid^="contrast-phase-"]').count();
