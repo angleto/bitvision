@@ -333,7 +333,11 @@
     "forbidden": "Solo admin.",
     "scopeLegendTitle": "Significato degli scope",
     "scopePublicHint": "leggibile da chiunque (anche utenti non autenticati o ruoli non admin). Buono per feature flag, label e configurazioni non sensibili.",
-    "scopeAdminHint": "leggibile solo dagli admin. Usalo per chiavi che contengono dettagli operativi (default tier, soglie quota, override per-utente)."
+    "scopeAdminHint": "leggibile solo dagli admin. Usalo per chiavi che contengono dettagli operativi (default tier, soglie quota, override per-utente).",
+    "viewerDebugTitle": "Strumentazione viewer",
+    "viewerDebugHint": "Espone lo stato non-PHI del viewer (window.__viewer) e gli hook di test, così gli audit UX automatici possono guidare il viewer DICOM. Attiva solo durante gli audit.",
+    "viewerDebugOn": "Attiva",
+    "viewerDebugOff": "Disattiva"
   },
   "adminUsers": {
     "title": "Utenti",
