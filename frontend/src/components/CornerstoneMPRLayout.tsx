@@ -104,12 +104,19 @@ const ORIENT: Record<Axis, cs.Enums.OrientationAxis> = {
   coronal: cs.Enums.OrientationAxis.CORONAL,
 };
 
-/** Per-instance ids — derived from the seriesId so multiple
- *  ``CornerstoneMPRLayout`` panes on the same page never collide
- *  on engine / tool group / viewport namespaces. */
+/** Per-instance ids. The ``engineId`` is a SINGLE shared constant so
+ *  every pane on the page renders through ONE cornerstone3D
+ *  ``RenderingEngine`` (one WebGL context) instead of one engine per
+ *  pane. A RenderingEngine drives many viewports off a single shared
+ *  offscreen context, so the one-engine-per-pane design exhausted the
+ *  browser's ~16-context cap as the user navigated phases/studies
+ *  (engines were intentionally never destroyed), losing contexts and
+ *  crashing the crosshairs tool. The viewport + tool-group ids stay
+ *  per-pane (derived from seriesId) so panes never collide on the
+ *  shared engine. */
 function makeIds(instanceKey: string) {
   return {
-    engineId: ENGINE_ID_PREFIX + instanceKey,
+    engineId: `${ENGINE_ID_PREFIX}shared`,
     toolGroupId: TOOL_GROUP_PREFIX + instanceKey,
     vpAxial: VP_AXIAL_PREFIX + instanceKey,
     vpSag: VP_SAG_PREFIX + instanceKey,
@@ -627,11 +634,12 @@ const CornerstoneMPRLayout = forwardRef<MPRLayoutHandle, ExtendedProps>(
         // qui senza il gate il layout chiamerebbe ``setVolumesForViewports``
         // due volte: una con il solo primary (la fusion arriva ~1.5s dopo
         // via fetchVolume), poi una seconda volta con entrambi i volumi.
-        // ``engine.setViewports(...)`` della seconda passata RIMPIAZZA
-        // i viewport esistenti e fa distruggere/ricreare il toolGroup,
-        // sporcando lo stato dell'engine condiviso e lasciando la MIP
-        // (che vive sullo stesso engine via ``enableElement``, fuori
-        // dalla lista ``setViewports``) sul frame stantio bianco.
+        // La seconda passata distrugge/ricrea il toolGroup, sporcando lo
+        // stato dell'engine condiviso. (La MIP vive sullo stesso engine
+        // via ``enableElement``: ora che la registrazione MPR e' additiva
+        // — ``disableElement``/``enableElement`` solo dei propri viewport,
+        // non piu' ``setViewports`` che li rimpiazzava tutti — la MIP non
+        // viene piu' azzerata, ma il churn del toolGroup resta da evitare.)
         //
         // Speculare al gate identico in CornerstoneMipViewport (beta.81).
         // Qui è essenziale gattare PRIMA della creazione dell'engine,
@@ -740,7 +748,19 @@ const CornerstoneMPRLayout = forwardRef<MPRLayoutHandle, ExtendedProps>(
           axisToElement.push({ axis, el });
         }
         if (inputs.length === 0) return;
-        engine.setViewports(inputs);
+        // Shared engine: register THIS pane's viewports ADDITIVELY.
+        // ``setViewports`` would replace ALL viewports on the engine and
+        // thus wipe every sibling pane. Disable our own three first to
+        // clear any stale binding from a prior seriesId / re-run, then
+        // enable. Sibling panes' viewports (different ids) are untouched.
+        for (const input of inputs) {
+          try {
+            engine.disableElement(input.viewportId);
+          } catch {
+            /* not currently enabled */
+          }
+        }
+        for (const input of inputs) engine.enableElement(input);
 
         // Hot colormap + soft-shoulder opacity for the fusion overlay
         // (PET-on-CT default). Background tissue stays fully
@@ -1106,7 +1126,7 @@ const CornerstoneMPRLayout = forwardRef<MPRLayoutHandle, ExtendedProps>(
         }
         autoWindowedVolumeRef.current = volumeId;
 
-        engine.render();
+        engine.renderViewports([vpAxial, vpSag, vpCor]);
         // Tell the activeTool effect the tool group is now wired
         // up. Without this, picking a measure tool BEFORE this
         // async setup finishes used to silently no-op (the effect
@@ -1844,7 +1864,7 @@ const CornerstoneMPRLayout = forwardRef<MPRLayoutHandle, ExtendedProps>(
                 /* fall through to engine.render */
               }
             }
-            engineRef.current?.render();
+            engineRef.current?.renderViewports([vpAxial, vpSag, vpCor]);
           })
           .catch(() => {
             /* user cancelled — leave the annotation unlabelled */
@@ -1962,7 +1982,7 @@ const CornerstoneMPRLayout = forwardRef<MPRLayoutHandle, ExtendedProps>(
         for (const t of targets) {
           (stats[t] as Record<string, unknown>).bvSuvPending = true;
         }
-        engineRef.current?.render();
+        engineRef.current?.renderViewports([vpAxial, vpSag, vpCor]);
 
         // Cancel a previous in-flight request for the same annotation.
         const prev = inflight.get(annotationUID);
@@ -1997,7 +2017,7 @@ const CornerstoneMPRLayout = forwardRef<MPRLayoutHandle, ExtendedProps>(
           }
         } finally {
           inflight.delete(annotationUID);
-          engineRef.current?.render();
+          engineRef.current?.renderViewports([vpAxial, vpSag, vpCor]);
         }
       };
 
@@ -2091,7 +2111,7 @@ const CornerstoneMPRLayout = forwardRef<MPRLayoutHandle, ExtendedProps>(
           /* annotation rejected (toolName not registered) — skip */
         }
       }
-      engine.render();
+      engine.renderViewports([vpAxial, vpSag, vpCor]);
     }, [incomingMeasurements, volumeId]);
 
     // Marker fade across slices: hide annotations whose anchor world
@@ -2567,22 +2587,32 @@ const CornerstoneMPRLayout = forwardRef<MPRLayoutHandle, ExtendedProps>(
       };
     }, [showAxial, showSagittal, showCoronal]);
 
-    // Engine teardown on unmount. We deliberately do NOT call
-    // ``engine.destroy()``: Cornerstone reaches into vtk's render
-    // context, which React has already released by the time the
-    // cleanup runs (and React StrictMode in dev double-fires effect
-    // cleanups, so the second destroy crashes with "Cannot
-    // destructure property 'context' of 'contextData' as it is
-    // null"). The engine + tool group are global singletons keyed
-    // by id, so leaving them alive is harmless: the next mount
-    // with the same ``seriesId`` reuses them via
-    // ``getRenderingEngine(engineId)``. Memory cost is bounded by
-    // the cached volume (the engine's heap footprint without
-    // active viewports is small).
+    // Pane teardown on unmount. We still do NOT call ``engine.destroy()``:
+    // Cornerstone reaches into vtk's render context, which React has
+    // already released by the time the cleanup runs (and React StrictMode
+    // in dev double-fires effect cleanups, so the second destroy crashes
+    // with "Cannot destructure property 'context' of 'contextData' as it
+    // is null"). But the engine is now a SINGLE shared singleton across
+    // all panes (one WebGL context), so leaving it alive is genuinely
+    // harmless. What we MUST do is release THIS pane's viewports from the
+    // shared engine via ``disableElement`` — otherwise viewports (and
+    // their canvases) would accumulate on the shared engine as panes
+    // mount/unmount. The previous design leaked one whole WebGL CONTEXT
+    // per pane, exhausting the browser's ~16-context cap.
     // biome-ignore lint/correctness/useExhaustiveDependencies: viewer lifecycle effect — re-running on derived deps would tear down GPU resources.
     useEffect(() => {
       return () => {
+        const engine = engineRef.current;
         engineRef.current = null;
+        if (engine) {
+          for (const vpId of [vpAxial, vpSag, vpCor]) {
+            try {
+              engine.disableElement(vpId);
+            } catch {
+              /* viewport not enabled */
+            }
+          }
+        }
         try {
           csTools.ToolGroupManager.destroyToolGroup(toolGroupId);
         } catch {
@@ -2636,7 +2666,7 @@ const CornerstoneMPRLayout = forwardRef<MPRLayoutHandle, ExtendedProps>(
         }>;
         if (all.some((a) => a.annotationUID === focusedMarkerId)) {
           sel.setAnnotationSelected(focusedMarkerId, true, false);
-          engineRef.current?.render();
+          engineRef.current?.renderViewports([vpAxial, vpSag, vpCor]);
         }
       } catch {
         // Selection API surface drifted across CS Tools minor
@@ -3021,7 +3051,7 @@ const CornerstoneMPRLayout = forwardRef<MPRLayoutHandle, ExtendedProps>(
           } catch {
             /* annotation may not exist anymore */
           }
-          engineRef.current?.render();
+          engineRef.current?.renderViewports([vpAxial, vpSag, vpCor]);
         },
         updateAnnotationLabel: (uid, label) => {
           const all = csTools.annotation.state.getAllAnnotations() as Array<{
@@ -3052,7 +3082,7 @@ const CornerstoneMPRLayout = forwardRef<MPRLayoutHandle, ExtendedProps>(
               /* fall through */
             }
           }
-          engineRef.current?.render();
+          engineRef.current?.renderViewports([vpAxial, vpSag, vpCor]);
         },
         lensRadiusMm,
         setLensRadiusMm: (v) => {
@@ -3100,7 +3130,7 @@ const CornerstoneMPRLayout = forwardRef<MPRLayoutHandle, ExtendedProps>(
               /* ignore individual failures */
             }
           }
-          engineRef.current?.render();
+          engineRef.current?.renderViewports([vpAxial, vpSag, vpCor]);
         },
       }),
       [
@@ -3222,7 +3252,7 @@ const CornerstoneMPRLayout = forwardRef<MPRLayoutHandle, ExtendedProps>(
       // the cached composite without resetting the camera, so the
       // user keeps their pan + zoom.
       try {
-        engine.render();
+        engine.renderViewports([vpAxial, vpSag, vpCor]);
       } catch {
         /* engine.render is best-effort like vp.render above. */
       }
@@ -4190,7 +4220,8 @@ function fitViewportsToCanvas(
       /* viewport torn down between frames */
     }
   }
-  if (fitted) engine.render();
+  // Shared engine: render only THIS pane's viewports, not every pane's.
+  if (fitted) engine.renderViewports(panes.map((p) => p.id));
   return fitted;
 }
 
