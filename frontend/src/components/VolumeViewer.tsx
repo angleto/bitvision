@@ -26,6 +26,12 @@ export interface VolumeData {
   origin?: [number, number, number];
   direction?: [number, number, number, number, number, number, number, number, number];
   frameOfReferenceUid?: string;
+  /** Which resolution this payload carries. ``preview`` = the transient
+   *  1/8 low-res first paint (no geometry); ``full`` = the authoritative
+   *  diagnostic volume. The MPR layout folds this into the Cornerstone
+   *  ``volumeId`` so preview→full is a clean cache-entry swap. Absent =
+   *  ``full`` (legacy callers). */
+  resolution?: "preview" | "full";
 }
 
 export type ColorPreset =

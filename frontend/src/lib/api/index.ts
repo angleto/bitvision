@@ -581,6 +581,12 @@ export const studiesApi = {
     const query = params.toString();
     return `${API_BASE_URL}/api/series/${seriesId}/volume.raw${query ? `?${query}` : ""}`;
   },
+  /** Low-res (1/8) preview of the primary stack — same packed format,
+   *  ~8x smaller. Drives the progressive first paint: the viewer renders
+   *  this in ~3s, then swaps in ``volume.raw`` when it finishes streaming.
+   *  No earl/stack params: the preview is always the primary, unfiltered. */
+  volumePreviewUrl: (seriesId: string) =>
+    `${API_BASE_URL}/api/series/${seriesId}/volume-preview.raw`,
   instanceFileUrl: (instanceId: string) => `${API_BASE_URL}/api/instances/${instanceId}/file`,
   packVolume: (seriesId: string) =>
     request<{ status: string; series_id: string }>(`/api/series/${seriesId}/pack-volume`, {
@@ -3094,13 +3100,21 @@ export async function fetchVolume(
       phase: "download" | "decode";
     }) => void;
     signal?: AbortSignal;
+    /** Fetch the 1/8 low-res preview (``volume-preview.raw``) instead of the
+     *  full ``volume.raw``. The preview carries NO X-Volume-* geometry, so
+     *  ``header.origin/direction/frameOfReferenceUid`` come back undefined —
+     *  fine for the transient first-paint placeholder. */
+    preview?: boolean;
   },
 ): Promise<{
   header: PackedVolumeHeader;
   scalars: Float32Array;
 }> {
   const onProgress = opts?.onProgress;
-  const resp = await fetch(studiesApi.volumeUrl(seriesId, opts), {
+  const url = opts?.preview
+    ? studiesApi.volumePreviewUrl(seriesId)
+    : studiesApi.volumeUrl(seriesId, opts);
+  const resp = await fetch(url, {
     headers: (() => {
       const h = new Headers();
       const t = getStoredToken();
