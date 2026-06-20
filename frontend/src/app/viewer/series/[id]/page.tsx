@@ -1072,6 +1072,45 @@ export default function SeriesViewerPage() {
     setLoadProgress(null);
     const startTime = Date.now();
     return (async () => {
+      // Progressive first paint: show the ~1/8 low-res preview immediately
+      // (≈3s) so the panes aren't blank while the full-res volume (≈26s over
+      // the throttled egress) streams in below and swaps in. Best-effort — any
+      // preview failure (404 / network) falls straight through to full-res
+      // with zero user-visible change. The preview carries no geometry; the
+      // full-res payload is authoritative.
+      try {
+        const ptoken = getStoredToken();
+        const ph: Record<string, string> = {};
+        if (ptoken) ph.authorization = `Bearer ${ptoken}`;
+        const presp = await fetch(studiesApi.volumePreviewUrl(params.id), {
+          credentials: "include",
+          headers: ph,
+        });
+        if (presp.ok) {
+          const pbuf = await presp.arrayBuffer();
+          const pdv = new DataView(pbuf);
+          const pnx = pdv.getUint32(0, true);
+          const pny = pdv.getUint32(4, true);
+          const pnz = pdv.getUint32(8, true);
+          const pv: VolumeData = {
+            dimensions: [pnx, pny, pnz],
+            spacing: [pdv.getFloat32(12, true), pdv.getFloat32(16, true), pdv.getFloat32(20, true)],
+            scalars: new Float32Array(pbuf, 32, pnx * pny * pnz),
+            range: [pdv.getFloat32(24, true), pdv.getFloat32(28, true)],
+            resolution: "preview",
+          };
+          setVolume(pv);
+          setMprCrosshair([Math.floor(pnx / 2), Math.floor(pny / 2), Math.floor(pnz / 2)]);
+          if (viewerDebug) {
+            updateViewerProbe({
+              notes: ["preview rendered"],
+              timings: { previewMs: Date.now() - startTime },
+            });
+          }
+        }
+      } catch {
+        /* preview is best-effort — fall through to the full-res load */
+      }
       try {
         const token = getStoredToken();
         const headers: Record<string, string> = {};
@@ -1126,6 +1165,7 @@ export default function SeriesViewerPage() {
           origin: geomOrigin as [number, number, number] | undefined,
           direction: geomDirection as VolumeData["direction"],
           frameOfReferenceUid: geomFor,
+          resolution: "full",
         };
         setVolume(v);
         setMprCrosshair([
@@ -1133,6 +1173,12 @@ export default function SeriesViewerPage() {
           Math.floor(v.dimensions[1] / 2),
           Math.floor(v.dimensions[2] / 2),
         ]);
+        if (viewerDebug) {
+          updateViewerProbe({
+            notes: ["full-res swapped in"],
+            timings: { fullMs: Date.now() - startTime },
+          });
+        }
         return v;
       } catch (e) {
         // 404 from the volume endpoint is the legitimate "no 3D pack
@@ -1153,7 +1199,7 @@ export default function SeriesViewerPage() {
         setVolumeLoading(false);
       }
     })();
-  }, [volume, params.id, tv, earlFwhmMm, selectedStackIndex]);
+  }, [volume, params.id, tv, earlFwhmMm, selectedStackIndex, viewerDebug]);
 
   useEffect(() => {
     loadVolume();

@@ -502,8 +502,10 @@ const CornerstoneMPRLayout = forwardRef<MPRLayoutHandle, ExtendedProps>(
     // for the common single-stack series).
     const volumeId = useMemo(
       () =>
-        `${VOLUME_PRIMARY_PREFIX}${seriesId ?? "anon"}${stackIndex > 0 ? `:s${stackIndex}` : ""}`,
-      [seriesId, stackIndex],
+        `${VOLUME_PRIMARY_PREFIX}${seriesId ?? "anon"}${stackIndex > 0 ? `:s${stackIndex}` : ""}${
+          volume?.resolution === "preview" ? ":preview" : ""
+        }`,
+      [seriesId, stackIndex, volume?.resolution],
     );
     const fusionVolumeId = useMemo(
       () => (fusionVolume && fusionSeriesId ? `${VOLUME_FUSION_PREFIX}${fusionSeriesId}` : null),
