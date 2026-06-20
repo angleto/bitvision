@@ -33,7 +33,12 @@ import {
 } from "@/lib/api";
 import { defaultPhasePanes, reviewableSeries } from "@/lib/contrastPhases";
 import { dispatchViewportResetView, dispatchViewportZoom, useHotkeys } from "@/lib/hotkeys";
-import { resetViewerProbe, updateViewerProbe, useViewerDebug } from "@/lib/viewerProbe";
+import {
+  type ViewerPaneProbe,
+  resetViewerProbe,
+  updateViewerProbe,
+  useViewerDebug,
+} from "@/lib/viewerProbe";
 import { presetForPhase } from "@/lib/windowing";
 import { useTranslations } from "next-intl";
 import dynamic from "next/dynamic";
@@ -200,6 +205,20 @@ function PhasePane({
     if (vol) onReady?.({ handle: localRef.current, scalars: vol.scalars });
   }, [vol]);
 
+  // Mark this pane "out of coverage": when a synced world point falls outside
+  // this phase's z-extent the crosshair is clamped to the nearest valid slice
+  // (no more black pane) — but that's NOT the anatomy at the synced point, so
+  // signal it instead of showing the edge slice silently. The flag lives on the
+  // imperative handle, so poll it.
+  const [outOfCov, setOutOfCov] = useState(false);
+  useEffect(() => {
+    const id = setInterval(() => {
+      const oc = localRef.current?.getProbeState?.()?.outOfCoverage ?? false;
+      setOutOfCov((prev) => (prev === oc ? prev : oc));
+    }, 400);
+    return () => clearInterval(id);
+  }, []);
+
   if (err) {
     return (
       <div className="error" style={{ padding: "1rem" }}>
@@ -249,6 +268,28 @@ function PhasePane({
           }}
         >
           Full-res · {(fullProgress.loaded / 1_048_576).toFixed(1)} MB
+        </div>
+      ) : null}
+      {outOfCov ? (
+        <div
+          aria-live="polite"
+          style={{
+            position: "absolute",
+            top: 6,
+            left: 6,
+            zIndex: 5,
+            background: "rgba(120,72,16,0.9)",
+            color: "#fde68a",
+            fontSize: "0.66rem",
+            fontWeight: 600,
+            padding: "0.2rem 0.5rem",
+            borderRadius: 5,
+            border: "1px solid #d97706",
+            pointerEvents: "none",
+          }}
+          title="Questa fase non copre la posizione sincronizzata; mostrata la slice più vicina."
+        >
+          ⚠ fuori copertura
         </div>
       ) : null}
     </div>
@@ -951,23 +992,30 @@ function ContrastViewerInner() {
     if (!viewerDebug) return;
     resetViewerProbe("contrast");
     const push = () => {
-      const paneProbe: Record<
-        string,
-        { visible: boolean; voi: { lower: number; upper: number } | null; invert?: boolean }
-      > = {};
+      const paneProbe: Record<string, ViewerPaneProbe> = {};
       panes.forEach((phase, i) => {
         const h = paneHandlesRef.current[i];
         const voi =
           h && h.wc != null && h.ww != null
             ? { lower: h.wc - h.ww / 2, upper: h.wc + h.ww / 2 }
             : null;
+        // Live per-pane crosshair/coverage/canvas for the radiological sync
+        // test: all synced panes should report the SAME crosshairLps, none
+        // outOfCoverage on the liver overlap, none with a 0×0 canvas.
+        const ps = h?.getProbeState?.();
         const key = phase.acquisition_phase ?? phase.series_id;
         paneProbe[key] = {
           visible: layoutMode === "single" ? i === activePane : true,
           voi,
           invert: h?.invert ?? undefined,
+          crosshairLps: ps?.crosshairLps ?? null,
+          crosshairIjk: ps?.crosshairIjk ?? null,
+          sliceIndex: ps?.sliceIndex ?? null,
+          canvas: ps?.canvas ?? null,
+          outOfCoverage: ps?.outOfCoverage ?? null,
         };
       });
+      const w = washout;
       updateViewerProbe({
         surface: "contrast",
         identity: {
@@ -982,6 +1030,18 @@ function ContrastViewerInner() {
           0,
         ),
         error: loadErr,
+        washoutResult: w
+          ? {
+              region: w.washout.region,
+              apw: w.washout.apw,
+              rpw: w.washout.rpw,
+              curve: w.washout.curve,
+              parenchymaCurve: w.washout.parenchyma_curve,
+              relativeCurve: w.washout.relative_curve,
+              samples: w.samples,
+              skipped: w.skipped,
+            }
+          : null,
       });
     };
     push();
@@ -998,7 +1058,57 @@ function ContrastViewerInner() {
     activePane,
     paneMeasurements,
     loadErr,
+    washout,
   ]);
+
+  // Test-only driver hooks for the autonomous radiological E2E (gated by the
+  // debug flag). Lets Playwright drive all panes to a world point and run a
+  // wash-out with a known ROI without faking Cornerstone mouse drags — so the
+  // gate actually exercises the radiological workflow, not just rendering.
+  useEffect(() => {
+    if (!viewerDebug) return;
+    const w = window as unknown as { __viewerTest?: Record<string, unknown> };
+    w.__viewerTest = {
+      // Push a world LPS point to every pane; returns key -> inCoverage.
+      setCrosshairWorldAll: (lps: [number, number, number]) => {
+        const out: Record<string, boolean> = {};
+        panes.forEach((phase, i) => {
+          const h = paneHandlesRef.current[i];
+          const key = phase.acquisition_phase ?? phase.series_id;
+          out[key] = h?.setCrosshairWorld?.(lps) ?? false;
+        });
+        return out;
+      },
+      // Compute wash-out for a known lesion (+ optional parenchyma) ROI.
+      runWashout: async (args: {
+        lesionCenterLps: [number, number, number];
+        lesionRadiusMm: number;
+        parenchymaCenterLps?: [number, number, number];
+        parenchymaRadiusMm?: number;
+        region?: "adrenal" | "liver" | "other";
+      }) => {
+        if (!studyId) return null;
+        const reg = args.region ?? region;
+        const input: PhaseRoiInput = {
+          kind: "sphere",
+          center_lps: args.lesionCenterLps,
+          radius_mm: args.lesionRadiusMm,
+          frame_of_reference_uid: referenceFoR ?? null,
+          region: reg,
+        };
+        if (reg === "liver" && args.parenchymaCenterLps && args.parenchymaRadiusMm) {
+          input.parenchyma_center_lps = args.parenchymaCenterLps;
+          input.parenchyma_radius_mm = args.parenchymaRadiusMm;
+        }
+        const r = await studiesApi.phaseRoiStats(studyId, input);
+        setWashout(r);
+        return r;
+      },
+    };
+    return () => {
+      w.__viewerTest = undefined;
+    };
+  }, [viewerDebug, panes, studyId, referenceFoR, region]);
 
   if (!studyId) {
     return (

@@ -450,6 +450,12 @@ const CornerstoneMPRLayout = forwardRef<MPRLayoutHandle, ExtendedProps>(
     // rendered all black (e.g. the basale / tardiva phases of a contrast study
     // whose volume or modality settled in a second setup pass).
     const autoWindowedVolumeRef = useRef<string | null>(null);
+    // ``true`` when the last setCrosshairWorld mapped a world point that fell
+    // OUTSIDE this pane's voxel grid (clamped to the nearest valid slice). The
+    // phases of a multiphase study share a FrameOfReference but cover different
+    // z-extents, so a synced world point can land beyond a shorter phase; the
+    // UI marks such a pane "out of coverage" instead of showing wrong anatomy.
+    const coverageRef = useRef(false);
     // ``true`` once ``setup()`` has finished registering the tool
     // group. The activeTool effect bails until then and re-runs
     // when this flips, so the very first tool selection (e.g. the
@@ -3008,15 +3014,50 @@ const CornerstoneMPRLayout = forwardRef<MPRLayoutHandle, ExtendedProps>(
           if (!img?.worldToIndex) return false;
           try {
             const idx = img.worldToIndex([world[0], world[1], world[2]]);
+            const [nx, ny, nz] = volume.dimensions;
+            const ri = Math.round(idx[0]);
+            const rj = Math.round(idx[1]);
+            const rk = Math.round(idx[2]);
+            // Clamp to BOTH ends of this pane's grid. Without the upper clamp an
+            // out-of-extent world point (a shorter phase of a multiphase study)
+            // produced an out-of-bounds index → the camera flew into empty space
+            // → BLACK pane. Snap to the nearest valid voxel and flag coverage so
+            // the UI can mark the pane instead of showing wrong anatomy silently.
+            const outOfCoverage =
+              ri < 0 || ri > nx - 1 || rj < 0 || rj > ny - 1 || rk < 0 || rk > nz - 1;
+            coverageRef.current = outOfCoverage;
             updateCrosshair([
-              Math.max(0, Math.round(idx[0])),
-              Math.max(0, Math.round(idx[1])),
-              Math.max(0, Math.round(idx[2])),
+              Math.max(0, Math.min(nx - 1, ri)),
+              Math.max(0, Math.min(ny - 1, rj)),
+              Math.max(0, Math.min(nz - 1, rk)),
             ]);
-            return true;
+            // false = caller learns the point isn't covered here (still rendered
+            // at the nearest slice, never black).
+            return !outOfCoverage;
           } catch {
             return false;
           }
+        },
+        getProbeState: () => {
+          const ijk = crosshair;
+          let lps: [number, number, number] | null = null;
+          const v = cs.cache.getVolume(volumeId) as unknown as
+            | { imageData?: { indexToWorld?: (i: cs.Types.Point3) => cs.Types.Point3 } }
+            | undefined;
+          try {
+            const w = v?.imageData?.indexToWorld?.([ijk[0], ijk[1], ijk[2]]);
+            if (w) lps = [w[0], w[1], w[2]];
+          } catch {
+            /* leave null */
+          }
+          const canvasEl = axialDivRef.current?.querySelector("canvas");
+          return {
+            crosshairIjk: [ijk[0], ijk[1], ijk[2]] as [number, number, number],
+            crosshairLps: lps,
+            sliceIndex: ijk[2],
+            canvas: canvasEl ? { width: canvasEl.width, height: canvasEl.height } : null,
+            outOfCoverage: coverageRef.current,
+          };
         },
         resetWL: () => {
           setWC(defaultWC);
