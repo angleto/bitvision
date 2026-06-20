@@ -18,7 +18,23 @@ export async function ensureCornerstoneInit(): Promise<void> {
   if (initPromise) return initPromise;
   initPromise = (async () => {
     if (!cs.isCornerstoneInitialized()) {
-      await cs.init();
+      // ContextPool: one pooled WebGL context per viewport instead of tiling ALL
+      // viewports into one shared offscreen canvas. Verified failure mode: the
+      // multiphase grid mounts 4-6 panes; on the default Tiled engine a synced
+      // camera move repainted only the panes whose tile fit the shared offscreen
+      // (retina DPR pushes 4 panes past the GPU's ~4096px texture cap), so half
+      // the phases froze on the wrong slice (left column followed, right column
+      // stayed on slice 0). ContextPool gives every pane its own context (no
+      // shared-offscreen cap) and pools+reuses them so navigation never leaks
+      // contexts. Paired with the engine.render() + jumpToWorld repaint in
+      // CornerstoneMPRLayout.setCrosshairWorld.
+      await cs.init({
+        rendering: {
+          renderingEngineMode: cs.Enums.RenderingEngineModeEnum.ContextPool,
+          webGlContextCount: 8,
+        },
+        debug: {},
+      });
     }
     await csTools.init();
     // Register the tools we plan to use. Tool registration is
