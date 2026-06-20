@@ -116,7 +116,15 @@ const ORIENT: Record<Axis, cs.Enums.OrientationAxis> = {
  *  shared engine. */
 function makeIds(instanceKey: string) {
   return {
-    engineId: `${ENGINE_ID_PREFIX}shared`,
+    // PER-PANE engine. A shared Tiled engine packs every pane's viewport into one
+    // offscreen and, with 4-6 retina panes, a synced camera move repainted only
+    // some panes' on-screen tiles (the rest froze on slice 0 — verified with a
+    // tight-crop capture: 2/4 followed). One engine per pane gives each its own
+    // offscreen + render loop so every pane repaints independently. Keyed by
+    // seriesId so the id is stable across the preview->full volume swap; the
+    // engine is destroyed on unmount (see the teardown effect) to bound live
+    // WebGL contexts to the mounted panes.
+    engineId: ENGINE_ID_PREFIX + instanceKey,
     toolGroupId: TOOL_GROUP_PREFIX + instanceKey,
     vpAxial: VP_AXIAL_PREFIX + instanceKey,
     vpSag: VP_SAG_PREFIX + instanceKey,
@@ -2595,18 +2603,15 @@ const CornerstoneMPRLayout = forwardRef<MPRLayoutHandle, ExtendedProps>(
       };
     }, [showAxial, showSagittal, showCoronal]);
 
-    // Pane teardown on unmount. We still do NOT call ``engine.destroy()``:
-    // Cornerstone reaches into vtk's render context, which React has
-    // already released by the time the cleanup runs (and React StrictMode
-    // in dev double-fires effect cleanups, so the second destroy crashes
-    // with "Cannot destructure property 'context' of 'contextData' as it
-    // is null"). But the engine is now a SINGLE shared singleton across
-    // all panes (one WebGL context), so leaving it alive is genuinely
-    // harmless. What we MUST do is release THIS pane's viewports from the
-    // shared engine via ``disableElement`` — otherwise viewports (and
-    // their canvases) would accumulate on the shared engine as panes
-    // mount/unmount. The previous design leaked one whole WebGL CONTEXT
-    // per pane, exhausting the browser's ~16-context cap.
+    // Pane teardown on unmount. The engine is now PER-PANE (one WebGL context
+    // per pane), so it MUST be destroyed here or navigating phases/studies leaks
+    // one context each time and exhausts the browser's ~16-context cap. Disable
+    // this pane's viewports first (releases their canvases), then destroy the
+    // engine to free its context. ``destroy()`` reaches into vtk's render
+    // context; React may already have released the on-screen canvas and dev
+    // StrictMode double-fires cleanups (the second destroy hits a null context)
+    // — both are benign, so each step is independently try/caught. In production
+    // the cleanup fires once and frees the context cleanly.
     // biome-ignore lint/correctness/useExhaustiveDependencies: viewer lifecycle effect — re-running on derived deps would tear down GPU resources.
     useEffect(() => {
       return () => {
@@ -2619,6 +2624,11 @@ const CornerstoneMPRLayout = forwardRef<MPRLayoutHandle, ExtendedProps>(
             } catch {
               /* viewport not enabled */
             }
+          }
+          try {
+            engine.destroy();
+          } catch {
+            /* context already released / StrictMode double-fire */
           }
         }
         try {
