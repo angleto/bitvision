@@ -2887,15 +2887,11 @@ const CornerstoneMPRLayout = forwardRef<MPRLayoutHandle, ExtendedProps>(
           const cam = vp.getCamera();
           if (!cam.focalPoint || !cam.position) {
             vp.setCamera({ focalPoint: world });
-            vp.render();
             continue;
           }
           const axisIdx = sliceAxisOf[id];
           const delta = world[axisIdx] - cam.focalPoint[axisIdx];
-          if (Math.abs(delta) < 1e-6) {
-            vp.render();
-            continue;
-          }
+          if (Math.abs(delta) < 1e-6) continue;
           const newFocal: cs.Types.Point3 = [
             cam.focalPoint[0],
             cam.focalPoint[1],
@@ -2905,8 +2901,16 @@ const CornerstoneMPRLayout = forwardRef<MPRLayoutHandle, ExtendedProps>(
           const newPos: cs.Types.Point3 = [cam.position[0], cam.position[1], cam.position[2]];
           newPos[axisIdx] = cam.position[axisIdx] + delta;
           vp.setCamera({ focalPoint: newFocal, position: newPos });
-          vp.render();
         }
+        // SHARED rendering engine (one offscreen context for ALL phase panes, to
+        // stay under the browser's ~16 WebGL-context cap): a per-viewport
+        // ``vp.render()`` repaints ONLY the calling pane's tile, so a synced
+        // camera move on the sibling panes left them showing a stale slice (the
+        // multiphase bug: 3 phases frozen on the wrong anatomy while 1 followed).
+        // Render the whole engine so every pane's tile repaints after any
+        // crosshair / world-sync change. Cornerstone coalesces concurrent
+        // render requests into one rAF, so the cascade across panes is cheap.
+        engine.render();
       },
       [onCrosshairChange, volumeId],
     );
