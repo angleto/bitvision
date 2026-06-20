@@ -18,7 +18,23 @@ export async function ensureCornerstoneInit(): Promise<void> {
   if (initPromise) return initPromise;
   initPromise = (async () => {
     if (!cs.isCornerstoneInitialized()) {
-      await cs.init();
+      // ContextPool rendering: give each viewport its own pooled WebGL context
+      // instead of tiling ALL viewports into one shared offscreen canvas. The
+      // multiphase contrast viewer mounts 4-6 panes; with retina DPR each pane
+      // is ~1900px device-wide, so the tiled offscreen blew past the GPU's
+      // ~4096px texture cap and only the first ~2 panes repainted on a slice
+      // change (phases froze on the wrong anatomy). ContextPool pools+reuses a
+      // bounded set of contexts, so every pane renders independently without
+      // leaking contexts across navigation.
+      await cs.init({
+        rendering: {
+          renderingEngineMode: cs.Enums.RenderingEngineModeEnum.ContextPool,
+          // Pool one context per pane (MAX_PANES is 6) plus headroom, staying
+          // well under the browser's ~16 live-context cap.
+          webGlContextCount: 8,
+        },
+        debug: {},
+      });
     }
     await csTools.init();
     // Register the tools we plan to use. Tool registration is

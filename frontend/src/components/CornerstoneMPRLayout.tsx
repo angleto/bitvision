@@ -104,23 +104,19 @@ const ORIENT: Record<Axis, cs.Enums.OrientationAxis> = {
   coronal: cs.Enums.OrientationAxis.CORONAL,
 };
 
-/** Per-instance ids, including a PER-PANE ``engineId``. A cornerstone3D
- *  ``RenderingEngine`` packs all its viewports into ONE offscreen canvas;
- *  with retina DPR each multiphase pane is ~1900px device-wide, so 4 panes
- *  tiled into a single shared engine's offscreen blew past the GPU's
- *  ~4096px texture cap — only the first ~2 tiles fit, the rest froze on a
- *  stale slice (the multiphase "phases show different anatomy / scrolling
- *  desyncs" bug). One engine per pane keeps each offscreen at a single
- *  viewport (well under the cap) and makes every pane render independently.
- *  The earlier "single shared engine" was itself a workaround for a context
- *  LEAK (engines were never destroyed, so navigation exhausted the ~16
- *  WebGL-context cap); the real fix is to DESTROY the engine on unmount
- *  (see the teardown effect), which bounds live contexts to the panes
- *  actually mounted (≤ MAX_PANES). The id is derived from seriesId so it is
- *  stable across the preview→full volume swap (no engine churn). */
+/** Per-instance ids. The ``engineId`` is a SINGLE shared constant so
+ *  every pane on the page renders through ONE cornerstone3D
+ *  ``RenderingEngine`` (one WebGL context) instead of one engine per
+ *  pane. A RenderingEngine drives many viewports off a single shared
+ *  offscreen context, so the one-engine-per-pane design exhausted the
+ *  browser's ~16-context cap as the user navigated phases/studies
+ *  (engines were intentionally never destroyed), losing contexts and
+ *  crashing the crosshairs tool. The viewport + tool-group ids stay
+ *  per-pane (derived from seriesId) so panes never collide on the
+ *  shared engine. */
 function makeIds(instanceKey: string) {
   return {
-    engineId: ENGINE_ID_PREFIX + instanceKey,
+    engineId: `${ENGINE_ID_PREFIX}shared`,
     toolGroupId: TOOL_GROUP_PREFIX + instanceKey,
     vpAxial: VP_AXIAL_PREFIX + instanceKey,
     vpSag: VP_SAG_PREFIX + instanceKey,
@@ -2599,16 +2595,18 @@ const CornerstoneMPRLayout = forwardRef<MPRLayoutHandle, ExtendedProps>(
       };
     }, [showAxial, showSagittal, showCoronal]);
 
-    // Pane teardown on unmount. The engine is now PER-PANE (one WebGL
-    // context per pane), so it MUST be destroyed here or navigating
-    // phases/studies leaks one context each time and exhausts the browser's
-    // ~16-context cap. Disable this pane's viewports first (releases their
-    // canvases), then destroy the engine to free its offscreen context.
-    // ``destroy()`` reaches into vtk's render context; React may already
-    // have released the onscreen canvas, and dev StrictMode double-fires
-    // effect cleanups (the second destroy hits a null context) — both are
-    // benign, so each step is independently try/caught. In production the
-    // cleanup fires once and frees the context cleanly.
+    // Pane teardown on unmount. We still do NOT call ``engine.destroy()``:
+    // Cornerstone reaches into vtk's render context, which React has
+    // already released by the time the cleanup runs (and React StrictMode
+    // in dev double-fires effect cleanups, so the second destroy crashes
+    // with "Cannot destructure property 'context' of 'contextData' as it
+    // is null"). But the engine is now a SINGLE shared singleton across
+    // all panes (one WebGL context), so leaving it alive is genuinely
+    // harmless. What we MUST do is release THIS pane's viewports from the
+    // shared engine via ``disableElement`` — otherwise viewports (and
+    // their canvases) would accumulate on the shared engine as panes
+    // mount/unmount. The previous design leaked one whole WebGL CONTEXT
+    // per pane, exhausting the browser's ~16-context cap.
     // biome-ignore lint/correctness/useExhaustiveDependencies: viewer lifecycle effect — re-running on derived deps would tear down GPU resources.
     useEffect(() => {
       return () => {
@@ -2621,11 +2619,6 @@ const CornerstoneMPRLayout = forwardRef<MPRLayoutHandle, ExtendedProps>(
             } catch {
               /* viewport not enabled */
             }
-          }
-          try {
-            engine.destroy();
-          } catch {
-            /* context already released / StrictMode double-fire */
           }
         }
         try {
@@ -2894,11 +2887,15 @@ const CornerstoneMPRLayout = forwardRef<MPRLayoutHandle, ExtendedProps>(
           const cam = vp.getCamera();
           if (!cam.focalPoint || !cam.position) {
             vp.setCamera({ focalPoint: world });
+            vp.render();
             continue;
           }
           const axisIdx = sliceAxisOf[id];
           const delta = world[axisIdx] - cam.focalPoint[axisIdx];
-          if (Math.abs(delta) < 1e-6) continue;
+          if (Math.abs(delta) < 1e-6) {
+            vp.render();
+            continue;
+          }
           const newFocal: cs.Types.Point3 = [
             cam.focalPoint[0],
             cam.focalPoint[1],
@@ -2908,16 +2905,8 @@ const CornerstoneMPRLayout = forwardRef<MPRLayoutHandle, ExtendedProps>(
           const newPos: cs.Types.Point3 = [cam.position[0], cam.position[1], cam.position[2]];
           newPos[axisIdx] = cam.position[axisIdx] + delta;
           vp.setCamera({ focalPoint: newFocal, position: newPos });
+          vp.render();
         }
-        // SHARED rendering engine (one offscreen context for ALL phase panes, to
-        // stay under the browser's ~16 WebGL-context cap): a per-viewport
-        // ``vp.render()`` repaints ONLY the calling pane's tile, so a synced
-        // camera move on the sibling panes left them showing a stale slice (the
-        // multiphase bug: 3 phases frozen on the wrong anatomy while 1 followed).
-        // Render the whole engine so every pane's tile repaints after any
-        // crosshair / world-sync change. Cornerstone coalesces concurrent
-        // render requests into one rAF, so the cascade across panes is cheap.
-        engine.render();
       },
       [onCrosshairChange, volumeId],
     );
