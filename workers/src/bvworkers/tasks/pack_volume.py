@@ -199,7 +199,14 @@ def _pack_datasets(members: list[pydicom.Dataset]) -> tuple[bytes, dict | None]:
 async def pack_volume(ctx: dict, series_id: str) -> dict:  # type: ignore[type-arg]
     """Arq task: pre-pack a series volume and cache in S3."""
     settings = get_settings()
-    engine = create_async_engine(settings.database_url, pool_pre_ping=True)
+    # Bound the per-job pool. A geometry-backfill burst fans out to
+    # ``max_jobs`` (10) concurrent invocations; the default pool (5 + 10
+    # overflow) per engine would multiply into a TooManyConnectionsError
+    # against the shared Postgres. One job runs strictly sequential queries,
+    # so a single connection (plus one overflow slot) is enough.
+    engine = create_async_engine(
+        settings.database_url, pool_pre_ping=True, pool_size=1, max_overflow=1
+    )
 
     s3 = boto3.client(
         "s3",
@@ -213,16 +220,26 @@ async def pack_volume(ctx: dict, series_id: str) -> dict:  # type: ignore[type-a
     sid = uuid.UUID(series_id)
 
     async with AsyncSession(engine) as db:
-        # Check if derivative already exists
+        # Check if a derivative already exists — AND whether it carries the
+        # patient-space ``geometry``. Legacy volumes packed before geometry
+        # was persisted have rows with ``geometry IS NULL``. Those MUST be
+        # re-packed: wash-out / world-sync silently SKIP any phase whose
+        # volume has no geometry (it can't map an ROI into that phase's grid).
+        # Only short-circuit as ``already_packed`` when EVERY existing stack
+        # already has geometry; otherwise fall through and re-pack so the
+        # ``ON CONFLICT DO UPDATE`` below backfills the geometry in place.
         existing = await db.execute(
             text(
-                "SELECT id FROM derivatives WHERE series_id = :sid AND kind = :kind AND format = :fmt"
+                "SELECT geometry FROM derivatives "
+                "WHERE series_id = :sid AND kind = :kind AND format = :fmt"
             ),
             {"sid": sid, "kind": DERIVATIVE_KIND, "fmt": DERIVATIVE_FORMAT},
         )
-        if existing.first():
+        existing_rows = existing.all()
+        if existing_rows and all(r[0] is not None for r in existing_rows):
             await engine.dispose()
             return {"status": "already_packed", "series_id": series_id}
+        repacking = bool(existing_rows)  # exists but NULL geometry -> backfill
 
         # Resolve the patient context up-front so the cache key can
         # be patient-scoped (collision-impossible across tenants).
@@ -346,7 +363,16 @@ async def pack_volume(ctx: dict, series_id: str) -> dict:  # type: ignore[type-a
                     "size_bytes, generator_version, geometry) "
                     "VALUES (:sid, :kind, :fmt, :stack, :bucket, :key, :size, :ver, "
                     "CAST(:geom AS jsonb)) "
-                    "ON CONFLICT (series_id, kind, format, stack_index) DO NOTHING"
+                    # Re-packs are idempotent on the (series, kind, format,
+                    # stack) key. On conflict refresh the blob pointer/size and
+                    # — critically for the geometry backfill — fill in geometry.
+                    # COALESCE so a re-pack that can't derive geometry never
+                    # REGRESSES an already-good geometry back to NULL.
+                    "ON CONFLICT (series_id, kind, format, stack_index) DO UPDATE SET "
+                    "s3_bucket = EXCLUDED.s3_bucket, s3_key = EXCLUDED.s3_key, "
+                    "size_bytes = EXCLUDED.size_bytes, "
+                    "generator_version = EXCLUDED.generator_version, "
+                    "geometry = COALESCE(EXCLUDED.geometry, derivatives.geometry)"
                 ),
                 {
                     "sid": sid,
@@ -383,7 +409,7 @@ async def pack_volume(ctx: dict, series_id: str) -> dict:  # type: ignore[type-a
             "skipped": skipped,
         }
     return {
-        "status": "packed",
+        "status": "geometry_backfilled" if repacking else "packed",
         "series_id": series_id,
         "stacks": packed_stacks,
         "skipped": skipped,
