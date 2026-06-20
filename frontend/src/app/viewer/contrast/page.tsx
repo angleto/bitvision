@@ -109,9 +109,36 @@ function PhasePane({
     setErr(null);
     lastPhaseRef.current = undefined;
     void (async () => {
+      // Progressive: paint the ~1/8 low-res preview first (≈2s) so the pane
+      // isn't blank while the full-res streams in over the throttled egress
+      // (≈17-26s/phase). Best-effort — any preview failure is silent and we
+      // fall straight through to the authoritative full-res load below.
+      try {
+        const pv = await fetchVolume(sid, { preview: true });
+        if (!cancelled) {
+          setVol({
+            dimensions: [pv.header.nx, pv.header.ny, pv.header.nz],
+            spacing: pv.header.spacing,
+            scalars: pv.scalars,
+            range: pv.header.valueRange,
+            origin: pv.header.origin,
+            direction: pv.header.direction,
+            frameOfReferenceUid: pv.header.frameOfReferenceUid,
+            resolution: "preview",
+          });
+          updateViewerProbe({ notes: ["contrast preview rendered"] });
+        }
+      } catch {
+        /* preview is optional — fall through to the full-res load */
+      }
       try {
         const { header, scalars } = await fetchVolume(sid);
         if (cancelled) return;
+        // Re-arm the phase-preset guard so it re-applies across the
+        // preview→full swap: ``vol`` changes but ``acquisition_phase`` does
+        // not, and the volumeId flip (:preview→full) re-fits/auto-windows —
+        // the phase-specific preset must win on the full-res volume.
+        lastPhaseRef.current = undefined;
         setVol({
           dimensions: [header.nx, header.ny, header.nz],
           spacing: header.spacing,
@@ -120,6 +147,7 @@ function PhasePane({
           origin: header.origin,
           direction: header.direction,
           frameOfReferenceUid: header.frameOfReferenceUid,
+          resolution: "full",
         });
       } catch (e) {
         if (!cancelled) setErr(e instanceof ApiError ? e.message : String(e));
