@@ -3103,6 +3103,37 @@ const CornerstoneMPRLayout = forwardRef<MPRLayoutHandle, ExtendedProps>(
             /* leave null */
           }
           const canvasEl = axialDivRef.current?.querySelector("canvas");
+          // The viewport's OWN notion of the current slice (authoritative). If
+          // this tracks the synced world Z but the on-canvas pixels do not move,
+          // the bug is the offscreen->onscreen repaint, not the camera move.
+          let sliceIndexRendered: number | null = null;
+          try {
+            const vp = engineRef.current?.getViewport(vpAxial) as
+              | (cs.Types.IVolumeViewport & { getSliceIndex?: () => number })
+              | undefined;
+            sliceIndexRendered = vp?.getSliceIndex?.() ?? null;
+          } catch {
+            /* leave null */
+          }
+          // Cheap signature of the ACTUAL on-screen canvas pixels (central box).
+          // Changes between slices => the canvas repaints; constant => frozen.
+          let canvasSig: number | null = null;
+          try {
+            const c = canvasEl as HTMLCanvasElement | null;
+            const ctx = c?.getContext("2d", { willReadFrequently: true });
+            if (c && ctx) {
+              const bw = Math.min(64, c.width);
+              const bh = Math.min(64, c.height);
+              const x = Math.max(0, ((c.width - bw) / 2) | 0);
+              const y = Math.max(0, ((c.height - bh) / 2) | 0);
+              const data = ctx.getImageData(x, y, bw, bh).data;
+              let s = 0;
+              for (let i = 0; i < data.length; i += 16) s = (s + data[i]) % 1_000_000;
+              canvasSig = s;
+            }
+          } catch {
+            /* webgl canvas / tainted — leave null */
+          }
           return {
             crosshairIjk: [ijk[0], ijk[1], ijk[2]] as [number, number, number],
             crosshairLps: lps,
@@ -3114,6 +3145,8 @@ const CornerstoneMPRLayout = forwardRef<MPRLayoutHandle, ExtendedProps>(
             volSpacing,
             volDims,
             volumeIdUsed: volumeId,
+            sliceIndexRendered,
+            canvasSig,
           };
         },
         resetWL: () => {
