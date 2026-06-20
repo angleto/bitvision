@@ -50,6 +50,15 @@ export interface ViewerPaneProbe {
    *  z-extents). A radiological test asserts this is false on the liver
    *  overlap (no black panes) and true only outside it. */
   outOfCoverage?: boolean | null;
+  /** Axial camera focal point (LPS): the slice ACTUALLY rendered. Diverging
+   *  from crosshairLps proves the display is not following the world-sync. */
+  cameraFocalLps?: [number, number, number] | null;
+  /** Real cornerstone-volume geometry (diagnostic): origin/spacing/dims as
+   *  built, plus the mounted volumeId (``:preview`` = low-res still showing). */
+  volOrigin?: number[] | null;
+  volSpacing?: number[] | null;
+  volDims?: number[] | null;
+  volumeIdUsed?: string | null;
 }
 
 /** The whole-viewer snapshot exposed at ``window.__viewer``. */

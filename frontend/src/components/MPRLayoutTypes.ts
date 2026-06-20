@@ -179,6 +179,16 @@ export interface MPRLayoutHandle {
     sliceIndex: number;
     canvas: { width: number; height: number } | null;
     outOfCoverage: boolean;
+    /** Axial viewport camera focal point in world (LPS): the slice ACTUALLY
+     *  rendered. Diverging from crosshairLps means the display is not following
+     *  the crosshair/world-sync. */
+    cameraFocalLps?: [number, number, number] | null;
+    /** The cornerstone volume's real geometry as built (diagnostic). */
+    volOrigin?: number[] | null;
+    volSpacing?: number[] | null;
+    volDims?: number[] | null;
+    /** ``:preview`` suffix tells whether the low-res or full volume is mounted. */
+    volumeIdUsed?: string;
   };
   /** Re-apply the percentile-based auto-WL to the fusion volume. The
    *  layout runs this on mount; exposing it here lets the SUV "Auto"

@@ -1013,6 +1013,11 @@ function ContrastViewerInner() {
           sliceIndex: ps?.sliceIndex ?? null,
           canvas: ps?.canvas ?? null,
           outOfCoverage: ps?.outOfCoverage ?? null,
+          cameraFocalLps: ps?.cameraFocalLps ?? null,
+          volOrigin: ps?.volOrigin ?? null,
+          volSpacing: ps?.volSpacing ?? null,
+          volDims: ps?.volDims ?? null,
+          volumeIdUsed: ps?.volumeIdUsed ?? null,
         };
       });
       const w = washout;
