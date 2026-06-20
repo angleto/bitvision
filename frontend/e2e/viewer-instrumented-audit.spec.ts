@@ -204,6 +204,22 @@ test.describe("Viewer instrumented audit", () => {
       .catch(() => {});
     await page.waitForTimeout(1500); // let first paint settle
     emit(`- screenshot: \`${await shot(page, "series-loaded")}\``);
+    // Real-progress check (directive: slow ops show progress, not a bare
+    // spinner). The "Full-res …%/MB" badge / "Downloading volume… MB" overlay
+    // is transient — poll over the load window, don't rely on one instant.
+    let progressSeen: string | null = null;
+    for (let i = 0; i < 12; i++) {
+      progressSeen = await page
+        .locator("text=/Full-res|Downloading volume/i")
+        .first()
+        .textContent({ timeout: 800 })
+        .catch(() => null);
+      if (progressSeen) break;
+      await page.waitForTimeout(800);
+    }
+    emit(
+      `- full-res progress indicator: ${progressSeen ? `\`${progressSeen.trim().slice(0, 70)}\`` : "not seen during load window"}`,
+    );
 
     const hasProbe = await instrumentationOrNote(page);
     if (hasProbe) {
