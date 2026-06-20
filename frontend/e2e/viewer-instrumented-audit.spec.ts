@@ -638,4 +638,87 @@ test.describe("Viewer instrumented audit", () => {
     );
     emit("- ✅ liver wash-out GATE passed");
   });
+
+  test("usability — viewer chrome is legible in light mode", async ({ page }) => {
+    test.skip(STUDY_ID !== LIVER_STUDY, "Uses the contrast viewer of study 2858def7.");
+    emit("\n## Usability — light-mode chrome contrast\n");
+
+    // The default app theme is light (bv-theme). The viewer chrome is
+    // deliberately always-dark; the regression the user hit was ghost-style
+    // controls (the wash-out panel's ✕) inheriting the LIGHT theme's dark
+    // ``--bv-fg`` → black-on-black, visible only on hover. Force light, open the
+    // panel, and assert the close control's text is a light colour with real
+    // contrast against the dark panel — i.e. the ``.viewer-chrome`` override beat
+    // the global ``button.ghost`` rule. Without the fix this fails at ~1:1.
+    await page.addInitScript(() => {
+      try {
+        localStorage.setItem("bv-theme", "light");
+      } catch {}
+    });
+    await page.setViewportSize({ width: 1600, height: 1000 });
+    await page.goto(`${BASE_URL}/viewer/contrast?study=${STUDY_ID}`, {
+      waitUntil: "domcontentloaded",
+    });
+    await page
+      .waitForFunction(() => !document.documentElement.classList.contains("dark"), null, {
+        timeout: 15_000,
+      })
+      .catch(() => {});
+    const isLight = await page.evaluate(() => !document.documentElement.classList.contains("dark"));
+    emit(`- document theme is light: ${isLight}`);
+    expect(isLight, "the contrast viewer is rendered in light mode (where the bug shows)").toBe(
+      true,
+    );
+
+    // Toggling measure mode shows the wash-out panel even with no ROI placed,
+    // so the close ✕ is reachable without loading volumes or hitting the backend.
+    const runBtn = page.getByTestId("washout-run");
+    await runBtn.waitFor({ state: "visible", timeout: 60_000 });
+    await runBtn.click();
+    const panel = page.getByTestId("washout-panel");
+    await panel.waitFor({ state: "visible", timeout: 15_000 });
+    const closeBtn = panel.locator('button:has-text("✕")').first();
+    await closeBtn.waitFor({ state: "visible", timeout: 10_000 });
+
+    // Read the close-button text colour and the first opaque ancestor background
+    // (the panel's #0b0e13), then compute the WCAG contrast ratio.
+    const { fg, bg } = await closeBtn.evaluate((el) => {
+      const color = getComputedStyle(el as HTMLElement).color;
+      let node: HTMLElement | null = el as HTMLElement;
+      let background = "rgba(0, 0, 0, 0)";
+      while (node) {
+        const c = getComputedStyle(node).backgroundColor;
+        if (c && c !== "rgba(0, 0, 0, 0)" && c !== "transparent") {
+          background = c;
+          break;
+        }
+        node = node.parentElement;
+      }
+      return { fg: color, bg: background };
+    });
+    const lum = (rgb: string): number => {
+      const m = rgb.match(/[\d.]+/g);
+      if (!m || m.length < 3) return 0;
+      const [r, g, b] = m.slice(0, 3).map((v) => Number(v) / 255);
+      const f = (c: number) => (c <= 0.03928 ? c / 12.92 : ((c + 0.055) / 1.055) ** 2.4);
+      return 0.2126 * f(r) + 0.7152 * f(g) + 0.0722 * f(b);
+    };
+    const fgLum = lum(fg);
+    const bgLum = lum(bg);
+    const ratio = (Math.max(fgLum, bgLum) + 0.05) / (Math.min(fgLum, bgLum) + 0.05);
+    emit(
+      `- close ✕ colour ${fg} (lum ${fgLum.toFixed(3)}) on panel ${bg} (lum ${bgLum.toFixed(3)})`,
+    );
+    emit(`- contrast ratio: ${ratio.toFixed(2)}:1`);
+    emit(`- screenshot: ${await shot(page, "light-mode-washout-panel")}`);
+    dumpCaptures();
+
+    // GATE: the close control must be clearly legible. Text wants WCAG AA 4.5:1;
+    // black-on-black (the bug) sits at ~1:1. The panel must stay dark chrome and
+    // the ✕ a light colour (not the light-theme's dark --bv-fg).
+    expect(bgLum, "wash-out panel is dark viewer chrome").toBeLessThan(0.1);
+    expect(fgLum, "close ✕ is a light colour, not the light-theme dark fg").toBeGreaterThan(0.3);
+    expect(ratio, "close ✕ vs panel contrast (no black-on-black)").toBeGreaterThan(4.5);
+    emit("- ✅ light-mode chrome contrast GATE passed");
+  });
 });
