@@ -34,6 +34,16 @@ const STUDY_ID = process.env.BVP_AUDIT_STUDY_ID;
 const BASE_URL = process.env.E2E_BASE_URL;
 const FORCE_SERIES = process.env.BVP_AUDIT_SERIES_ID;
 
+// Radiological-test fixtures for the 4-phase liver study 2858def7. World LPS
+// points VERIFIED via MCP compute_phase_washout: the lesion point samples
+// classic liver parenchyma (unenhanced ≈54 → arterial ≈73 → portal ≈107 →
+// delayed ≈82 HU) and is covered by all 4 phases; the out-of-overlap point sits
+// above the shorter phases' (arterial/delayed) z-extent.
+const LIVER_STUDY = "2858def7-e256-4e29-a4f9-c9f70e23ba20";
+const LIVER_LESION: [number, number, number] = [-55, -45, -280];
+const LIVER_PARENCHYMA: [number, number, number] = [-72, -48, -282];
+const OUT_OF_OVERLAP: [number, number, number] = [-55, -45, -150];
+
 const STAMP = new Date().toISOString().slice(0, 19).replace(/[:T]/g, "-");
 const OUT_DIR = path.join(process.cwd(), "playwright", "reports");
 const SHOTS = path.join(OUT_DIR, `viewer-audit-${STAMP}`);
@@ -378,5 +388,222 @@ test.describe("Viewer instrumented audit", () => {
     } finally {
       await ctx.close();
     }
+  });
+
+  // ─── Radiological gate tests (study 2858def7) ──────────────────────────────
+  // These exercise the REAL workflow a radiologist needs: get the same liver
+  // slice on all 4 phases (no black panes), then measure wash-out on a liver
+  // ROI. They must PASS before the contrast viewer is considered working.
+
+  test("radiological — 4-phase liver sync (no black panes)", async ({ page }) => {
+    test.skip(STUDY_ID !== LIVER_STUDY, "Liver world points are specific to study 2858def7.");
+    emit("\n## Radiological — 4-phase liver sync\n");
+    await page.setViewportSize({ width: 1600, height: 1000 });
+    await page.goto(`${BASE_URL}/viewer/contrast?study=${STUDY_ID}`, {
+      waitUntil: "domcontentloaded",
+    });
+    // Wait for all phases to finish loading (a pane with a real VOI) AND the
+    // test driver to be installed (instrumentation flag must be ON).
+    const ready = await page
+      .waitForFunction(
+        () => {
+          const w = window as unknown as {
+            __viewer?: { surface?: string; panes?: Record<string, { voi?: unknown }> };
+            __viewerTest?: { setCrosshairWorldAll?: unknown };
+          };
+          return (
+            !!w.__viewerTest?.setCrosshairWorldAll &&
+            w.__viewer?.surface === "contrast" &&
+            !!w.__viewer.panes &&
+            Object.values(w.__viewer.panes).some((p) => p.voi != null)
+          );
+        },
+        null,
+        { timeout: 90_000 },
+      )
+      .then(() => true)
+      .catch(() => false);
+    if (!ready) {
+      emit("- ❌ instrumentation/test-driver not ready (flag off, or not all phases loaded).");
+    }
+    await page
+      .locator("text=/loading/i")
+      .first()
+      .waitFor({ state: "hidden", timeout: 30_000 })
+      .catch(() => {});
+
+    // Drive every pane to the verified liver point (covered by all 4 phases).
+    const cov = await page.evaluate(
+      (lps) =>
+        (
+          window as unknown as {
+            __viewerTest?: { setCrosshairWorldAll?: (p: number[]) => Record<string, boolean> };
+          }
+        ).__viewerTest?.setCrosshairWorldAll?.(lps),
+      LIVER_LESION,
+    );
+    emit(`- setCrosshairWorldAll(liver) → coverage: \`${JSON.stringify(cov)}\``);
+    await page.waitForTimeout(1500);
+    emit(`- screenshot: \`${await shot(page, "radiological-liver-sync")}\``);
+
+    const probe = await readProbe(page);
+    const panes = (probe?.panes ?? {}) as Record<
+      string,
+      {
+        visible?: boolean;
+        sliceIndex?: number | null;
+        canvas?: { width: number; height: number } | null;
+        outOfCoverage?: boolean | null;
+        crosshairLps?: [number, number, number] | null;
+      }
+    >;
+    let allValid = true;
+    let visibleCount = 0;
+    const lpsList: Array<[number, number, number]> = [];
+    for (const [k, p] of Object.entries(panes)) {
+      if (!p.visible) continue;
+      visibleCount += 1;
+      const valid =
+        p.outOfCoverage === false &&
+        p.sliceIndex != null &&
+        p.sliceIndex >= 0 &&
+        !!p.canvas &&
+        p.canvas.width > 0 &&
+        p.canvas.height > 0;
+      if (!valid) allValid = false;
+      if (p.crosshairLps) lpsList.push(p.crosshairLps);
+      emit(
+        `- pane \`${k}\`: slice=${p.sliceIndex} canvas=${p.canvas?.width}×${p.canvas?.height} outOfCoverage=${p.outOfCoverage} lps=${JSON.stringify(p.crosshairLps)}`,
+      );
+    }
+    const ref = lpsList[0];
+    const coincide =
+      !!ref &&
+      lpsList.every(
+        (l) =>
+          Math.abs(l[0] - ref[0]) < 2 && Math.abs(l[1] - ref[1]) < 2 && Math.abs(l[2] - ref[2]) < 3,
+      );
+    emit(`- crosshairLps coincide across phases (same anatomy): ${coincide}`);
+
+    // Out-of-overlap: above the shorter phases' z-extent → they must flag
+    // out-of-coverage (snap to nearest slice), NOT go black.
+    await page.evaluate(
+      (lps) =>
+        (
+          window as unknown as {
+            __viewerTest?: { setCrosshairWorldAll?: (p: number[]) => unknown };
+          }
+        ).__viewerTest?.setCrosshairWorldAll?.(lps),
+      OUT_OF_OVERLAP,
+    );
+    await page.waitForTimeout(1200);
+    emit(`- screenshot: \`${await shot(page, "radiological-out-of-coverage")}\``);
+    const probe2 = await readProbe(page);
+    const oocCount = Object.values(
+      (probe2?.panes ?? {}) as Record<string, { outOfCoverage?: boolean | null }>,
+    ).filter((p) => p.outOfCoverage === true).length;
+    emit(
+      `- out-of-overlap: ${oocCount} phase(s) flagged out-of-coverage (expected the shorter ones)`,
+    );
+
+    dumpCaptures();
+    // GATE assertions
+    expect(visibleCount, "4 phase panes visible").toBeGreaterThanOrEqual(4);
+    expect(allValid, "every liver-synced pane is in-coverage with a valid slice + canvas").toBe(
+      true,
+    );
+    expect(coincide, "all phases report the same crosshair world position").toBe(true);
+    expect(oocCount, "out-of-overlap flags the shorter phases (no silent black)").toBeGreaterThan(
+      0,
+    );
+    emit("- ✅ liver sync GATE passed");
+  });
+
+  test("radiological — liver wash-out measurement", async ({ page }) => {
+    test.skip(STUDY_ID !== LIVER_STUDY, "Liver world points are specific to study 2858def7.");
+    emit("\n## Radiological — liver wash-out\n");
+    await page.setViewportSize({ width: 1600, height: 1000 });
+    await page.goto(`${BASE_URL}/viewer/contrast?study=${STUDY_ID}`, {
+      waitUntil: "domcontentloaded",
+    });
+    await page
+      .waitForFunction(
+        () =>
+          !!(window as unknown as { __viewerTest?: { runWashout?: unknown } }).__viewerTest
+            ?.runWashout,
+        null,
+        { timeout: 90_000 },
+      )
+      .catch(() => {});
+
+    const result = (await page.evaluate(
+      async (pts) => {
+        const [lesion, paren] = pts;
+        const t = (
+          window as unknown as {
+            __viewerTest?: {
+              runWashout?: (a: unknown) => Promise<unknown>;
+            };
+          }
+        ).__viewerTest;
+        return (await t?.runWashout?.({
+          lesionCenterLps: lesion,
+          lesionRadiusMm: 12,
+          parenchymaCenterLps: paren,
+          parenchymaRadiusMm: 10,
+          region: "liver",
+        })) as {
+          samples?: Array<{ acquisition_phase: string | null; hu_mean: number; hu_std: number }>;
+          skipped?: Array<{ acquisition_phase: string | null; reason: string }>;
+          washout?: {
+            region?: string | null;
+            apw?: number | null;
+            rpw?: number | null;
+            relative_curve?: Array<{ acquisition_phase: string; delta_hu: number }>;
+          };
+        } | null;
+      },
+      [LIVER_LESION, LIVER_PARENCHYMA],
+    )) as Awaited<ReturnType<typeof page.evaluate>> as {
+      samples?: Array<{ acquisition_phase: string | null; hu_mean: number; hu_std: number }>;
+      skipped?: Array<{ acquisition_phase: string | null; reason: string }>;
+      washout?: {
+        region?: string | null;
+        apw?: number | null;
+        rpw?: number | null;
+        relative_curve?: Array<{ acquisition_phase: string; delta_hu: number }>;
+      };
+    } | null;
+
+    const samples = result?.samples ?? [];
+    const skipped = result?.skipped ?? [];
+    const region = result?.washout?.region ?? null;
+    const relative = result?.washout?.relative_curve ?? [];
+    const byPhase: Record<string, number> = {};
+    for (const s of samples) if (s.acquisition_phase) byPhase[s.acquisition_phase] = s.hu_mean;
+    emit(`- region: ${region}`);
+    emit(
+      `- samples (${samples.length}): ${samples.map((s) => `${s.acquisition_phase}=${s.hu_mean?.toFixed(0)}±${s.hu_std?.toFixed(0)}`).join(", ")}`,
+    );
+    emit(`- skipped phases: ${skipped.length}`);
+    emit(
+      `- relative_curve (lesion−parenchyma): ${relative.map((r) => `${r.acquisition_phase}=${r.delta_hu?.toFixed(1)}`).join(", ")}`,
+    );
+
+    dumpCaptures();
+    // GATE assertions — the radiological workflow must compute across all 4
+    // phases with the liver (relative-to-parenchyma) interpretation.
+    expect(samples.length, "4 phase HU samples").toBe(4);
+    expect(skipped.length, "no phase skipped — all cover the liver").toBe(0);
+    expect(region, "liver region interpretation").toBe("liver");
+    expect(relative.length, "liver relative curve computed (lesion vs parenchyma)").toBe(4);
+    // Liver perfusion sanity: unenhanced parenchyma 30–80 HU, portal-venous the
+    // most enhanced (the classic liver enhancement pattern).
+    expect(byPhase.unenhanced, "unenhanced liver HU in range").toBeGreaterThan(30);
+    expect(byPhase.unenhanced).toBeLessThan(80);
+    expect(byPhase.portal_venous, "portal-venous enhancement above unenhanced").toBeGreaterThan(
+      byPhase.unenhanced,
+    );
+    emit("- ✅ liver wash-out GATE passed");
   });
 });

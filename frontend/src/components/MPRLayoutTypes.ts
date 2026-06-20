@@ -165,8 +165,21 @@ export interface MPRLayoutHandle {
    *  transform, then ``setCrosshairWorld`` on the other pane. */
   getCrosshairWorld?: (ijk?: [number, number, number]) => [number, number, number] | null;
   /** Move the crosshair to a world-space (LPS) point (converted to the
-   *  primary volume's IJK). Returns ``true`` on success. */
+   *  primary volume's IJK, clamped to the grid). Returns ``true`` when the
+   *  point is within this pane's coverage, ``false`` when it fell outside the
+   *  volume and was snapped to the nearest valid slice (out of coverage). */
   setCrosshairWorld?: (world: [number, number, number]) => boolean;
+  /** Live per-pane geometry snapshot for instrumentation / radiological tests:
+   *  current crosshair in voxel (IJK) + world (LPS), the axial slice index,
+   *  the rendered canvas size, and whether the last cross-pane sync landed
+   *  outside this phase's coverage. */
+  getProbeState?: () => {
+    crosshairIjk: [number, number, number];
+    crosshairLps: [number, number, number] | null;
+    sliceIndex: number;
+    canvas: { width: number; height: number } | null;
+    outOfCoverage: boolean;
+  };
   /** Re-apply the percentile-based auto-WL to the fusion volume. The
    *  layout runs this on mount; exposing it here lets the SUV "Auto"
    *  button restore the fusion's window without forcing the user to

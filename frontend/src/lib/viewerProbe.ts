@@ -40,6 +40,16 @@ export interface ViewerPaneProbe {
   /** Canvas dimensions in device pixels — 0×0 signals a pane that never
    *  laid out (another black-screen cause). */
   canvas?: { width: number; height: number } | null;
+  /** Crosshair voxel index (IJK) of this pane. */
+  crosshairIjk?: [number, number, number] | null;
+  /** Crosshair world position (LPS). All synced panes should report the SAME
+   *  crosshairLps — a radiological-sync test asserts they coincide. */
+  crosshairLps?: [number, number, number] | null;
+  /** True when the synced world point fell OUTSIDE this phase's coverage and
+   *  was snapped to the nearest valid slice (multiphase phases with different
+   *  z-extents). A radiological test asserts this is false on the liver
+   *  overlap (no black panes) and true only outside it. */
+  outOfCoverage?: boolean | null;
 }
 
 /** The whole-viewer snapshot exposed at ``window.__viewer``. */
@@ -72,6 +82,19 @@ export interface ViewerProbe {
    *  applied", "fusion fetch failed", …) so an audit can explain a
    *  finding without guessing. */
   notes?: string[];
+  /** Last wash-out computation result (contrast surface) so a radiological
+   *  test can assert sensible per-phase HU + the liver relative curve without
+   *  scraping the panel DOM. */
+  washoutResult?: {
+    region?: string | null;
+    apw?: number | null;
+    rpw?: number | null;
+    curve?: Array<{ acquisition_phase: string | null; hu_mean: number | null }>;
+    parenchymaCurve?: Array<{ acquisition_phase: string | null; hu_mean: number | null }>;
+    relativeCurve?: Array<{ acquisition_phase: string | null; delta_hu: number | null }>;
+    samples?: Array<{ acquisition_phase: string | null; hu_mean: number; hu_std: number }>;
+    skipped?: Array<{ acquisition_phase: string | null; reason: string }>;
+  } | null;
 }
 
 declare global {
