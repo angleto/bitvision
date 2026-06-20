@@ -1130,18 +1130,42 @@ export default function SeriesViewerPage() {
         const geomDirection = parseFloatVector(resp.headers.get("x-volume-direction"), 9);
         const geomFor = resp.headers.get("x-volume-frame-of-reference") || undefined;
         const contentLength = Number(resp.headers.get("content-length") || 0);
+        // gzip Content-Length is the COMPRESSED size; the browser hands us
+        // decompressed chunks, so it can't drive a % bar. Derive the true
+        // uncompressed total from the 32-byte packed header (nx,ny,nz) the
+        // moment we have it (after the first chunk); until then the raw MB
+        // counter still moves, so it's never a bare spinner.
         const reader = resp.body?.getReader();
         if (!reader) throw new Error("no response body");
         const chunks: Uint8Array[] = [];
         let loaded = 0;
+        let expectedTotal = 0;
         while (true) {
           const { done, value } = await reader.read();
           if (done) break;
           chunks.push(value);
           loaded += value.length;
+          if (!expectedTotal && loaded >= 32) {
+            let head = chunks[0];
+            if (head.length < 32) {
+              head = new Uint8Array(32);
+              let o = 0;
+              for (const c of chunks) {
+                const n = Math.min(c.length, 32 - o);
+                head.set(c.subarray(0, n), o);
+                o += n;
+                if (o >= 32) break;
+              }
+            }
+            const hdv = new DataView(head.buffer, head.byteOffset, 32);
+            const hnx = hdv.getUint32(0, true);
+            const hny = hdv.getUint32(4, true);
+            const hnz = hdv.getUint32(8, true);
+            if (hnx > 0 && hny > 0 && hnz > 0) expectedTotal = 32 + hnx * hny * hnz * 4;
+          }
           setLoadProgress({
             loaded,
-            total: contentLength || loaded,
+            total: expectedTotal || contentLength || loaded,
             elapsed: (Date.now() - startTime) / 1000,
           });
         }
@@ -2137,6 +2161,79 @@ export default function SeriesViewerPage() {
                 </div>
               </div>
             )}
+            {volumeLoading && volume && loadProgress ? (
+              // Non-blocking full-res progress: the low-res preview is already
+              // visible underneath; this badge proves the HD volume is still
+              // downloading AND advancing (real % + MB, not a bare spinner), and
+              // flags a stalled transfer so a hung load is evident.
+              <div
+                aria-live="polite"
+                style={{
+                  position: "absolute",
+                  bottom: 8,
+                  right: 8,
+                  zIndex: 10,
+                  background: "rgba(15,20,30,0.82)",
+                  color: "#e6ecf3",
+                  fontSize: "0.72rem",
+                  padding: "0.35rem 0.6rem",
+                  borderRadius: 6,
+                  border: "1px solid #2a2f3b",
+                  fontFamily: "ui-monospace, monospace",
+                  pointerEvents: "none",
+                  minWidth: 190,
+                  display: "flex",
+                  flexDirection: "column",
+                  gap: 4,
+                }}
+              >
+                {(() => {
+                  const total = loadProgress.total;
+                  const pct =
+                    total > loadProgress.loaded
+                      ? Math.min(99, Math.round((loadProgress.loaded / total) * 100))
+                      : total > 0
+                        ? 99
+                        : null;
+                  const mb = (loadProgress.loaded / 1_048_576).toFixed(1);
+                  const stalled = elapsedSec - loadProgress.elapsed > 6;
+                  return (
+                    <>
+                      <div style={{ display: "flex", justifyContent: "space-between", gap: 10 }}>
+                        <span>Full-res HD</span>
+                        <span style={{ color: stalled ? "#f0a868" : "#94a3b8" }}>
+                          {pct != null ? `${pct}% · ` : ""}
+                          {mb} MB
+                          {stalled ? " · rete lenta…" : ""}
+                        </span>
+                      </div>
+                      <div
+                        role="presentation"
+                        style={{
+                          height: 4,
+                          borderRadius: 2,
+                          background: "rgba(148,163,184,0.25)",
+                          overflow: "hidden",
+                        }}
+                      >
+                        <div
+                          style={{
+                            height: "100%",
+                            width: pct != null ? `${pct}%` : "30%",
+                            background: stalled ? "#f0a868" : "#e96b1f",
+                            transition: "width 0.2s ease",
+                            animation:
+                              pct == null
+                                ? "bvFusionIndeterminate 1.1s ease-in-out infinite"
+                                : "none",
+                          }}
+                        />
+                      </div>
+                    </>
+                  );
+                })()}
+              </div>
+            ) : null}
             {volumeLoading && !volume ? (
               // Big blocking spinner ONLY while there's nothing to show yet.
               // Once the progressive low-res preview has populated ``volume``
@@ -2166,17 +2263,24 @@ export default function SeriesViewerPage() {
                 {(() => {
                   const instCount = series?.received_instance_count ?? 0;
                   const estMiB = instCount > 0 ? (instCount * 512 * 512 * 4) / 1_048_576 : 0;
-                  // No percentage: ``Content-Length`` reports the
-                  // compressed size when the server uses gzip/brotli,
-                  // while ``loaded`` counts decompressed bytes. The
-                  // ratio routinely exceeds 100% and confuses the
-                  // user — show MB + elapsed seconds instead, both of
-                  // which are always meaningful.
+                  // Real % from the UNCOMPRESSED total (header dims, fed into
+                  // loadProgress.total) — never the gzip Content-Length. The
+                  // download phase is determinate (bar fills, % climbs); only
+                  // the brief post-download CPU "building" phase is
+                  // indeterminate, and even there the elapsed counter keeps
+                  // ticking so a frozen build is still visible.
+                  const pct =
+                    loadProgress && loadProgress.total > loadProgress.loaded
+                      ? Math.min(99, Math.round((loadProgress.loaded / loadProgress.total) * 100))
+                      : loadProgress
+                        ? 99
+                        : null;
+                  const stalled = loadProgress != null && elapsedSec - loadProgress.elapsed > 6;
                   return (
                     <>
                       <div style={{ fontSize: "0.95rem" }}>
                         {loadProgress
-                          ? `Downloading volume… ${(loadProgress.loaded / 1_048_576).toFixed(1)} MB`
+                          ? `Downloading volume… ${pct != null ? `${pct}% · ` : ""}${(loadProgress.loaded / 1_048_576).toFixed(1)} MB${stalled ? " · rete lenta…" : ""}`
                           : `Building volume from ${instCount} slices… ${elapsedSec}s`}
                       </div>
                       <div
@@ -2189,16 +2293,28 @@ export default function SeriesViewerPage() {
                           position: "relative",
                         }}
                       >
-                        <div
-                          style={{
-                            width: "100%",
-                            height: "100%",
-                            background:
-                              "linear-gradient(90deg, transparent 0%, #e96b1f 50%, transparent 100%)",
-                            animation: "pulse-bar 1.5s ease-in-out infinite",
-                            borderRadius: 3,
-                          }}
-                        />
+                        {pct != null ? (
+                          <div
+                            style={{
+                              width: `${pct}%`,
+                              height: "100%",
+                              background: stalled ? "#f0a868" : "#e96b1f",
+                              borderRadius: 3,
+                              transition: "width 0.2s ease",
+                            }}
+                          />
+                        ) : (
+                          <div
+                            style={{
+                              width: "100%",
+                              height: "100%",
+                              background:
+                                "linear-gradient(90deg, transparent 0%, #e96b1f 50%, transparent 100%)",
+                              animation: "pulse-bar 1.5s ease-in-out infinite",
+                              borderRadius: 3,
+                            }}
+                          />
+                        )}
                       </div>
                       <div style={{ fontSize: "0.75rem", color: "#666", fontFamily: "monospace" }}>
                         {loadProgress
