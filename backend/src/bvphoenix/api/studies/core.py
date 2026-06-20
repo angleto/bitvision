@@ -909,7 +909,31 @@ async def get_series_volume_preview(
             bucket=preview_deriv.s3_bucket,
             key=preview_deriv.s3_key,
         )
-        return _volume_response(cached, accept_gzip=_client_accepts_gzip(request), etag=etag)
+        # The preview is downsampled (spacing ×2, already baked into its packed
+        # header) but the geometry dict — origin, direction cosines, FoR — is
+        # downsample-INVARIANT. Emit it (preferring the full-res derivative's
+        # geometry, since prefetch_series never stored it on the preview row) so
+        # the viewer can world-sync the preview pane. Without it the preview
+        # falls back to an identity frame and cross-phase sync maps to the wrong
+        # voxel → the multiphase panes can't be aligned on the same anatomy.
+        preview_geom = preview_deriv.geometry
+        if preview_geom is None:
+            preview_geom = (
+                await db.execute(
+                    select(Derivative.geometry).where(
+                        Derivative.series_id == series.id,
+                        Derivative.kind == DERIVATIVE_KIND,
+                        Derivative.format == DERIVATIVE_FORMAT,
+                        Derivative.stack_index == 0,
+                    )
+                )
+            ).scalar_one_or_none()
+        return _volume_response(
+            cached,
+            accept_gzip=_client_accepts_gzip(request),
+            etag=etag,
+            geometry=preview_geom,
+        )
 
     # Cheap precheck: skip non-volumetric SOP classes before paying for
     # any packing work. Same shortcut as the full-res endpoint.
@@ -1011,6 +1035,9 @@ async def get_series_volume_preview(
         s3_key=cache_key,
         size_bytes=preview.size,
         generator_version="pack_low_res-v1",
+        # Geometry is downsample-invariant — persist it so the world-sync works
+        # on the preview pane (and future fast-path hits emit it directly).
+        geometry=packed.geometry,
     )
     db.add(preview_deriv)
     await db.commit()
@@ -1020,6 +1047,7 @@ async def get_series_volume_preview(
         preview.bytes_,
         accept_gzip=_client_accepts_gzip(request),
         etag=_derivative_etag(preview_deriv.id),
+        geometry=packed.geometry,
     )
 
 

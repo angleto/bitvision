@@ -25,7 +25,7 @@
 import fs from "node:fs";
 import path from "node:path";
 
-import { type Page, test } from "@playwright/test";
+import { type Page, expect, test } from "@playwright/test";
 
 import { checkTapTargets, walkFocusable } from "./_helpers/audit-heuristics";
 
