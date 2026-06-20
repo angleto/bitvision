@@ -18,6 +18,11 @@ import { useModal } from "@/components/ModalHost";
 import { ApiError, type AppSetting, settingsApi } from "@/lib/api";
 import { useAuth } from "@/lib/auth-context";
 
+// Public flag the DICOM viewer reads to enable non-PHI introspection
+// (``window.__viewer`` + ``data-testid``) for automated UX audits. Kept
+// here so the dedicated toggle and the generic editor agree on the key.
+const VIEWER_DEBUG_KEY = "viewer.debug.instrumentation";
+
 function parseValue(input: string): unknown {
   // Try strict JSON first ('123', '"abc"', 'true', '{...}'). If that
   // fails, treat the whole thing as a plain string. Distinguishing
@@ -96,6 +101,24 @@ export default function AdminSettingsPage() {
     }
   }
 
+  async function toggleViewerDebug(next: boolean) {
+    setSaving(VIEWER_DEBUG_KEY);
+    setErr(null);
+    try {
+      await settingsApi.upsert(VIEWER_DEBUG_KEY, {
+        value: next,
+        scope: "public",
+        description:
+          "Enables non-PHI viewer introspection (window.__viewer + data-testid) for automated UX audits.",
+      });
+      await refresh();
+    } catch (e) {
+      setErr(e instanceof ApiError ? e.message : t("saveFailed"));
+    } finally {
+      setSaving(null);
+    }
+  }
+
   async function createNew(e: React.FormEvent) {
     e.preventDefault();
     if (!newKey.trim()) return;
@@ -125,6 +148,53 @@ export default function AdminSettingsPage() {
       <p className="meta" style={{ marginBottom: "0.5rem" }}>
         {t("subtitle")}
       </p>
+      {(() => {
+        const on = rows?.some((r) => r.key === VIEWER_DEBUG_KEY && r.value === true) ?? false;
+        return (
+          <div
+            className="card"
+            data-testid="admin-viewer-debug-card"
+            style={{
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "space-between",
+              gap: "1rem",
+              padding: "0.75rem 0.9rem",
+              marginBottom: "1rem",
+              border: `1px solid ${on ? "var(--bv-success, #2c8a4d)" : "var(--bv-card-border)"}`,
+              borderRadius: 8,
+            }}
+          >
+            <div>
+              <strong>{t("viewerDebugTitle")}</strong>
+              <div className="meta" style={{ fontSize: "0.75rem", marginTop: 2, maxWidth: 620 }}>
+                {t("viewerDebugHint")}
+              </div>
+            </div>
+            <button
+              type="button"
+              role="switch"
+              aria-checked={on}
+              data-testid="admin-viewer-debug-toggle"
+              disabled={saving === VIEWER_DEBUG_KEY}
+              onClick={() => toggleViewerDebug(!on)}
+              style={{
+                flexShrink: 0,
+                fontWeight: 600,
+                fontSize: "0.82rem",
+                padding: "0.4rem 0.9rem",
+                borderRadius: 999,
+                border: "1px solid",
+                borderColor: on ? "var(--bv-success, #2c8a4d)" : "var(--bv-card-border)",
+                background: on ? "rgba(44, 138, 77, 0.15)" : "transparent",
+                color: on ? "var(--bv-success, #2c8a4d)" : "inherit",
+              }}
+            >
+              {saving === VIEWER_DEBUG_KEY ? "…" : on ? t("viewerDebugOn") : t("viewerDebugOff")}
+            </button>
+          </div>
+        );
+      })()}
       <div
         className="card"
         style={{

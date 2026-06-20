@@ -593,6 +593,15 @@ async def compute_phase_roi_stats(
                     pk0, pk1 = slab_k_range_sphere(p_ijk[2], float(p_radius), spacing[2], nz)
                     k0, k1 = min(k0, pk0), max(k1, pk1)
 
+            # An ROI whose centre maps OUTSIDE this phase's z-extent yields an
+            # inverted slab (k0 > k1): slab_k_range clamps each end to
+            # [0, nz-1] independently, so a centre past the volume gives
+            # k0 > k1. Left unchecked that produced a negative byte length, a
+            # malformed S3 range (whole-object read), and a cryptic reshape
+            # error. Degrade THIS phase with a clear reason instead.
+            if k0 > k1:
+                raise ValueError("ROI maps outside this phase's z-range")
+
             start, length = slab_byte_range(k0, k1, ny, nx, HEADER_STRUCT.size)
             slab = await asyncio.to_thread(
                 storage.get_object_range, bucket=bucket, key=key, start=start, length=length
@@ -894,6 +903,8 @@ async def compute_washout_map(
         raise _problem(422, "roi_outside", "ROI centre falls outside the volume")
 
     k0, k1 = slab_k_range_sphere(ck, spacing[2], spacing[2], nza)  # 1-slice slab around ck
+    if k0 > k1:  # ck past the volume in z -> inverted slab; guard like i/j above
+        raise _problem(422, "roi_outside", "ROI centre falls outside the volume")
     start, length = slab_byte_range(k0, k1, nya, nxa, HEADER_STRUCT.size)
     try:
         slab_a = await asyncio.to_thread(

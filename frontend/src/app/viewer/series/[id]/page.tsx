@@ -65,6 +65,7 @@ import {
 import { extractAndDownloadStl } from "@/lib/isosurfaceSTL";
 import { useFullscreen } from "@/lib/useFullscreen";
 import { useIsMobile } from "@/lib/useIsMobile";
+import { resetViewerProbe, updateViewerProbe, useViewerDebug } from "@/lib/viewerProbe";
 import { type ViewportStateBlob, useViewportState } from "@/lib/viewportState";
 import { computeAutoWL, modalityDefaults, suggestedFromDicom } from "@/lib/windowing";
 
@@ -659,6 +660,11 @@ export default function SeriesViewerPage() {
   const layoutRef = useRef<HTMLDivElement | null>(null);
   const { isFullscreen, isSupported: fsSupported, toggle: toggleFs } = useFullscreen(layoutRef);
   const mprRef = useRef<MPRLayoutHandle | null>(null);
+
+  // Viewer instrumentation: dormant unless an admin enabled the
+  // ``viewer.debug.instrumentation`` flag (see /admin/settings). When
+  // off, every probe call below is a no-op and behaviour is unchanged.
+  const viewerDebug = useViewerDebug();
 
   const [helpOpen, setHelpOpen] = useState(false);
 
@@ -1933,6 +1939,76 @@ export default function SeriesViewerPage() {
     </>
   );
 
+  // Reset the instrumentation probe when the study/series changes so an
+  // audit never reads stale panes/notes from a previous volume. params.id
+  // is an intentional re-fire trigger, not read in the body.
+  // biome-ignore lint/correctness/useExhaustiveDependencies: re-fire on study switch
+  useEffect(() => {
+    if (viewerDebug) resetViewerProbe("series");
+  }, [viewerDebug, params.id]);
+
+  // Populate window.__viewer at 1 Hz (the W/L lives on the imperative
+  // handle as a mutable, not React state, so polling keeps it fresh).
+  useEffect(() => {
+    if (!viewerDebug) return;
+    const push = () => {
+      const h = mprRef.current;
+      const voi =
+        h && h.wc != null && h.ww != null
+          ? { lower: h.wc - h.ww / 2, upper: h.wc + h.ww / 2 }
+          : null;
+      const invert = h?.invert ?? undefined;
+      updateViewerProbe({
+        surface: "series",
+        identity: {
+          seriesId: params.id,
+          studyId: series?.study_id ?? undefined,
+          patientId: studyPatientId ?? undefined,
+          modality: series?.modality ?? undefined,
+        },
+        volume: volume
+          ? {
+              dims: volume.dimensions as [number, number, number],
+              hasGeometry: Boolean(
+                (series as { frame_of_reference_uid?: string } | null)?.frame_of_reference_uid,
+              ),
+            }
+          : null,
+        panes: {
+          axial: { visible: true, voi, invert },
+          sagittal: { visible: showSagittal, voi, invert },
+          coronal: { visible: showCoronal, voi, invert },
+          "3d": { visible: show3D, voi: null },
+          mip: { visible: showMip, voi, invert },
+          oblique: { visible: showOblique, voi, invert },
+        },
+        activeTool: activeTool ?? null,
+        layout: layout ? String(layout) : protocolId,
+        measurementCount: allMeasurements.length,
+        error: err,
+      });
+    };
+    push();
+    const t = setInterval(push, 1000);
+    return () => clearInterval(t);
+  }, [
+    viewerDebug,
+    params.id,
+    series,
+    studyPatientId,
+    volume,
+    activeTool,
+    layout,
+    protocolId,
+    allMeasurements.length,
+    err,
+    showSagittal,
+    showCoronal,
+    show3D,
+    showMip,
+    showOblique,
+  ]);
+
   return (
     <BrowserSupportGate>
       <div
@@ -1942,7 +2018,7 @@ export default function SeriesViewerPage() {
       >
         <div className="viewer-layout__canvas">
           <ViewerIdentityBanner patient={patient} study={study} />
-          <div className="viewer-layout__canvas-inner">
+          <div className="viewer-layout__canvas-inner" data-testid="viewer-canvas">
             {fusionLoading && (
               <div
                 aria-live="polite"
@@ -2101,6 +2177,7 @@ export default function SeriesViewerPage() {
               />
             ) : err ? (
               <div
+                data-testid="viewer-error"
                 style={{
                   display: "flex",
                   alignItems: "center",
@@ -2357,7 +2434,7 @@ export default function SeriesViewerPage() {
           </div>
         </div>
         {sidebarOpen && (
-          <aside className="viewer-layout__sidebar" ref={sidebarRef}>
+          <aside className="viewer-layout__sidebar" ref={sidebarRef} data-testid="viewer-sidebar">
             {series && (
               <>
                 <SidebarSectionNav
@@ -3723,17 +3800,19 @@ export default function SeriesViewerPage() {
                         defaultOpen={true}
                         hint="Mouse bindings · measurement tools"
                       >
-                        <ViewerToolPalette
-                          activeTool={activeTool}
-                          onChange={(t) => setActiveTool(t)}
-                          onClearAll={() => {
-                            // Drop the SVG overlays first so the next
-                            // ANNOTATION_REMOVED → onMeasurementsChange pass
-                            // doesn't immediately replay them back into state.
-                            mprRef.current?.clearAnnotations();
-                            setAllMeasurements([]);
-                          }}
-                        />
+                        <div data-testid="viewer-toolbar">
+                          <ViewerToolPalette
+                            activeTool={activeTool}
+                            onChange={(t) => setActiveTool(t)}
+                            onClearAll={() => {
+                              // Drop the SVG overlays first so the next
+                              // ANNOTATION_REMOVED → onMeasurementsChange pass
+                              // doesn't immediately replay them back into state.
+                              mprRef.current?.clearAnnotations();
+                              setAllMeasurements([]);
+                            }}
+                          />
+                        </div>
 
                         {/* "Measurements" widget rimosso: era duplicato di
                       ``MarkerListPanel`` (sezione Annotazioni in

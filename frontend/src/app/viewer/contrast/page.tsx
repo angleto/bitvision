@@ -33,6 +33,7 @@ import {
 } from "@/lib/api";
 import { defaultPhasePanes, reviewableSeries } from "@/lib/contrastPhases";
 import { dispatchViewportResetView, dispatchViewportZoom, useHotkeys } from "@/lib/hotkeys";
+import { resetViewerProbe, updateViewerProbe, useViewerDebug } from "@/lib/viewerProbe";
 import { presetForPhase } from "@/lib/windowing";
 import { useTranslations } from "next-intl";
 import dynamic from "next/dynamic";
@@ -876,6 +877,65 @@ function ContrastViewerInner() {
     }
   }
 
+  // Viewer instrumentation: dormant unless an admin enabled the
+  // ``viewer.debug.instrumentation`` flag (see /admin/settings). Strictly
+  // additive — every probe call is a no-op when the flag is off. Polled at
+  // 1 Hz because each pane's W/L lives on its imperative handle (mutable),
+  // not React state.
+  const viewerDebug = useViewerDebug();
+  useEffect(() => {
+    if (!viewerDebug) return;
+    resetViewerProbe("contrast");
+    const push = () => {
+      const paneProbe: Record<
+        string,
+        { visible: boolean; voi: { lower: number; upper: number } | null; invert?: boolean }
+      > = {};
+      panes.forEach((phase, i) => {
+        const h = paneHandlesRef.current[i];
+        const voi =
+          h && h.wc != null && h.ww != null
+            ? { lower: h.wc - h.ww / 2, upper: h.wc + h.ww / 2 }
+            : null;
+        const key = phase.acquisition_phase ?? phase.series_id;
+        paneProbe[key] = {
+          visible: layoutMode === "single" ? i === activePane : true,
+          voi,
+          invert: h?.invert ?? undefined,
+        };
+      });
+      updateViewerProbe({
+        surface: "contrast",
+        identity: {
+          studyId,
+          patientId: patient?.id ?? undefined,
+          modality: panes[0]?.modality ?? undefined,
+        },
+        panes: paneProbe,
+        activeTool: measureMode ? "measure-sphere" : activeTool,
+        measurementCount: Object.values(paneMeasurements).reduce(
+          (n, ms) => n + (ms?.length ?? 0),
+          0,
+        ),
+        error: loadErr,
+      });
+    };
+    push();
+    const timer = setInterval(push, 1000);
+    return () => clearInterval(timer);
+  }, [
+    viewerDebug,
+    studyId,
+    panes,
+    patient,
+    activeTool,
+    measureMode,
+    layoutMode,
+    activePane,
+    paneMeasurements,
+    loadErr,
+  ]);
+
   if (!studyId) {
     return (
       <main style={{ padding: "2rem" }}>
@@ -935,6 +995,7 @@ function ContrastViewerInner() {
         </button>
         <button
           type="button"
+          data-testid="washout-run"
           className={measureMode ? "viewer-btn viewer-btn--active" : "ghost"}
           aria-pressed={measureMode}
           onClick={() => {
@@ -1099,6 +1160,7 @@ function ContrastViewerInner() {
                 return (
                   <div
                     key={phase.series_id}
+                    data-testid={`contrast-phase-${phase.acquisition_phase ?? phase.series_id}`}
                     onPointerDown={() => setActivePane(i)}
                     style={{
                       position: "relative",
@@ -1217,6 +1279,7 @@ function ContrastViewerInner() {
                           <button
                             type="button"
                             className="ghost"
+                            data-testid={`contrast-close-${phase.series_id}`}
                             title={t("closePane")}
                             aria-label={t("closePane")}
                             onClick={() => closePane(phase.series_id)}
@@ -1258,6 +1321,7 @@ function ContrastViewerInner() {
             phase panes. */}
         {(measureMode || washout) && (
           <div
+            data-testid="washout-panel"
             style={{
               position: "absolute",
               bottom: 10,
