@@ -67,6 +67,13 @@ FROM python:3.12-slim
 # resolves.
 ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1 PATH="/app/.venv/bin:$PATH" HF_HOME=/app/.cache/huggingface
 
+# pack_volume unpacks 100-500MB DICOM stacks into float32 NumPy volumes; up
+# to ``max_jobs`` (10) can run concurrently. The glibc allocator keeps freed
+# arenas resident, so RSS ratchets up across packs and a later large stack can
+# OOMKill the pod. Cap the arenas (same rationale as the backend image) so
+# pages are returned to the OS between packs.
+ENV MALLOC_ARENA_MAX=2
+
 # Build identity baked into the image; mirrored across all bvphoenix
 # images so an operator can confirm at a glance which release is live.
 ARG VERSION=""
