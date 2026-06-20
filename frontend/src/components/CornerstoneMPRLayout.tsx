@@ -3026,11 +3026,32 @@ const CornerstoneMPRLayout = forwardRef<MPRLayoutHandle, ExtendedProps>(
             const outOfCoverage =
               ri < 0 || ri > nx - 1 || rj < 0 || rj > ny - 1 || rk < 0 || rk > nz - 1;
             coverageRef.current = outOfCoverage;
-            updateCrosshair([
+            const clamped: [number, number, number] = [
               Math.max(0, Math.min(nx - 1, ri)),
               Math.max(0, Math.min(ny - 1, rj)),
               Math.max(0, Math.min(nz - 1, rk)),
-            ]);
+            ];
+            updateCrosshair(clamped);
+            // Authoritative slice move + repaint via the viewport's own
+            // ``jumpToWorld``. ``updateCrosshair``'s hand-rolled setCamera moved
+            // the camera focal point correctly (instrumentation confirmed the
+            // focal tracked the synced world Z on every pane) but did NOT repaint
+            // the displayed slice in the multiphase panes — they froze on the
+            // wrong anatomy. ``jumpToWorld`` is the cornerstone-sanctioned method
+            // (the same path the working native StackScroll uses) and repaints
+            // reliably. Jump to the CLAMPED world (nearest valid slice) so an
+            // out-of-coverage phase snaps instead of flying into empty space.
+            const engine = engineRef.current;
+            if (engine) {
+              const clampedWorld = cs.utilities.transformIndexToWorld(
+                img as Parameters<typeof cs.utilities.transformIndexToWorld>[0],
+                clamped,
+              ) as cs.Types.Point3 | undefined;
+              const axialVp = engine.getViewport(vpAxial) as
+                | (cs.Types.IVolumeViewport & { jumpToWorld?: (w: cs.Types.Point3) => boolean })
+                | undefined;
+              if (clampedWorld && axialVp?.jumpToWorld) axialVp.jumpToWorld(clampedWorld);
+            }
             // false = caller learns the point isn't covered here (still rendered
             // at the nearest slice, never black).
             return !outOfCoverage;
