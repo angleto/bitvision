@@ -335,4 +335,48 @@ test.describe("Viewer instrumented audit", () => {
 
     dumpCaptures();
   });
+
+  // Tap targets are a TOUCH concern (WCAG 2.5.5). Desktop (fine pointer) keeps
+  // a compact density on purpose; the 44px minimum is enforced only on coarse
+  // pointers. Audit in a real touch context (hasTouch=true → pointer:coarse)
+  // on the full desktop layout so every .viewer-btn renders.
+  test("tap targets (touch / coarse pointer)", async ({ browser }) => {
+    emit("\n## Tap targets — touch context (coarse pointer)\n");
+    const ctx = await browser.newContext({
+      hasTouch: true,
+      viewport: { width: 1440, height: 900 },
+    });
+    if (TOKEN && BASE_URL) {
+      const url = new URL(BASE_URL);
+      await ctx.addCookies([
+        {
+          name: "bvp_session",
+          value: TOKEN,
+          domain: url.hostname,
+          path: "/",
+          httpOnly: true,
+          secure: url.protocol === "https:",
+          sameSite: "Lax",
+        },
+      ]);
+    }
+    const tpage = await ctx.newPage();
+    try {
+      const sid = FORCE_SERIES ?? "5ac9d424-97dc-4e26-9f3a-034c6819a033";
+      await tpage.goto(`${BASE_URL}/viewer/series/${sid}`, { waitUntil: "domcontentloaded" });
+      await tpage.waitForTimeout(5000); // let the chrome render
+      const buttons = tpage.locator(".viewer-btn");
+      const total = await buttons.count();
+      const tap = await checkTapTargets(buttons, "viewer-btn");
+      emit(`- .viewer-btn rendered: ${total}`);
+      emit(`- coarse-pointer tap targets: ${tap.ok} ≥44px, ${tap.issues.length} below`);
+      for (const i of tap.issues.slice(0, 8))
+        emit(`  - \`${i.name}\` ${Math.round(i.width)}×${Math.round(i.height)}`);
+      emit(`- screenshot: \`${await shot(tpage, "touch-controls")}\``);
+    } catch (e) {
+      emit(`- touch tap-target error: \`${String(e).slice(0, 120)}\``);
+    } finally {
+      await ctx.close();
+    }
+  });
 });
