@@ -3042,11 +3042,42 @@ const CornerstoneMPRLayout = forwardRef<MPRLayoutHandle, ExtendedProps>(
           const ijk = crosshair;
           let lps: [number, number, number] | null = null;
           const v = cs.cache.getVolume(volumeId) as unknown as
-            | { imageData?: { indexToWorld?: (i: cs.Types.Point3) => cs.Types.Point3 } }
+            | {
+                imageData?: {
+                  indexToWorld?: (i: cs.Types.Point3) => cs.Types.Point3;
+                  getOrigin?: () => number[];
+                  getSpacing?: () => number[];
+                  getDimensions?: () => number[];
+                };
+              }
             | undefined;
           try {
             const w = v?.imageData?.indexToWorld?.([ijk[0], ijk[1], ijk[2]]);
             if (w) lps = [w[0], w[1], w[2]];
+          } catch {
+            /* leave null */
+          }
+          // The ACTUAL displayed slice: the axial viewport's camera focal point
+          // in world space. crosshairLps is the crosshair STATE; cameraFocalLps
+          // is what the pane is really rendering. If they diverge, the display
+          // is not following the crosshair (the multiphase-sync bug).
+          let cameraFocalLps: [number, number, number] | null = null;
+          try {
+            const vp = engineRef.current?.getViewport(vpAxial) as
+              | cs.Types.IVolumeViewport
+              | undefined;
+            const fp = vp?.getCamera?.()?.focalPoint;
+            if (fp) cameraFocalLps = [fp[0], fp[1], fp[2]];
+          } catch {
+            /* leave null */
+          }
+          let volOrigin: number[] | null = null;
+          let volSpacing: number[] | null = null;
+          let volDims: number[] | null = null;
+          try {
+            volOrigin = v?.imageData?.getOrigin?.() ?? null;
+            volSpacing = v?.imageData?.getSpacing?.() ?? null;
+            volDims = v?.imageData?.getDimensions?.() ?? null;
           } catch {
             /* leave null */
           }
@@ -3057,6 +3088,11 @@ const CornerstoneMPRLayout = forwardRef<MPRLayoutHandle, ExtendedProps>(
             sliceIndex: ijk[2],
             canvas: canvasEl ? { width: canvasEl.width, height: canvasEl.height } : null,
             outOfCoverage: coverageRef.current,
+            cameraFocalLps,
+            volOrigin,
+            volSpacing,
+            volDims,
+            volumeIdUsed: volumeId,
           };
         },
         resetWL: () => {
