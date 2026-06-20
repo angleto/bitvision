@@ -72,9 +72,10 @@ let pageErrors: string[] = [];
 let netFailures: string[] = [];
 
 test.describe("Viewer instrumented audit", () => {
-  // Real prod loads (full CT volume fetch + pack + first paint) routinely
-  // exceed the 30 s default; give each audit room to load and settle.
-  test.describe.configure({ timeout: 150_000 });
+  // Real prod loads (full CT volume fetch + pack + first paint, and the
+  // wash-out backend fan-out over the throttled egress) routinely exceed the
+  // 30 s default; give each audit generous room to load and settle.
+  test.describe.configure({ timeout: 240_000 });
 
   // BVP_AUDIT_TOKEN is required: /api/studies/{id} needs auth even for public
   // OpenData studies, and a private study needs a token that can read it.
@@ -411,11 +412,15 @@ test.describe("Viewer instrumented audit", () => {
             __viewer?: { surface?: string; panes?: Record<string, { voi?: unknown }> };
             __viewerTest?: { setCrosshairWorldAll?: unknown };
           };
+          const panes = w.__viewer?.panes ? Object.values(w.__viewer.panes) : [];
+          // Wait for ALL four phase previews to be windowed (loaded), not just
+          // one — driving the sync before a pane is built leaves its crosshair
+          // at the volume centre (non-deterministic).
           return (
             !!w.__viewerTest?.setCrosshairWorldAll &&
             w.__viewer?.surface === "contrast" &&
-            !!w.__viewer.panes &&
-            Object.values(w.__viewer.panes).some((p) => p.voi != null)
+            panes.length >= 4 &&
+            panes.every((p) => p.voi != null)
           );
         },
         null,
@@ -485,6 +490,26 @@ test.describe("Viewer instrumented audit", () => {
       );
     emit(`- crosshairLps coincide across phases (same anatomy): ${coincide}`);
 
+    // Ground-truth cross-check: read the RENDERED slice HUD ("Slice N / M") of
+    // each pane from the DOM — the camera's actual focal slice, which can
+    // diverge from the crosshair state the probe reports. A radiologist sees
+    // THIS, not the probe.
+    const phaseEls = page.locator('[data-testid^="contrast-phase-"]');
+    const nPhase = await phaseEls.count();
+    const renderedSlices: Array<{ tid: string; slice: number; total: number }> = [];
+    for (let i = 0; i < nPhase; i++) {
+      const el = phaseEls.nth(i);
+      const tid = (await el.getAttribute("data-testid")) ?? `pane${i}`;
+      const txt = (await el.textContent().catch(() => "")) ?? "";
+      const m = txt.match(/Slice\s+(\d+)\s*\/\s*(\d+)/);
+      const slice = m ? Number(m[1]) : Number.NaN;
+      const total = m ? Number(m[2]) : Number.NaN;
+      renderedSlices.push({ tid, slice, total });
+      emit(
+        `- ${tid}: rendered slice ${m ? `${slice}/${total} (${((slice / total) * 100).toFixed(0)}%)` : "?"}`,
+      );
+    }
+
     // Out-of-overlap: above the shorter phases' z-extent → they must flag
     // out-of-coverage (snap to nearest slice), NOT go black.
     await page.evaluate(
@@ -506,6 +531,23 @@ test.describe("Viewer instrumented audit", () => {
       `- out-of-overlap: ${oocCount} phase(s) flagged out-of-coverage (expected the shorter ones)`,
     );
 
+    // The radiologically meaningful alignment is the SLICE LEVEL (world z):
+    // every pane must display the same liver slice. The synced crosshair z must
+    // land on the liver, and — the ground-truth visual check — every pane must
+    // RENDER the same slice index (these phases share origin+spacing, so equal
+    // index = equal world z = the same liver level on all 4 quadrants). The
+    // in-plane crosshair MARKER (x,y) is reported but not gated — the user
+    // draws the ROI where they click, not at the crosshair (and the wash-out
+    // ROI is placed by world point, verified in the wash-out test).
+    emit(
+      `- synced crosshair world point: \`${JSON.stringify(ref)}\` (driven ${JSON.stringify(LIVER_LESION)})`,
+    );
+    const atLiverZ = !!ref && Math.abs(ref[2] - LIVER_LESION[2]) < 5;
+    emit(`- crosshair at the liver SLICE level (z ±5mm): ${atLiverZ}`);
+    const sliceIdxs = renderedSlices.filter((s) => Number.isFinite(s.slice)).map((s) => s.slice);
+    const sameRenderedIdx = sliceIdxs.length >= 4 && sliceIdxs.every((s) => s === sliceIdxs[0]);
+    emit(`- all panes RENDER the same slice index (same liver anatomy): ${sameRenderedIdx}`);
+
     dumpCaptures();
     // GATE assertions
     expect(visibleCount, "4 phase panes visible").toBeGreaterThanOrEqual(4);
@@ -513,72 +555,56 @@ test.describe("Viewer instrumented audit", () => {
       true,
     );
     expect(coincide, "all phases report the same crosshair world position").toBe(true);
+    expect(atLiverZ, "synced crosshair is at the liver slice level (same world z)").toBe(true);
+    expect(
+      sameRenderedIdx,
+      "every phase renders the same anatomical slice (visual liver alignment)",
+    ).toBe(true);
     expect(oocCount, "out-of-overlap flags the shorter phases (no silent black)").toBeGreaterThan(
       0,
     );
     emit("- ✅ liver sync GATE passed");
   });
 
-  test("radiological — liver wash-out measurement", async ({ page }) => {
+  test("radiological — liver wash-out measurement", async ({ request }) => {
     test.skip(STUDY_ID !== LIVER_STUDY, "Liver world points are specific to study 2858def7.");
     emit("\n## Radiological — liver wash-out\n");
-    await page.setViewportSize({ width: 1600, height: 1000 });
-    await page.goto(`${BASE_URL}/viewer/contrast?study=${STUDY_ID}`, {
-      waitUntil: "domcontentloaded",
-    });
-    await page
-      .waitForFunction(
-        () =>
-          !!(window as unknown as { __viewerTest?: { runWashout?: unknown } }).__viewerTest
-            ?.runWashout,
-        null,
-        { timeout: 90_000 },
-      )
-      .catch(() => {});
 
-    const result = (await page.evaluate(
-      async (pts) => {
-        const [lesion, paren] = pts;
-        const t = (
-          window as unknown as {
-            __viewerTest?: {
-              runWashout?: (a: unknown) => Promise<unknown>;
-            };
-          }
-        ).__viewerTest;
-        return (await t?.runWashout?.({
-          lesionCenterLps: lesion,
-          lesionRadiusMm: 12,
-          parenchymaCenterLps: paren,
-          parenchymaRadiusMm: 10,
-          region: "liver",
-        })) as {
-          samples?: Array<{ acquisition_phase: string | null; hu_mean: number; hu_std: number }>;
-          skipped?: Array<{ acquisition_phase: string | null; reason: string }>;
-          washout?: {
-            region?: string | null;
-            apw?: number | null;
-            rpw?: number | null;
-            relative_curve?: Array<{ acquisition_phase: string; delta_hu: number }>;
-          };
-        } | null;
+    // The wash-out is a BACKEND radiological computation. The viewer's
+    // ``runWashout`` hook merely POSTs the lesion + parenchyma ROI to this exact
+    // endpoint and renders the JSON, so hitting the API directly validates the
+    // measurement faithfully WITHOUT loading the 4 phase volumes into the
+    // browser. Doing the latter saturated the throttled prod egress and starved
+    // the very wash-out request under test (intermittent 150 s timeouts). The
+    // 4-phase sync test already covers the viewer-side alignment (no black
+    // panes); this test owns the numbers. ``Authorization: Bearer`` authenticates
+    // the APIRequestContext (deps.py accepts the header or the cookie).
+    const res = await request.post(`${BASE_URL}/api/studies/${STUDY_ID}/phase-roi-stats`, {
+      headers: TOKEN ? { Authorization: `Bearer ${TOKEN}` } : {},
+      data: {
+        kind: "sphere",
+        center_lps: LIVER_LESION,
+        radius_mm: 12,
+        region: "liver",
+        parenchyma_center_lps: LIVER_PARENCHYMA,
+        parenchyma_radius_mm: 10,
       },
-      [LIVER_LESION, LIVER_PARENCHYMA],
-    )) as Awaited<ReturnType<typeof page.evaluate>> as {
+    });
+    emit(`- POST phase-roi-stats → HTTP ${res.status()}`);
+    expect(res.ok(), `phase-roi-stats returned HTTP ${res.status()}`).toBeTruthy();
+    const result = (await res.json()) as {
       samples?: Array<{ acquisition_phase: string | null; hu_mean: number; hu_std: number }>;
       skipped?: Array<{ acquisition_phase: string | null; reason: string }>;
       washout?: {
         region?: string | null;
-        apw?: number | null;
-        rpw?: number | null;
         relative_curve?: Array<{ acquisition_phase: string; delta_hu: number }>;
       };
-    } | null;
+    };
 
-    const samples = result?.samples ?? [];
-    const skipped = result?.skipped ?? [];
-    const region = result?.washout?.region ?? null;
-    const relative = result?.washout?.relative_curve ?? [];
+    const samples = result.samples ?? [];
+    const skipped = result.skipped ?? [];
+    const region = result.washout?.region ?? null;
+    const relative = result.washout?.relative_curve ?? [];
     const byPhase: Record<string, number> = {};
     for (const s of samples) if (s.acquisition_phase) byPhase[s.acquisition_phase] = s.hu_mean;
     emit(`- region: ${region}`);
@@ -590,19 +616,25 @@ test.describe("Viewer instrumented audit", () => {
       `- relative_curve (lesion−parenchyma): ${relative.map((r) => `${r.acquisition_phase}=${r.delta_hu?.toFixed(1)}`).join(", ")}`,
     );
 
-    dumpCaptures();
     // GATE assertions — the radiological workflow must compute across all 4
     // phases with the liver (relative-to-parenchyma) interpretation.
     expect(samples.length, "4 phase HU samples").toBe(4);
     expect(skipped.length, "no phase skipped — all cover the liver").toBe(0);
     expect(region, "liver region interpretation").toBe("liver");
     expect(relative.length, "liver relative curve computed (lesion vs parenchyma)").toBe(4);
-    // Liver perfusion sanity: unenhanced parenchyma 30–80 HU, portal-venous the
-    // most enhanced (the classic liver enhancement pattern).
+    // Classic liver perfusion curve (the proof all 4 geometries sampled the
+    // same anatomy): unenhanced parenchyma 30–80 HU, enhancement rising into the
+    // portal-venous peak, then wash-out below that peak by the delayed phase.
     expect(byPhase.unenhanced, "unenhanced liver HU in range").toBeGreaterThan(30);
     expect(byPhase.unenhanced).toBeLessThan(80);
-    expect(byPhase.portal_venous, "portal-venous enhancement above unenhanced").toBeGreaterThan(
+    expect(byPhase.arterial, "arterial enhancement above unenhanced").toBeGreaterThan(
       byPhase.unenhanced,
+    );
+    expect(byPhase.portal_venous, "portal-venous is the enhancement peak").toBeGreaterThan(
+      byPhase.arterial,
+    );
+    expect(byPhase.delayed, "delayed washes out below the portal-venous peak").toBeLessThan(
+      byPhase.portal_venous,
     );
     emit("- ✅ liver wash-out GATE passed");
   });
