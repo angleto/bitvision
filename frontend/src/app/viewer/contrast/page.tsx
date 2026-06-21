@@ -1214,9 +1214,12 @@ function ContrastViewerInner() {
           alignItems: "center",
           gap: "0.75rem",
           padding: "0.4rem 0.75rem",
-          background: "var(--bv-card-bg, #11151c)",
-          color: "var(--bv-fg, #e6ecf3)",
-          borderBottom: "1px solid var(--bv-card-border, #1a1f2b)",
+          // Viewer chrome is always-dark; pin the toolbar dark (not the
+          // theme-aware --bv-card-bg, which is white in light mode and made the
+          // light-on-dark ghost buttons invisible on a white bar).
+          background: "#11151c",
+          color: "#e6ecf3",
+          borderBottom: "1px solid #1a1f2b",
           flexWrap: "wrap",
         }}
       >
@@ -1628,8 +1631,9 @@ function ContrastViewerInner() {
               width: 240,
               overflowY: "auto",
               padding: "0.5rem 0.75rem",
-              background: "var(--bv-card-bg, #11151c)",
-              borderLeft: "1px solid var(--bv-card-border, #1a1f2b)",
+              // Always-dark (not theme-aware --bv-card-bg, white in light mode).
+              background: "#11151c",
+              borderLeft: "1px solid #1a1f2b",
               boxShadow: "-8px 0 24px rgba(0,0,0,0.5)",
               color: "#e6ecf3",
               minHeight: 0,
