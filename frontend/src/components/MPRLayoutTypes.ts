@@ -29,14 +29,22 @@ export interface MPRLayoutProps {
   seriesDescription?: string;
   seriesId?: string;
   volumeViewerRef?: React.RefObject<VolumeViewerHandle | null>;
+  // Annotations to inject into the pane. The injector (addAnnotation effect)
+  // only reads ``markerId``, ``csToolName``, ``worldPoints``, ``value`` and
+  // ``label``; the legacy canvas-coord fields (``id``/``tool``/``value``/
+  // ``points``) are optional so a worldPoints-only payload (e.g. the contrast
+  // viewer's propagated per-phase ROIs) is accepted alongside persisted
+  // measurements.
   measurements?: Array<{
-    id: number;
-    tool: string;
-    value: string;
+    id?: number;
+    tool?: string;
+    value?: string;
     label?: string;
-    points: Array<{ x: number; y: number }>;
+    points?: Array<{ x: number; y: number }>;
     sliceIndex?: number;
     markerId?: string;
+    csToolName?: string;
+    worldPoints?: Array<[number, number, number]>;
   }>;
   onMeasurementsChange?: (
     m: Array<{
@@ -200,6 +208,11 @@ export interface MPRLayoutHandle {
    *  from the side panel — without it, the marker disappears from the
    *  list but the SVG overlay stays glued to the image. */
   removeAnnotation: (annotationUID: string) => void;
+  /** Delete the currently SELECTED Cornerstone annotation(s) (the ones the
+   *  operator clicked). Returns the removed UIDs so the caller can drop them
+   *  from its own state. Wired to Del / Backspace / a button so a wrong ROI can
+   *  always be removed without first looking up its UID. */
+  deleteSelected?: () => string[];
   /** Drop every Cornerstone annotation across all FrameOfReferenceUIDs.
    *  Wired to the toolbar's "Clear all" button so React state and
    *  Cornerstone state stay in lockstep. */

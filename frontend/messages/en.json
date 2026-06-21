@@ -226,6 +226,8 @@
     "showingFirst": "showing first {count}",
     "clearRois": "Clear ROIs",
     "clearRoisHint": "Remove every measurement/ROI from all phases",
+    "deleteSelected": "Delete selected",
+    "deleteSelectedHint": "Delete the selected (clicked) ROI on all phases · Del / Backspace / c",
     "linkWl": "Link W/L",
     "linkWlHint": "Apply window/level presets to every phase at once",
     "layoutSingle": "Single phase",
