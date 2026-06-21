@@ -204,6 +204,10 @@ export interface MPRLayoutHandle {
    *  Wired to the toolbar's "Clear all" button so React state and
    *  Cornerstone state stay in lockstep. */
   clearAnnotations: () => void;
+  /** Cancel an in-progress annotation draw on this pane (the half-drawn ROI is
+   *  removed). Wired to Esc and to switching tools mid-draw so the operator can
+   *  always interrupt a measurement. */
+  cancelDraw?: () => void;
   /** Set ``data.label`` on a single Cornerstone annotation and trigger
    *  a re-render. Wired to the side-panel's inline label edit so the
    *  on-canvas overlay reflects the new text immediately, without
