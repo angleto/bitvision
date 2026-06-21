@@ -329,6 +329,21 @@ async def set_series_acquisition_phase(
 # ---- cross-phase HU + wash-out ----------------------------------------
 
 
+class PhaseRoiOne(BaseModel):
+    """One phase's own lesion / parenchyma sphere, in THAT phase's own world
+    (LPS) coordinates. Used by ``phase_rois`` / ``phase_parenchyma_rois`` so the
+    caller can sample each phase at the right anatomy even when the phases share
+    a FrameOfReferenceUID but were acquired at different table positions (their
+    world origins differ): a single world ROI cannot be re-mapped across them by
+    world coordinate, it falls outside the short phases' z-range. The viewer
+    syncs the phases by SLICE INDEX, so it knows each phase's own world point
+    for the same anatomy and sends them here per series."""
+
+    series_id: uuid.UUID
+    center_lps: list[float] = Field(description="[x, y, z] LPS centre in this phase's frame")
+    radius_mm: float
+
+
 class PhaseRoiIn(BaseModel):
     kind: str = Field(default="sphere", description="sphere | bbox")
     # Sphere: a centre in patient space (LPS) + a radius in mm.
@@ -341,6 +356,14 @@ class PhaseRoiIn(BaseModel):
     # FrameOfReferenceUID; phases in a different frame are skipped (v1: no
     # per-phase ROI registration).
     frame_of_reference_uid: str | None = None
+    # Per-phase lesion ROIs (sphere kind only). When present, the phase whose
+    # series_id matches is sampled at ITS OWN centre/radius instead of the single
+    # ``center_lps`` re-mapped by world coordinate — the correct path for phases
+    # that share a FoR but not a world origin (index-synced, not world-co-
+    # registered). Phases absent from this list fall back to ``center_lps``.
+    phase_rois: list[PhaseRoiOne] | None = None
+    # Per-phase reference-parenchyma ROIs (liver workflow), same semantics.
+    phase_parenchyma_rois: list[PhaseRoiOne] | None = None
     # Anatomical region the operator is measuring — scopes the wash-out
     # interpretation. "adrenal" emits the APW/RPW adenoma flags; "liver"
     # withholds them and uses the parenchyma-relative read; None/other returns
@@ -438,8 +461,16 @@ async def compute_phase_roi_stats(
     from bvphoenix.services.volumes import MAX_VOLUME_BYTES
 
     if body.kind == "sphere":
-        if body.center_lps is None or len(body.center_lps) != 3 or body.radius_mm is None:
-            raise _problem(422, "invalid_roi", "kind=sphere requires center_lps[3] and radius_mm")
+        has_global = (
+            body.center_lps is not None and len(body.center_lps) == 3 and body.radius_mm is not None
+        )
+        has_per_phase = bool(body.phase_rois)
+        if not has_global and not has_per_phase:
+            raise _problem(
+                422,
+                "invalid_roi",
+                "kind=sphere requires center_lps[3]+radius_mm or a non-empty phase_rois",
+            )
     elif body.kind == "bbox":
         if (
             body.min_lps is None
@@ -515,6 +546,12 @@ async def compute_phase_roi_stats(
     skipped: list[PhaseSkippedOut] = []
     points: list[PhaseHu] = []
     parenchyma_points: list[PhaseHu] = []
+    # Per-phase ROI overrides, keyed by series. Each carries the lesion (and,
+    # for the liver workflow, the parenchyma) sphere in that phase's OWN world
+    # frame, so a phase that shares the FoR but not the world origin is sampled
+    # at the right anatomy instead of an out-of-range world re-map.
+    lesion_by_series = {r.series_id: r for r in (body.phase_rois or [])}
+    paren_by_series = {r.series_id: r for r in (body.phase_parenchyma_rois or [])}
 
     for series_id, phase, bucket, key, geom in work:
         if bucket is None or key is None:
@@ -557,16 +594,20 @@ async def compute_phase_roi_stats(
                 raise ValueError("volume malformed or too large to sample")
 
             # Map the lesion ROI into this phase's grid to find the slice slab.
+            # Prefer this phase's own ROI (index-synced anatomy) over the single
+            # world ROI re-mapped across phases.
             ijk: tuple[float, float, float] | None = None
             ijk_min: tuple[float, float, float] | None = None
             ijk_max: tuple[float, float, float] | None = None
             lesion_radius = 0.0
             if body.kind == "sphere":
-                assert body.center_lps is not None and body.radius_mm is not None
-                lesion_radius = float(body.radius_mm)
-                ijk = world_to_ijk(
-                    (body.center_lps[0], body.center_lps[1], body.center_lps[2]), geom, spacing
-                )
+                ov = lesion_by_series.get(series_id)
+                roi_center = ov.center_lps if ov is not None else body.center_lps
+                roi_radius = ov.radius_mm if ov is not None else body.radius_mm
+                if roi_center is None or len(roi_center) != 3 or roi_radius is None:
+                    raise ValueError("no ROI provided for this phase")
+                lesion_radius = float(roi_radius)
+                ijk = world_to_ijk((roi_center[0], roi_center[1], roi_center[2]), geom, spacing)
                 if ijk is None:
                     raise ValueError("volume has no geometry")
                 k0, k1 = slab_k_range_sphere(ijk[2], lesion_radius, spacing[2], nz)
@@ -583,9 +624,11 @@ async def compute_phase_roi_stats(
                 k0, k1 = slab_k_range_bbox(ijk_min[2], ijk_max[2], nz)
 
             # Widen the slab to also cover the parenchyma ROI (liver workflow)
-            # so a single ranged read serves both spheres.
-            p_centre = body.parenchyma_center_lps
-            p_radius = body.parenchyma_radius_mm
+            # so a single ranged read serves both spheres. Per-phase parenchyma
+            # ROI wins over the single world one, same as the lesion.
+            pov = paren_by_series.get(series_id)
+            p_centre = pov.center_lps if pov is not None else body.parenchyma_center_lps
+            p_radius = pov.radius_mm if pov is not None else body.parenchyma_radius_mm
             p_ijk: tuple[float, float, float] | None = None
             if phase and p_centre is not None and len(p_centre) == 3 and p_radius is not None:
                 p_ijk = world_to_ijk((p_centre[0], p_centre[1], p_centre[2]), geom, spacing)
