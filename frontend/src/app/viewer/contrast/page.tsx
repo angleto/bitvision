@@ -749,10 +749,17 @@ function ContrastViewerInner() {
   // or reference frame changes.
   // biome-ignore lint/correctness/useExhaustiveDependencies: grid is stable; keying on panes/referenceFoR is intentional
   useEffect(() => {
+    let allSameFoR = panes.length > 0;
     panes.forEach((p, i) => {
       const same = !!p.frame_of_reference_uid && p.frame_of_reference_uid === referenceFoR;
       if (i === 0 || same) grid.setTransform(i, null);
+      if (i > 0 && !same) allSameFoR = false;
     });
+    // When every phase shares the acquisition frame (the normal multiphase
+    // contrast case) sync by SLICE INDEX, not world coordinates: a scroll to
+    // slice k drives all panes to slice k (clamped). This matches aligning them
+    // by hand and avoids the world round-trip that mis-mapped the synced panes.
+    grid.setIndexSync(allSameFoR);
   }, [panes, referenceFoR]);
 
   function alignStateOf(p: SeriesPhase, i: number): AlignState {
