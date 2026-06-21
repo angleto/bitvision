@@ -44,7 +44,15 @@ import { useTranslations } from "next-intl";
 import dynamic from "next/dynamic";
 import Link from "next/link";
 import { useSearchParams } from "next/navigation";
-import { type CSSProperties, Suspense, useEffect, useMemo, useRef, useState } from "react";
+import {
+  type CSSProperties,
+  Suspense,
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 
 const CornerstoneMPRLayout = dynamic(() => import("@/components/CornerstoneMPRLayout"), {
   ssr: false,
@@ -907,6 +915,45 @@ function ContrastViewerInner() {
     return { center_lps: c, radius_mm: radius, forUid, key, markerId: circle?.markerId };
   }
 
+  // Build per-phase ROIs from a single drawn ROI. The phases share a
+  // FrameOfReferenceUID but were acquired at different table positions (their
+  // world origins differ in z), so they are NOT co-registered in world space —
+  // the viewer syncs them by SLICE INDEX. A single world ROI re-mapped across
+  // them lands outside the shifted phases' z-range (the "no enhanced phase"
+  // bug). Here we keep the in-plane (x, y) shared (the phases ARE in-plane
+  // co-registered) and give each phase the world-z of the SAME slice index in
+  // its own grid: z_q = origin_q.z + k * spacing_q.z, with k taken from the
+  // pane the ROI was drawn on. Falls back to the synced crosshair world-z, then
+  // to the drawn z, when a pane's geometry is unavailable.
+  const perPhaseRois = useCallback(
+    (
+      roi: RoiCapture,
+    ): Array<{ series_id: string; center_lps: [number, number, number]; radius_mm: number }> => {
+      const src = roi.paneIndex ?? 0;
+      const srcPs = paneHandlesRef.current[src]?.getProbeState?.();
+      const srcOz = srcPs?.volOrigin?.[2];
+      const srcSz = srcPs?.volSpacing?.[2];
+      const [cx, cy, cz] = roi.center_lps;
+      const k = srcOz != null && srcSz != null && srcSz !== 0 ? (cz - srcOz) / srcSz : null;
+      return panes.map((p, i) => {
+        let z = cz;
+        if (i !== src) {
+          const ps = paneHandlesRef.current[i]?.getProbeState?.();
+          const oz = ps?.volOrigin?.[2];
+          const sz = ps?.volSpacing?.[2];
+          if (k != null && oz != null && sz != null) z = oz + k * sz;
+          else if (ps?.crosshairLps?.[2] != null) z = ps.crosshairLps[2];
+        }
+        return {
+          series_id: p.series_id,
+          center_lps: [cx, cy, z] as [number, number, number],
+          radius_mm: roi.radius_mm,
+        };
+      });
+    },
+    [panes],
+  );
+
   // POST the lesion ROI (and, for the liver workflow, the parenchyma ROI)
   // with the current region. Called on a new draw and whenever the region
   // changes; the backend gates the indices/flags by region.
@@ -920,7 +967,19 @@ function ContrastViewerInner() {
       frame_of_reference_uid: lesion.forUid,
       region,
     };
+    // When the panes share a FoR (index-synced multiphase), sample each phase
+    // at its own world point so the shifted enhanced/delayed phases are not
+    // skipped. Otherwise (cross-FoR, would need real registration) keep the
+    // single world ROI.
+    const allSameFoR =
+      panes.length > 1 &&
+      !!referenceFoR &&
+      panes.every((p) => !!p.frame_of_reference_uid && p.frame_of_reference_uid === referenceFoR);
     const paren = parenchymaRoiRef.current;
+    if (allSameFoR) {
+      input.phase_rois = perPhaseRois(lesion);
+      if (region === "liver" && paren) input.phase_parenchyma_rois = perPhaseRois(paren);
+    }
     if (region === "liver" && paren) {
       input.parenchyma_center_lps = paren.center_lps;
       input.parenchyma_radius_mm = paren.radius_mm;
@@ -968,6 +1027,14 @@ function ContrastViewerInner() {
     const dedupKey = `${target}|${roi.key}`;
     if (lastRoiRef.current === dedupKey) return;
     lastRoiRef.current = dedupKey;
+    const targetRef = target === "parenchyma" ? parenchymaRoiRef : lesionRoiRef;
+    // Replace-on-redraw: if this target already had a ROI, remove the PREVIOUS
+    // annotation from the canvas so re-drawing never leaves an un-deletable
+    // orphan circle behind (max one lesion + one parenchyma circle at a time).
+    const prev = targetRef.current;
+    if (prev?.markerId && prev.markerId !== roi.markerId && prev.paneIndex != null) {
+      paneHandlesRef.current[prev.paneIndex]?.removeAnnotation(prev.markerId);
+    }
     if (target === "parenchyma") {
       parenchymaRoiRef.current = roi;
       setHasParenchyma(true);
@@ -1130,7 +1197,6 @@ function ContrastViewerInner() {
     panes,
     patient,
     activeTool,
-    measureMode,
     layoutMode,
     activePane,
     paneMeasurements,
@@ -1173,6 +1239,30 @@ function ContrastViewerInner() {
           frame_of_reference_uid: referenceFoR ?? null,
           region: reg,
         };
+        const allSameFoR =
+          panes.length > 1 &&
+          !!referenceFoR &&
+          panes.every(
+            (p) => !!p.frame_of_reference_uid && p.frame_of_reference_uid === referenceFoR,
+          );
+        if (allSameFoR) {
+          input.phase_rois = perPhaseRois({
+            center_lps: args.lesionCenterLps,
+            radius_mm: args.lesionRadiusMm,
+            forUid: referenceFoR,
+            key: "test-lesion",
+            paneIndex: 0,
+          });
+          if (reg === "liver" && args.parenchymaCenterLps && args.parenchymaRadiusMm) {
+            input.phase_parenchyma_rois = perPhaseRois({
+              center_lps: args.parenchymaCenterLps,
+              radius_mm: args.parenchymaRadiusMm,
+              forUid: referenceFoR,
+              key: "test-paren",
+              paneIndex: 0,
+            });
+          }
+        }
         if (reg === "liver" && args.parenchymaCenterLps && args.parenchymaRadiusMm) {
           input.parenchyma_center_lps = args.parenchymaCenterLps;
           input.parenchyma_radius_mm = args.parenchymaRadiusMm;
@@ -1185,7 +1275,7 @@ function ContrastViewerInner() {
     return () => {
       w.__viewerTest = undefined;
     };
-  }, [viewerDebug, panes, studyId, referenceFoR, region]);
+  }, [viewerDebug, panes, studyId, referenceFoR, region, perPhaseRois]);
 
   if (!studyId) {
     return (

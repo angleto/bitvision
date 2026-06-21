@@ -433,6 +433,26 @@ export interface PhaseRoiInput {
   /** Optional reference-parenchyma sphere (liver workflow), sampled per phase. */
   parenchyma_center_lps?: [number, number, number];
   parenchyma_radius_mm?: number;
+  /**
+   * Per-phase lesion ROIs, each in THAT phase's own world (LPS) frame. The
+   * multiphase phases share a FrameOfReferenceUID but were acquired at
+   * different table positions (different world origins), so a single world ROI
+   * re-mapped across them falls outside the shifted phases' z-range. The viewer
+   * syncs by slice index, so it sends each phase its own world point for the
+   * same anatomy. When present, the phase matching ``series_id`` is sampled at
+   * its own centre instead of ``center_lps``.
+   */
+  phase_rois?: Array<{
+    series_id: string;
+    center_lps: [number, number, number];
+    radius_mm: number;
+  }>;
+  /** Per-phase reference-parenchyma ROIs (liver workflow), same semantics. */
+  phase_parenchyma_rois?: Array<{
+    series_id: string;
+    center_lps: [number, number, number];
+    radius_mm: number;
+  }>;
 }
 
 /** Per-voxel wash-out / subtraction heat map (POST /studies/{id}/washout-map). */
