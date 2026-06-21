@@ -3241,6 +3241,21 @@ const CornerstoneMPRLayout = forwardRef<MPRLayoutHandle, ExtendedProps>(
           }
           engineRef.current?.renderViewports([vpAxial, vpSag, vpCor]);
         },
+        cancelDraw: () => {
+          // Abort a half-drawn annotation on each of this pane's viewport
+          // elements so the operator can interrupt a measurement (Esc / tool
+          // switch) without leaving a stray partial ROI behind.
+          for (const ref of [axialDivRef, sagDivRef, corDivRef]) {
+            const el = ref.current;
+            if (!el) continue;
+            try {
+              csTools.cancelActiveManipulations(el);
+            } catch {
+              /* nothing in progress */
+            }
+          }
+          engineRef.current?.renderViewports([vpAxial, vpSag, vpCor]);
+        },
       }),
       [
         crosshair,

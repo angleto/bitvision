@@ -46,6 +46,12 @@ export interface WashoutPanelProps {
   onRequestMap: (metric: "washout" | "subtraction") => Promise<PhaseMap | null>;
   onSave: () => void;
   onClose: () => void;
+  /** Delete one ROI individually (lesion or reference parenchyma). */
+  onDeleteRoi: (which: RoiTarget) => void;
+  /** Clear every ROI + result and restart the guided flow. */
+  onReset: () => void;
+  /** Abort a half-drawn ROI (Esc) so the operator can start over. */
+  onCancelDraw: () => void;
 }
 
 function fmt(n: number | null | undefined, digits = 0): string {
@@ -53,6 +59,92 @@ function fmt(n: number | null | undefined, digits = 0): string {
 }
 
 const REGIONS: Region[] = ["adrenal", "liver", "other"];
+
+/** One step of the guided wash-out flow (place lesion, then parenchyma). Shows
+ *  the instruction while it is the active step, and ✓ + a single-ROI delete once
+ *  the ROI is placed. */
+function RoiStep({
+  n,
+  label,
+  hint,
+  active,
+  done,
+  disabled,
+  isTarget,
+  onRetarget,
+  onDelete,
+  deleteLabel,
+}: {
+  n: number;
+  label: string;
+  hint: string;
+  active: boolean;
+  done: boolean;
+  disabled?: boolean;
+  isTarget: boolean;
+  onRetarget: () => void;
+  onDelete: () => void;
+  deleteLabel: string;
+}) {
+  const accent = "#e96b1f";
+  const ok = "#5cd08a";
+  const border = active ? accent : done ? "#2c8a4d" : "#1a1f2b";
+  return (
+    <div
+      style={{
+        border: `1px solid ${border}`,
+        borderRadius: 6,
+        padding: "5px 7px",
+        opacity: disabled ? 0.5 : 1,
+        background: active ? "rgba(233,107,31,0.08)" : "transparent",
+      }}
+    >
+      <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+        <span
+          style={{
+            width: 16,
+            textAlign: "center",
+            fontWeight: 700,
+            color: done ? ok : active ? accent : "#94a3b8",
+          }}
+        >
+          {done ? "✓" : n}
+        </span>
+        <strong style={{ flex: 1, fontSize: "0.78rem" }}>{label}</strong>
+        {done && !isTarget && (
+          <button
+            type="button"
+            className="ghost"
+            onClick={onRetarget}
+            style={{ fontSize: "0.66rem", padding: "0 5px" }}
+            title={hint}
+          >
+            ↻
+          </button>
+        )}
+        {done && (
+          <button
+            type="button"
+            className="ghost"
+            onClick={onDelete}
+            title={deleteLabel}
+            aria-label={deleteLabel}
+            style={{ color: "#f66", padding: "0 6px", fontSize: "0.9rem", lineHeight: 1 }}
+          >
+            ×
+          </button>
+        )}
+      </div>
+      {active && (
+        <div style={{ display: "flex", alignItems: "center", gap: 5, marginTop: 3 }}>
+          <span style={{ color: accent }}>▸</span>
+          <span style={{ fontSize: "0.72rem", color: "#e6ecf3" }}>{hint}</span>
+        </div>
+      )}
+      {disabled && <div style={{ fontSize: "0.7rem", color: "#94a3b8", marginTop: 3 }}>{hint}</div>}
+    </div>
+  );
+}
 
 export default function WashoutPanel({
   result,
@@ -68,8 +160,15 @@ export default function WashoutPanel({
   onRequestMap,
   onSave,
   onClose,
+  onDeleteRoi,
+  onReset,
+  onCancelDraw,
 }: WashoutPanelProps) {
   const t = useTranslations("contrast");
+  // Which guided step is active: pick lesion, then (liver) parenchyma.
+  const needsParenchyma = region === "liver";
+  const lesionActive = !hasLesion;
+  const parenchymaActive = needsParenchyma && hasLesion && !hasParenchyma;
 
   return (
     <aside
@@ -130,48 +229,62 @@ export default function WashoutPanel({
         </fieldset>
       </div>
 
-      {/* Liver workflow: choose which ROI the next drawn circle fills. */}
-      {region === "liver" && (
-        <div style={{ marginTop: 6 }}>
-          <div style={{ color: "#94a3b8", fontSize: "0.72rem", marginBottom: 2 }}>
-            {t("roiTargetLabel")}
-          </div>
-          <fieldset style={{ display: "flex", gap: 4, border: 0, padding: 0, margin: 0 }}>
-            {(["lesion", "parenchyma"] as RoiTarget[]).map((target) => {
-              const filled = target === "lesion" ? hasLesion : hasParenchyma;
-              return (
-                <button
-                  key={target}
-                  type="button"
-                  className="ghost"
-                  aria-pressed={roiTarget === target}
-                  onClick={() => onRoiTargetChange(target)}
-                  style={{
-                    flex: 1,
-                    fontSize: "0.72rem",
-                    padding: "2px 4px",
-                    border: roiTarget === target ? "1px solid #e96b1f" : "1px solid #1a1f2b",
-                    color: roiTarget === target ? "#e96b1f" : "#cbd5e1",
-                    borderRadius: 4,
-                  }}
-                >
-                  {filled ? "✓ " : ""}
-                  {t(`roiTarget.${target}`)}
-                </button>
-              );
-            })}
-          </fieldset>
-          {!hasParenchyma && (
-            <p className="meta" style={{ fontSize: "0.7rem", marginTop: 4 }}>
-              {t("drawParenchymaHint")}
-            </p>
-          )}
+      {/* Guided ROI steps. The active step shows the instruction; a placed ROI
+          shows ✓ + a single-ROI delete, and selecting it again re-targets the
+          next draw to that ROI. */}
+      <div style={{ marginTop: 8, display: "flex", flexDirection: "column", gap: 6 }}>
+        <RoiStep
+          n={1}
+          label={t("stepLesion")}
+          hint={t("drawLesionHint")}
+          active={lesionActive}
+          done={hasLesion}
+          isTarget={roiTarget === "lesion"}
+          onRetarget={() => onRoiTargetChange("lesion")}
+          onDelete={() => onDeleteRoi("lesion")}
+          deleteLabel={t("roiDelete")}
+        />
+        {needsParenchyma && (
+          <RoiStep
+            n={2}
+            label={t("stepParenchyma")}
+            hint={hasLesion ? t("drawParenchymaHint") : t("waitLesionFirst")}
+            active={parenchymaActive}
+            done={hasParenchyma}
+            disabled={!hasLesion}
+            isTarget={roiTarget === "parenchyma"}
+            onRetarget={() => onRoiTargetChange("parenchyma")}
+            onDelete={() => onDeleteRoi("parenchyma")}
+            deleteLabel={t("roiDelete")}
+          />
+        )}
+      </div>
+
+      {/* Interrupt a half-drawn ROI, or wipe everything and start over. */}
+      {(hasLesion || hasParenchyma || lesionActive || parenchymaActive) && (
+        <div style={{ display: "flex", gap: 6, marginTop: 8 }}>
+          <button
+            type="button"
+            className="ghost"
+            onClick={onCancelDraw}
+            style={{ flex: 1, fontSize: "0.72rem" }}
+            title={t("cancelDrawHint")}
+          >
+            {t("cancelDraw")}
+          </button>
+          <button
+            type="button"
+            className="ghost"
+            onClick={onReset}
+            style={{ flex: 1, fontSize: "0.72rem", color: "#f88" }}
+          >
+            {t("restart")}
+          </button>
         </div>
       )}
 
       {busy && <p className="meta">{t("computing")}</p>}
       {error && <p style={{ color: "var(--bv-danger, #f87171)" }}>{error}</p>}
-      {!busy && !error && !result && <p className="meta">{t("washoutHint")}</p>}
 
       {result && <WashoutBody result={result} region={region} />}
       {result && <WashoutMapSection onRequestMap={onRequestMap} />}

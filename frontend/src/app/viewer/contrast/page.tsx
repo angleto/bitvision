@@ -524,22 +524,24 @@ function ContrastViewerInner() {
   // the liver workflow a second "parenchyma" reference ROI is sampled so the
   // panel reports the lesion-vs-parenchyma relative wash-out (LI-RADS) instead
   // of the adrenal APW/RPW indices.
-  const [region, setRegion] = useState<"adrenal" | "liver" | "other">("other");
+  // Liver is the primary use of the multiphase viewer, so default to the guided
+  // lesion + parenchyma workflow (the operator can switch to adrenal/other).
+  const [region, setRegion] = useState<"adrenal" | "liver" | "other">("liver");
   const [roiTarget, setRoiTarget] = useState<"lesion" | "parenchyma">("lesion");
   const [hasLesion, setHasLesion] = useState(false);
   const [hasParenchyma, setHasParenchyma] = useState(false);
-  const lesionRoiRef = useRef<{
+  type RoiCapture = {
     center_lps: [number, number, number];
     radius_mm: number;
     forUid: string | null;
     key: string;
-  } | null>(null);
-  const parenchymaRoiRef = useRef<{
-    center_lps: [number, number, number];
-    radius_mm: number;
-    forUid: string | null;
-    key: string;
-  } | null>(null);
+    // The Cornerstone annotation UID + the pane it was drawn on, so a single ROI
+    // can be deleted individually (removeAnnotation) instead of "clear all".
+    markerId?: string;
+    paneIndex?: number;
+  };
+  const lesionRoiRef = useRef<RoiCapture | null>(null);
+  const parenchymaRoiRef = useRef<RoiCapture | null>(null);
 
   useEffect(() => {
     if (!studyId) return;
@@ -720,7 +722,15 @@ function ContrastViewerInner() {
     { key: "0", handler: () => dispatchViewportResetView() },
     { key: "f", handler: () => activeHandle()?.flipHAll() },
     { key: "f", shift: true, handler: () => activeHandle()?.flipVAll() },
+    // Esc interrupts an in-progress ROI draw on every pane (the operator can
+    // always abort a measurement and start over / switch tool).
+    { key: "Escape", handler: () => cancelActiveDraws() },
   ]);
+
+  // Cancel any half-drawn ROI across all panes.
+  function cancelActiveDraws() {
+    for (const h of paneHandlesRef.current) h?.cancelDraw?.();
+  }
 
   // No panes to show (nothing auto-classified, or a URL/stale selection that
   // matched no current series) -> open the picker so the user chooses rather
@@ -869,15 +879,19 @@ function ContrastViewerInner() {
     setActiveReg((s) => ({ ...s, [seriesId]: null }));
   }
 
-  // Most recent circle ROI in the stream: handle[0] = centre, handle[1] = a
+  // The newest circle ROI in the stream that is NOT already captured (``exclude``
+  // = markerIds of ROIs we already hold). handle[0] = centre, handle[1] = a
   // point on the perimeter, both in world (LPS); radius = their distance (mm).
-  function roiFromMeasurements(ms: DrawnMeasurement[]) {
+  // Excluding known markerIds is what lets us delete one ROI without the OTHER,
+  // still-on-screen circle getting re-captured as the freshly-drawn one.
+  function roiFromMeasurements(ms: DrawnMeasurement[], exclude?: Set<string>): RoiCapture | null {
     const circle = [...ms]
       .reverse()
       .find(
         (m) =>
           (m.csToolName === "CircleROI" || m.tool === "sphere") &&
-          (m.worldPoints?.length ?? 0) >= 2,
+          (m.worldPoints?.length ?? 0) >= 2 &&
+          !(m.markerId && exclude?.has(m.markerId)),
       );
     const pts = circle?.worldPoints;
     if (!pts || pts.length < 2) return null;
@@ -887,7 +901,7 @@ function ContrastViewerInner() {
     if (!(radius > 0)) return null;
     const forUid = circle?.frameOfReferenceUID ?? referenceFoR ?? null;
     const key = `${c[0].toFixed(3)},${c[1].toFixed(3)},${c[2].toFixed(3)}|${radius.toFixed(3)}`;
-    return { center_lps: c, radius_mm: radius, forUid, key };
+    return { center_lps: c, radius_mm: radius, forUid, key, markerId: circle?.markerId };
   }
 
   // POST the lesion ROI (and, for the liver workflow, the parenchyma ROI)
@@ -930,14 +944,23 @@ function ContrastViewerInner() {
     });
   }
 
-  function handleMeasurements(ms: DrawnMeasurement[]) {
+  // Capture a circle ROI drawn on ANY pane (panes share the frame of reference,
+  // so a circle on pane 2 is a valid world ROI just like one on pane 0). The
+  // previous code only listened to pane 0, so drawing on another phase silently
+  // did nothing — a big source of "I drew a ROI and nothing happened".
+  function handleMeasurements(ms: DrawnMeasurement[], paneIndex: number) {
     if (!studyId) return;
-    const roi = roiFromMeasurements(ms);
+    // Exclude the ROIs we already hold so a freshly drawn circle is the one we
+    // pick up (and so deleting one ROI never re-captures the other).
+    const held = new Set<string>();
+    if (lesionRoiRef.current?.markerId) held.add(lesionRoiRef.current.markerId);
+    if (parenchymaRoiRef.current?.markerId) held.add(parenchymaRoiRef.current.markerId);
+    const roi = roiFromMeasurements(ms, held);
     if (!roi) return;
-    // In the liver workflow the operator picks which ROI the next drawn circle
-    // fills (lesion vs reference parenchyma); otherwise every circle is the
-    // lesion. Dedup per target so the repeating measurement stream does not
-    // re-post the same draw.
+    roi.paneIndex = paneIndex;
+    // In the liver workflow the next circle fills the active target (lesion ->
+    // then parenchyma). Dedup per target so the repeating measurement stream
+    // does not re-post the same draw.
     const target = region === "liver" ? roiTarget : "lesion";
     const dedupKey = `${target}|${roi.key}`;
     if (lastRoiRef.current === dedupKey) return;
@@ -953,8 +976,47 @@ function ContrastViewerInner() {
         frame_of_reference_uid: roi.forUid,
       };
       setHasLesion(true);
+      // Guided auto-advance: after the lesion, the liver workflow needs the
+      // reference-parenchyma ROI next, so flip the active target automatically
+      // (the operator no longer has to find a toggle).
+      if (region === "liver" && !parenchymaRoiRef.current) setRoiTarget("parenchyma");
     }
     runWashout();
+  }
+
+  // Delete one ROI (lesion or parenchyma) individually: remove its Cornerstone
+  // annotation from the pane it was drawn on and clear the captured ref + state.
+  function deleteRoi(which: "lesion" | "parenchyma") {
+    const ref = which === "lesion" ? lesionRoiRef : parenchymaRoiRef;
+    const roi = ref.current;
+    if (roi?.markerId != null && roi.paneIndex != null) {
+      paneHandlesRef.current[roi.paneIndex]?.removeAnnotation(roi.markerId);
+    }
+    ref.current = null;
+    lastRoiRef.current = null;
+    if (which === "lesion") {
+      setHasLesion(false);
+      savedRoiRef.current = null;
+      setWashout(null);
+      setRoiTarget("lesion");
+    } else {
+      setHasParenchyma(false);
+      setRoiTarget("parenchyma");
+    }
+    if (which === "parenchyma" && lesionRoiRef.current) runWashout();
+  }
+
+  // Clear every ROI + result and restart the guided flow.
+  function resetRois() {
+    for (const h of paneHandlesRef.current) h?.clearAnnotations();
+    lesionRoiRef.current = null;
+    parenchymaRoiRef.current = null;
+    savedRoiRef.current = null;
+    lastRoiRef.current = null;
+    setHasLesion(false);
+    setHasParenchyma(false);
+    setWashout(null);
+    setRoiTarget("lesion");
   }
 
   // Re-run the wash-out when the region changes (the backend gates the
@@ -1186,11 +1248,14 @@ function ContrastViewerInner() {
           className={measureMode ? "viewer-btn viewer-btn--active" : "ghost"}
           aria-pressed={measureMode}
           onClick={() => {
-            setMeasureMode((v) => !v);
+            // Leaving measure mode: abort any half-drawn ROI so it isn't left
+            // behind, and clear the transient result.
             if (measureMode) {
+              cancelActiveDraws();
               setWashout(null);
               lastRoiRef.current = null;
             }
+            setMeasureMode((v) => !v);
           }}
           title={t("washoutHint")}
         >
@@ -1487,7 +1552,7 @@ function ContrastViewerInner() {
                       activeTool={measureMode ? "measure-sphere" : activeTool}
                       onMeasurements={(ms) => {
                         setPaneMeasurements((prev) => ({ ...prev, [i]: ms }));
-                        if (i === 0) handleMeasurements(ms);
+                        handleMeasurements(ms, i);
                       }}
                       onReady={(info) => {
                         paneHandlesRef.current[i] = info.handle;
@@ -1535,7 +1600,11 @@ function ContrastViewerInner() {
               hasParenchyma={hasParenchyma}
               onRequestMap={fetchWashoutMap}
               onSave={saveWashout}
+              onDeleteRoi={deleteRoi}
+              onReset={resetRois}
+              onCancelDraw={cancelActiveDraws}
               onClose={() => {
+                cancelActiveDraws();
                 setMeasureMode(false);
                 setWashout(null);
                 lastRoiRef.current = null;
