@@ -226,6 +226,8 @@
     "showingFirst": "mostro le prime {count}",
     "clearRois": "Cancella ROI",
     "clearRoisHint": "Rimuovi tutte le misure/ROI da tutte le fasi",
+    "deleteSelected": "Elimina selezione",
+    "deleteSelectedHint": "Elimina la ROI selezionata (clic) su tutte le fasi · Canc / Backspace / c",
     "linkWl": "W/L collegato",
     "linkWlHint": "Applica i preset di finestra a tutte le fasi insieme",
     "layoutSingle": "Fase singola",

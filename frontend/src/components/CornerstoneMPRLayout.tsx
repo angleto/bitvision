@@ -3171,6 +3171,41 @@ const CornerstoneMPRLayout = forwardRef<MPRLayoutHandle, ExtendedProps>(
           }
           engineRef.current?.renderViewports([vpAxial, vpSag, vpCor]);
         },
+        // Delete whatever annotation the operator has SELECTED (clicked). Reads
+        // the Cornerstone selection model so a Del / button / shortcut can wipe
+        // the active ROI without the caller having to know its UID. Returns the
+        // removed UIDs so the parent can drop them from its own bookkeeping.
+        // Skips navigation overlays (crosshairs) defensively.
+        deleteSelected: () => {
+          const sel = (
+            csTools.annotation as {
+              selection?: { getAnnotationsSelected?: () => string[] };
+            }
+          ).selection;
+          const uids = sel?.getAnnotationsSelected?.() ?? [];
+          if (!uids.length) return [];
+          const byUid = new Map(
+            (
+              csTools.annotation.state.getAllAnnotations() as Array<{
+                annotationUID?: string;
+                metadata?: { toolName?: string };
+              }>
+            ).map((a) => [a.annotationUID, a]),
+          );
+          const removed: string[] = [];
+          for (const uid of uids) {
+            const a = byUid.get(uid);
+            if (a?.metadata?.toolName === csTools.CrosshairsTool.toolName) continue;
+            try {
+              csTools.annotation.state.removeAnnotation(uid);
+              removed.push(uid);
+            } catch {
+              /* already gone */
+            }
+          }
+          if (removed.length) engineRef.current?.renderViewports([vpAxial, vpSag, vpCor]);
+          return removed;
+        },
         updateAnnotationLabel: (uid, label) => {
           const all = csTools.annotation.state.getAllAnnotations() as Array<{
             annotationUID?: string;
