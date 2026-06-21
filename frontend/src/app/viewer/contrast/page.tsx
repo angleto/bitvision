@@ -1098,7 +1098,7 @@ function ContrastViewerInner() {
           modality: panes[0]?.modality ?? undefined,
         },
         panes: paneProbe,
-        activeTool: measureMode ? "measure-sphere" : activeTool,
+        activeTool,
         measurementCount: Object.values(paneMeasurements).reduce(
           (n, ms) => n + (ms?.length ?? 0),
           0,
@@ -1251,12 +1251,17 @@ function ContrastViewerInner() {
           className={measureMode ? "viewer-btn viewer-btn--active" : "ghost"}
           aria-pressed={measureMode}
           onClick={() => {
-            // Leaving measure mode: abort any half-drawn ROI so it isn't left
-            // behind, and clear the transient result.
             if (measureMode) {
+              // Leaving measure mode: abort any half-drawn ROI, clear the
+              // transient result, and return to the window/level tool.
               cancelActiveDraws();
               setWashout(null);
               lastRoiRef.current = null;
+              setActiveTool("wl");
+            } else {
+              // Entering: arm the circle ROI as the default, but the palette
+              // stays usable so the operator can switch to pan/zoom and back.
+              setActiveTool("measure-sphere");
             }
             setMeasureMode((v) => !v);
           }}
@@ -1552,7 +1557,7 @@ function ContrastViewerInner() {
                         paneHandlesRef.current[i] = h;
                       }}
                       onCrosshair={(pos) => grid.onCrosshairChange(i, pos)}
-                      activeTool={measureMode ? "measure-sphere" : activeTool}
+                      activeTool={activeTool}
                       onMeasurements={(ms) => {
                         setPaneMeasurements((prev) => ({ ...prev, [i]: ms }));
                         handleMeasurements(ms, i);
