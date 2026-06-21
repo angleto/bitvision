@@ -1358,11 +1358,20 @@ const CornerstoneMPRLayout = forwardRef<MPRLayoutHandle, ExtendedProps>(
       tg.setToolDisabled(csTools.PanTool.toolName);
       tg.setToolPassive(csTools.CrosshairsTool.toolName);
       tg.setToolDisabled(csTools.WindowLevelTool.toolName);
-      // Auxiliary (middle button) always pans — universally
-      // expected on radiology workstations and the only practical
-      // way to pan while a measure tool owns Primary.
+      // Pan is ALWAYS available two ways, whatever the active tool:
+      //   - Auxiliary (middle button) — radiology-workstation convention;
+      //   - Shift + left-drag — works on a trackpad with no middle button and
+      //     while a measure/crosshair tool owns the plain Primary click. This is
+      //     the dependable "I just want to pan" gesture (the tool-palette Pan
+      //     button can be missed in the compact grid toolbar).
       tg.setToolActive(csTools.PanTool.toolName, {
-        bindings: [{ mouseButton: csTools.Enums.MouseBindings.Auxiliary }],
+        bindings: [
+          { mouseButton: csTools.Enums.MouseBindings.Auxiliary },
+          {
+            mouseButton: csTools.Enums.MouseBindings.Primary,
+            modifierKey: csTools.Enums.KeyboardBindings.Shift,
+          },
+        ],
       });
       if (measureTool) {
         for (const t of ALL_MEASURE_TOOLS) {

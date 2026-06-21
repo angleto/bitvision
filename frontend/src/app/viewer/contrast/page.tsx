@@ -725,6 +725,9 @@ function ContrastViewerInner() {
     // Esc interrupts an in-progress ROI draw on every pane (the operator can
     // always abort a measurement and start over / switch tool).
     { key: "Escape", handler: () => cancelActiveDraws() },
+    // "p" toggles a dedicated pan mode (left-drag pans). Shift+left-drag also
+    // pans at any time, but a one-key toggle is the expected shortcut.
+    { key: "p", handler: () => setActiveTool((tool) => (tool === "pan" ? "wl" : "pan")) },
   ]);
 
   // Cancel any half-drawn ROI across all panes.
