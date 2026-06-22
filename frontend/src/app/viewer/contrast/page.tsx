@@ -547,8 +547,12 @@ function ContrastViewerInner() {
   // lesion + parenchyma workflow (the operator can switch to adrenal/other).
   const [region, setRegion] = useState<"adrenal" | "liver" | "other">("liver");
   const [roiTarget, setRoiTarget] = useState<"lesion" | "parenchyma">("lesion");
-  const [hasLesion, setHasLesion] = useState(false);
-  const [hasParenchyma, setHasParenchyma] = useState(false);
+  // series_ids of the phases that currently carry a placed lesion / parenchyma
+  // ROI — the reactive mirror of roiGroupsRef the wash-out table reads.
+  const [placedSeries, setPlacedSeries] = useState<{ lesion: string[]; parenchyma: string[] }>({
+    lesion: [],
+    parenchyma: [],
+  });
   type RoiCapture = {
     center_lps: [number, number, number];
     radius_mm: number;
@@ -580,18 +584,6 @@ function ContrastViewerInner() {
   // Markers we have already processed (drawn source + propagated copies), so the
   // measurement stream a propagation triggers is not re-captured as a new draw.
   const seenMarkersRef = useRef<Set<string>>(new Set());
-  // Whether each group's box has already been propagated to the other phases.
-  // Propagation runs ONCE, after the initial draw settles (so the copies match
-  // the final size, not the tiny mid-draw circle); afterwards every box (source
-  // included) is just an independent per-phase position.
-  const propagatedRef = useRef<{ lesion: boolean; parenchyma: boolean }>({
-    lesion: false,
-    parenchyma: false,
-  });
-  const propagateTimerRef = useRef<{
-    lesion: ReturnType<typeof setTimeout> | null;
-    parenchyma: ReturnType<typeof setTimeout> | null;
-  }>({ lesion: null, parenchyma: null });
   // Annotations to inject into each pane (the propagated copies). PhasePane
   // forwards this to CornerstoneMPRLayout's ``measurements`` prop.
   const [incomingByPane, setIncomingByPane] = useState<Record<number, DrawnMeasurement[]>>({});
@@ -1011,10 +1003,6 @@ function ContrastViewerInner() {
 
   // Remove a whole ROI group (every phase's copy) from the canvas + bookkeeping.
   function clearGroup(which: "lesion" | "parenchyma") {
-    const timers = propagateTimerRef.current;
-    if (timers[which]) clearTimeout(timers[which] as ReturnType<typeof setTimeout>);
-    timers[which] = null;
-    propagatedRef.current[which] = false;
     const group = roiGroupsRef.current[which];
     const ids = new Set(Object.values(group).map((m) => m.markerId));
     for (const [paneIdxStr, m] of Object.entries(group)) {
@@ -1124,17 +1112,24 @@ function ContrastViewerInner() {
     });
   }
 
-  // Handle the measurement stream of a pane. Two cases:
-  //  1) a KNOWN group member moved (the operator dragged a phase's box to
-  //     re-centre it) -> update its stored points + re-run the wash-out;
-  //  2) a genuinely NEW circle (markerId never seen) -> a fresh draw: capture it
-  //     for the active target and propagate it to the other phases.
-  // Drawing on ANY pane works; propagated copies (seen markers) are skipped so
-  // the injection a draw triggers is never re-captured as a new draw.
+  // Reflect the per-phase ROI placement (roiGroupsRef) into the reactive state
+  // the wash-out table reads: the boolean has* flags + the placed series_ids.
+  function syncHasFlags() {
+    const ids = (which: "lesion" | "parenchyma") =>
+      Object.keys(roiGroupsRef.current[which])
+        .map((i) => panes[Number(i)]?.series_id)
+        .filter((s): s is string => !!s);
+    setPlacedSeries({ lesion: ids("lesion"), parenchyma: ids("parenchyma") });
+  }
+
+  // Handle a pane's measurement stream. Per-phase model (no hidden auto-advance,
+  // no auto-propagation): the operator draws on EACH phase the ROI they are
+  // currently placing (the explicit Lesione/Parenchima toggle). Two cases:
+  //  1) a placed box on this pane moved -> update its points + refresh HU;
+  //  2) a NEW circle -> a fresh draw for the current target on THIS phase,
+  //     replacing only this phase's box of that target (not the other phases').
   function handleMeasurements(ms: DrawnMeasurement[], paneIndex: number) {
     if (!studyId) return;
-    // (1) A KNOWN group member on this pane moved. A propagated copy's id ends
-    //     in "::pN"; the source's does not.
     let dragged = false;
     for (const m of ms) {
       if (!m.markerId || (m.worldPoints?.length ?? 0) < 2) continue;
@@ -1144,20 +1139,11 @@ function ContrastViewerInner() {
         const wp = m.worldPoints as [number, number, number][];
         if (samePoints(member.worldPoints, wp)) continue;
         member.worldPoints = wp;
-        const isSource = !m.markerId.includes("::p");
-        if (isSource) updateSourceCapture(which, wp);
-        if (isSource && !propagatedRef.current[which]) {
-          // The initial draw is still settling: (re)arm propagation so the
-          // copies take the FINAL size, not the tiny mid-draw circle.
-          schedulePropagate(which, paneIndex);
-        } else {
-          // A finished box re-centred for breathing motion: just refresh HU.
-          dragged = true;
-        }
+        updateSourceCapture(which, wp);
+        dragged = true;
       }
     }
     if (dragged) debouncedRunWashout();
-    // (2) A genuinely new circle = a fresh draw on this pane.
     const fresh = [...ms]
       .reverse()
       .find(
@@ -1169,9 +1155,6 @@ function ContrastViewerInner() {
       );
     if (!fresh?.markerId || !fresh.worldPoints) return;
     const target = region === "liver" ? roiTarget : "lesion";
-    // Replace-on-redraw: wipe the previous group for this target across all
-    // phases before capturing the new one (no orphan circles, ever).
-    if (roiGroupMarkers(target).length) clearGroup(target);
     captureNewRoi(
       target,
       paneIndex,
@@ -1180,17 +1163,28 @@ function ContrastViewerInner() {
     );
   }
 
-  // Keep the legacy single-ROI ref (save + heat map) in sync with the source
-  // box's live geometry.
-  function updateSourceCapture(which: "lesion" | "parenchyma", wp: [number, number, number][]) {
+  // Keep the legacy single-ROI ref (used for Save + the heat map) pointing at a
+  // representative box of the target. On a fresh draw the new marker/pane are
+  // passed; on a drag the existing ref's marker/pane are kept.
+  function updateSourceCapture(
+    which: "lesion" | "parenchyma",
+    wp: [number, number, number][],
+    markerId?: string,
+    paneIndex?: number,
+  ) {
     const c = wp[0];
     const e = wp[1];
     const r = Math.hypot(e[0] - c[0], e[1] - c[1], e[2] - c[2]);
     const ref = which === "lesion" ? lesionRoiRef : parenchymaRoiRef;
-    if (ref.current) {
-      ref.current.center_lps = [c[0], c[1], c[2]];
-      ref.current.radius_mm = r;
-    }
+    const mid = markerId ?? ref.current?.markerId;
+    ref.current = {
+      center_lps: [c[0], c[1], c[2]],
+      radius_mm: r,
+      forUid: referenceFoR ?? null,
+      key: mid ?? "",
+      markerId: mid,
+      paneIndex: paneIndex ?? ref.current?.paneIndex,
+    };
     if (which === "lesion") {
       savedRoiRef.current = {
         center_lps: [c[0], c[1], c[2]],
@@ -1200,86 +1194,65 @@ function ContrastViewerInner() {
     }
   }
 
-  // Record a freshly drawn box as the source of a ROI group + mirror it into the
-  // legacy single-ROI ref. Propagation to the other phases is DEFERRED until the
-  // draw settles (so the copies match the final size).
+  // Record a freshly drawn box for the given target ON THIS PANE, replacing any
+  // existing box of that target on the same pane (redraw on one phase replaces
+  // only that phase's box). Runs the wash-out immediately.
   function captureNewRoi(
     target: "lesion" | "parenchyma",
-    srcPane: number,
+    paneIndex: number,
     markerId: string,
     worldPoints: [number, number, number][],
   ) {
+    const old = roiGroupsRef.current[target][paneIndex];
+    if (old && old.markerId !== markerId) {
+      paneHandlesRef.current[paneIndex]?.removeAnnotation(old.markerId);
+      seenMarkersRef.current.delete(old.markerId);
+    }
     seenMarkersRef.current.add(markerId);
-    propagatedRef.current[target] = false;
-    roiGroupsRef.current[target][srcPane] = { markerId, worldPoints };
-    const c = worldPoints[0];
-    const e = worldPoints[1];
-    const r = Math.hypot(e[0] - c[0], e[1] - c[1], e[2] - c[2]);
-    const cap: RoiCapture = {
-      center_lps: [c[0], c[1], c[2]],
-      radius_mm: r,
-      forUid: referenceFoR ?? null,
-      key: markerId,
-      markerId,
-      paneIndex: srcPane,
-    };
-    if (target === "parenchyma") {
-      parenchymaRoiRef.current = cap;
-      setHasParenchyma(true);
-    } else {
-      lesionRoiRef.current = cap;
-      savedRoiRef.current = {
-        center_lps: cap.center_lps,
-        radius_mm: cap.radius_mm,
-        frame_of_reference_uid: referenceFoR ?? null,
-      };
-      setHasLesion(true);
-      // Guided auto-advance: after the lesion, the liver workflow wants the
-      // reference-parenchyma next.
-      if (region === "liver" && !Object.keys(roiGroupsRef.current.parenchyma).length) {
-        setRoiTarget("parenchyma");
-      }
-    }
-    schedulePropagate(target, srcPane);
-  }
-
-  // Arm the (debounced) one-shot propagation of a freshly drawn box to the other
-  // phases, once the operator stops resizing it.
-  function schedulePropagate(target: "lesion" | "parenchyma", srcPane: number) {
-    const timers = propagateTimerRef.current;
-    if (timers[target]) clearTimeout(timers[target] as ReturnType<typeof setTimeout>);
-    timers[target] = setTimeout(() => doPropagate(target, srcPane), 300);
-  }
-
-  // Copy the settled source box into every other phase (index-synced same-FoR
-  // only), pre-centred and independently draggable, then run the wash-out.
-  function doPropagate(target: "lesion" | "parenchyma", srcPane: number) {
-    if (!propagatedRef.current[target]) {
-      propagatedRef.current[target] = true;
-      const src = roiGroupsRef.current[target][srcPane];
-      if (src && allSameFoRNow()) {
-        const prop = propagateWorldPoints(srcPane, src.worldPoints);
-        const inject: Record<number, DrawnMeasurement[]> = {};
-        for (const [qStr, wp] of Object.entries(prop)) {
-          const q = Number(qStr);
-          const mq = `${src.markerId}::p${q}`;
-          seenMarkersRef.current.add(mq);
-          roiGroupsRef.current[target][q] = { markerId: mq, worldPoints: wp };
-          inject[q] = [
-            { markerId: mq, csToolName: "CircleROI", worldPoints: wp } as DrawnMeasurement,
-          ];
-        }
-        setIncomingByPane((prev) => {
-          const next = { ...prev };
-          for (const [k, list] of Object.entries(inject)) {
-            const i = Number(k);
-            next[i] = [...(next[i] ?? []), ...list];
-          }
-          return next;
-        });
-      }
-    }
+    roiGroupsRef.current[target][paneIndex] = { markerId, worldPoints };
+    updateSourceCapture(target, worldPoints, markerId, paneIndex);
+    syncHasFlags();
     runWashout();
+  }
+
+  // Convenience: copy the current target's box from the first phase that has it
+  // to every phase that does NOT (index-synced same-FoR), pre-centred and
+  // independently draggable. A best-effort accelerator: the per-phase manual
+  // draw is always available, and a copy a phase already has is never
+  // overwritten (the operator's own placement wins).
+  function copyToAll() {
+    const target = region === "liver" ? roiTarget : "lesion";
+    const group = roiGroupsRef.current[target];
+    const srcKey = Object.keys(group)[0];
+    if (srcKey == null || !allSameFoRNow()) return;
+    const srcPane = Number(srcKey);
+    const src = group[srcPane];
+    const prop = propagateWorldPoints(srcPane, src.worldPoints);
+    const inject: Record<number, DrawnMeasurement[]> = {};
+    for (const [qStr, wp] of Object.entries(prop)) {
+      const q = Number(qStr);
+      if (group[q]) continue; // keep the box the operator already placed there
+      const mq = `${src.markerId}::p${q}`;
+      seenMarkersRef.current.add(mq);
+      group[q] = { markerId: mq, worldPoints: wp };
+      inject[q] = [{ markerId: mq, csToolName: "CircleROI", worldPoints: wp } as DrawnMeasurement];
+    }
+    setIncomingByPane((prev) => {
+      const next = { ...prev };
+      for (const [k, list] of Object.entries(inject)) {
+        const i = Number(k);
+        next[i] = [...(next[i] ?? []), ...list];
+      }
+      return next;
+    });
+    syncHasFlags();
+    runWashout();
+  }
+
+  // Jump to a phase to inspect / adjust its ROI (clicking a table cell). The
+  // pane becomes active (highlighted in the grid, shown in single layout).
+  function goToCell(paneIndex: number) {
+    setActivePane(paneIndex);
   }
 
   // Delete one logical ROI (lesion or parenchyma) across ALL phases: remove
@@ -1289,15 +1262,12 @@ function ContrastViewerInner() {
     const ref = which === "lesion" ? lesionRoiRef : parenchymaRoiRef;
     ref.current = null;
     lastRoiRef.current = null;
+    syncHasFlags();
     if (which === "lesion") {
-      setHasLesion(false);
       savedRoiRef.current = null;
       setWashout(null);
-      setRoiTarget("lesion");
-    } else {
-      setHasParenchyma(false);
-      setRoiTarget("parenchyma");
-      if (lesionRoiRef.current) runWashout();
+    } else if (Object.keys(roiGroupsRef.current.lesion).length) {
+      runWashout();
     }
   }
 
@@ -1306,14 +1276,12 @@ function ContrastViewerInner() {
     for (const h of paneHandlesRef.current) h?.clearAnnotations();
     roiGroupsRef.current = { lesion: {}, parenchyma: {} };
     seenMarkersRef.current = new Set();
-    propagatedRef.current = { lesion: false, parenchyma: false };
     setIncomingByPane({});
     lesionRoiRef.current = null;
     parenchymaRoiRef.current = null;
     savedRoiRef.current = null;
     lastRoiRef.current = null;
-    setHasLesion(false);
-    setHasParenchyma(false);
+    setPlacedSeries({ lesion: [], parenchyma: [] });
     setWashout(null);
     setRoiTarget("lesion");
   }
@@ -1947,8 +1915,14 @@ function ContrastViewerInner() {
               onRegionChange={setRegion}
               roiTarget={roiTarget}
               onRoiTargetChange={setRoiTarget}
-              hasLesion={hasLesion}
-              hasParenchyma={hasParenchyma}
+              phases={panes.map((p, i) => ({
+                paneIndex: i,
+                seriesId: p.series_id,
+                acquisitionPhase: p.acquisition_phase ?? null,
+              }))}
+              placed={placedSeries}
+              onCopyToAll={copyToAll}
+              onCellClick={goToCell}
               onRequestMap={fetchWashoutMap}
               onSave={saveWashout}
               onDeleteRoi={deleteRoi}
@@ -1956,14 +1930,8 @@ function ContrastViewerInner() {
               onCancelDraw={cancelActiveDraws}
               onClose={() => {
                 cancelActiveDraws();
+                resetRois();
                 setMeasureMode(false);
-                setWashout(null);
-                lastRoiRef.current = null;
-                lesionRoiRef.current = null;
-                parenchymaRoiRef.current = null;
-                setHasLesion(false);
-                setHasParenchyma(false);
-                setRoiTarget("lesion");
               }}
             />
           </div>

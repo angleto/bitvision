@@ -1,19 +1,16 @@
 "use client";
 
-// Wash-out side panel for the multiphase contrast viewer. Region-aware:
+// Wash-out side panel for the multiphase contrast viewer — a TRANSPARENT
+// per-phase table: phases across the columns, Lesion / Parenchyma / Δ down the
+// rows. Every number maps to a ROI the operator placed and can see; clicking a
+// cell jumps to that phase to inspect / adjust its box. No hidden state machine:
+// an explicit "placing Lesion / Parenchyma" toggle decides what a new draw fills.
 //
-//  * adrenal — the APW/RPW model the thresholds were validated on (Korobkin
-//    1998; Szolar 1998). Shows the indices + adenoma flags (factual, NOT a
-//    diagnosis).
-//  * liver   — APW/RPW do NOT apply; liver wash-out is qualitative, relative
-//    to parenchyma (LI-RADS). Shows the lesion-vs-parenchyma ΔHU per phase
-//    from a second reference ROI, and withholds the adrenal flags.
-//  * other   — raw indices, clearly labelled as adrenal-derived, no verdict.
-//
-// Plus reading-safety guardrails: a warning when the enhanced (arterial /
-// portal) phase is missing (APW/RPW not computable) and a per-phase warning
-// when an ROI's HU std-dev is high (the ROI likely straddles a boundary /
-// fat / air rather than sitting on homogeneous tissue).
+// Region-aware interpretation:
+//  * adrenal — APW/RPW (Korobkin 1998; Szolar 1998) + adenoma flags (factual).
+//  * liver   — APW/RPW do NOT apply; relative lesion-vs-parenchyma ΔHU per
+//    phase (LI-RADS) from the parenchyma reference row.
+//  * other   — raw indices, labelled adrenal-derived, no verdict.
 
 import type { PhaseMap, PhaseRoiStats, PhaseWashout } from "@/lib/api";
 import { useTranslations } from "next-intl";
@@ -22,15 +19,20 @@ import { useState } from "react";
 type Region = "adrenal" | "liver" | "other";
 type RoiTarget = "lesion" | "parenchyma";
 
-// HU std-dev above which a soft-tissue ROI is flagged as heterogeneous: a
-// clean parenchyma / lesion ROI sits around 10-20 HU; ~90 HU means the sphere
-// is spanning fat / air / vessel / a boundary and the mean is meaningless.
+export type PhaseCol = {
+  paneIndex: number;
+  seriesId: string;
+  acquisitionPhase: string | null;
+};
+
+// HU std-dev above which a soft-tissue ROI is flagged as heterogeneous: a clean
+// parenchyma / lesion ROI sits around 10-20 HU; ~90 HU means the sphere spans
+// fat / air / vessel / a boundary and the mean is meaningless.
 const HIGH_SD_HU = 25;
 
-// Wash-out highlight colours: HU dropping phase-to-phase = wash-out (the lesion
-// clears contrast); HU rising = enhancement / persistent uptake.
 const WASHOUT_COLOR = "#34d399";
 const UPTAKE_COLOR = "#e96b1f";
+const ACCENT = "#e96b1f";
 
 export interface WashoutPanelProps {
   result: PhaseRoiStats | null;
@@ -41,14 +43,21 @@ export interface WashoutPanelProps {
   onRegionChange: (r: Region) => void;
   roiTarget: RoiTarget;
   onRoiTargetChange: (t: RoiTarget) => void;
-  hasLesion: boolean;
-  hasParenchyma: boolean;
+  /** The phases shown as table columns, in display order. */
+  phases: PhaseCol[];
+  /** series_ids that currently carry a placed lesion / parenchyma ROI. */
+  placed: { lesion: string[]; parenchyma: string[] };
+  /** Copy the current target's box from the first phase that has it to the
+   *  phases that do not (a best-effort accelerator). */
+  onCopyToAll: () => void;
+  /** Jump to a phase (clicking a cell) to inspect / adjust its ROI. */
+  onCellClick: (paneIndex: number) => void;
   onRequestMap: (metric: "washout" | "subtraction") => Promise<PhaseMap | null>;
   onSave: () => void;
   onClose: () => void;
-  /** Delete one ROI individually (lesion or reference parenchyma). */
+  /** Delete one ROI (lesion or reference parenchyma) across all phases. */
   onDeleteRoi: (which: RoiTarget) => void;
-  /** Clear every ROI + result and restart the guided flow. */
+  /** Clear every ROI + result. */
   onReset: () => void;
   /** Abort a half-drawn ROI (Esc) so the operator can start over. */
   onCancelDraw: () => void;
@@ -60,92 +69,6 @@ function fmt(n: number | null | undefined, digits = 0): string {
 
 const REGIONS: Region[] = ["adrenal", "liver", "other"];
 
-/** One step of the guided wash-out flow (place lesion, then parenchyma). Shows
- *  the instruction while it is the active step, and ✓ + a single-ROI delete once
- *  the ROI is placed. */
-function RoiStep({
-  n,
-  label,
-  hint,
-  active,
-  done,
-  disabled,
-  isTarget,
-  onRetarget,
-  onDelete,
-  deleteLabel,
-}: {
-  n: number;
-  label: string;
-  hint: string;
-  active: boolean;
-  done: boolean;
-  disabled?: boolean;
-  isTarget: boolean;
-  onRetarget: () => void;
-  onDelete: () => void;
-  deleteLabel: string;
-}) {
-  const accent = "#e96b1f";
-  const ok = "#5cd08a";
-  const border = active ? accent : done ? "#2c8a4d" : "#1a1f2b";
-  return (
-    <div
-      style={{
-        border: `1px solid ${border}`,
-        borderRadius: 6,
-        padding: "5px 7px",
-        opacity: disabled ? 0.5 : 1,
-        background: active ? "rgba(233,107,31,0.08)" : "transparent",
-      }}
-    >
-      <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
-        <span
-          style={{
-            width: 16,
-            textAlign: "center",
-            fontWeight: 700,
-            color: done ? ok : active ? accent : "#94a3b8",
-          }}
-        >
-          {done ? "✓" : n}
-        </span>
-        <strong style={{ flex: 1, fontSize: "0.78rem" }}>{label}</strong>
-        {done && !isTarget && (
-          <button
-            type="button"
-            className="ghost"
-            onClick={onRetarget}
-            style={{ fontSize: "0.66rem", padding: "0 5px" }}
-            title={hint}
-          >
-            ↻
-          </button>
-        )}
-        {done && (
-          <button
-            type="button"
-            className="ghost"
-            onClick={onDelete}
-            title={deleteLabel}
-            aria-label={deleteLabel}
-            style={{ color: "#f66", padding: "0 6px", fontSize: "0.9rem", lineHeight: 1 }}
-          >
-            ×
-          </button>
-        )}
-      </div>
-      {active && (
-        <div style={{ display: "flex", alignItems: "center", gap: 5, marginTop: 3 }}>
-          <span style={{ color: accent }}>▸</span>
-          <span style={{ fontSize: "0.72rem", color: "#e6ecf3" }}>{hint}</span>
-        </div>
-      )}
-      {disabled && <div style={{ fontSize: "0.7rem", color: "#94a3b8", marginTop: 3 }}>{hint}</div>}
-    </div>
-  );
-}
-
 export default function WashoutPanel({
   result,
   busy,
@@ -155,8 +78,10 @@ export default function WashoutPanel({
   onRegionChange,
   roiTarget,
   onRoiTargetChange,
-  hasLesion,
-  hasParenchyma,
+  phases,
+  placed,
+  onCopyToAll,
+  onCellClick,
   onRequestMap,
   onSave,
   onClose,
@@ -165,28 +90,66 @@ export default function WashoutPanel({
   onCancelDraw,
 }: WashoutPanelProps) {
   const t = useTranslations("contrast");
-  // Which guided step is active: pick lesion, then (liver) parenchyma.
-  const needsParenchyma = region === "liver";
-  const lesionActive = !hasLesion;
-  const parenchymaActive = needsParenchyma && hasLesion && !hasParenchyma;
+  const liver = region === "liver";
+  const w: PhaseWashout | null = result?.washout ?? null;
+
+  const lesionSample = (p: PhaseCol) => result?.samples.find((s) => s.series_id === p.seriesId);
+  const parenHu = (p: PhaseCol) =>
+    p.acquisitionPhase
+      ? w?.parenchyma_curve.find((x) => x.acquisition_phase === p.acquisitionPhase)?.hu_mean
+      : undefined;
+  const deltaHu = (p: PhaseCol) =>
+    p.acquisitionPhase
+      ? w?.relative_curve.find((x) => x.acquisition_phase === p.acquisitionPhase)?.delta_hu
+      : undefined;
+
+  const lesionPlaced = new Set(placed.lesion);
+  const parenPlaced = new Set(placed.parenchyma);
+  const anyPlaced = placed.lesion.length > 0 || placed.parenchyma.length > 0;
 
   return (
     <aside
       className="viewer-chrome"
       style={{
-        width: 280,
-        flex: "0 0 auto",
+        width: Math.min(560, 120 + phases.length * 78),
+        maxWidth: "92vw",
+        maxHeight: "44vh",
+        overflowY: "auto",
         background: "#0b0e13",
         color: "#e6ecf3",
-        borderLeft: "1px solid #1a1f2b",
-        padding: "0.6rem 0.7rem",
-        overflowY: "auto",
+        border: "1px solid #1a1f2b",
+        borderRadius: 8,
+        padding: "0.55rem 0.7rem",
         fontSize: "0.8rem",
       }}
       aria-label={t("washoutTitle")}
     >
-      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
+      {/* Title + region + close */}
+      <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
         <strong>{t("washoutTitle")}</strong>
+        <fieldset
+          aria-label={t("regionLabel")}
+          style={{ display: "flex", gap: 4, border: 0, padding: 0, margin: "0 0 0 auto" }}
+        >
+          {REGIONS.map((r) => (
+            <button
+              key={r}
+              type="button"
+              className="ghost"
+              aria-pressed={region === r}
+              onClick={() => onRegionChange(r)}
+              style={{
+                fontSize: "0.7rem",
+                padding: "1px 7px",
+                border: region === r ? `1px solid ${ACCENT}` : "1px solid #1a1f2b",
+                color: region === r ? ACCENT : "#cbd5e1",
+                borderRadius: 4,
+              }}
+            >
+              {t(`region.${r}`)}
+            </button>
+          ))}
+        </fieldset>
         <button
           type="button"
           className="ghost"
@@ -198,71 +161,127 @@ export default function WashoutPanel({
         </button>
       </div>
 
-      {/* Region selector — drives the interpretation, server-side. */}
-      <div style={{ marginTop: 6 }}>
-        <div style={{ color: "#94a3b8", fontSize: "0.72rem", marginBottom: 2 }}>
-          {t("regionLabel")}
-        </div>
-        <fieldset
-          aria-label={t("regionLabel")}
-          style={{ display: "flex", gap: 4, border: 0, padding: 0, margin: 0 }}
-        >
-          {REGIONS.map((r) => (
-            <button
-              key={r}
-              type="button"
-              className="ghost"
-              aria-pressed={region === r}
-              onClick={() => onRegionChange(r)}
-              style={{
-                flex: 1,
-                fontSize: "0.72rem",
-                padding: "2px 4px",
-                border: region === r ? "1px solid #e96b1f" : "1px solid #1a1f2b",
-                color: region === r ? "#e96b1f" : "#cbd5e1",
-                borderRadius: 4,
-              }}
-            >
-              {t(`region.${r}`)}
-            </button>
-          ))}
-        </fieldset>
-      </div>
-
-      {/* Guided ROI steps. The active step shows the instruction; a placed ROI
-          shows ✓ + a single-ROI delete, and selecting it again re-targets the
-          next draw to that ROI. */}
-      <div style={{ marginTop: 8, display: "flex", flexDirection: "column", gap: 6 }}>
-        <RoiStep
-          n={1}
-          label={t("stepLesion")}
-          hint={t("drawLesionHint")}
-          active={lesionActive}
-          done={hasLesion}
-          isTarget={roiTarget === "lesion"}
-          onRetarget={() => onRoiTargetChange("lesion")}
-          onDelete={() => onDeleteRoi("lesion")}
-          deleteLabel={t("roiDelete")}
-        />
-        {needsParenchyma && (
-          <RoiStep
-            n={2}
-            label={t("stepParenchyma")}
-            hint={hasLesion ? t("drawParenchymaHint") : t("waitLesionFirst")}
-            active={parenchymaActive}
-            done={hasParenchyma}
-            disabled={!hasLesion}
-            isTarget={roiTarget === "parenchyma"}
-            onRetarget={() => onRoiTargetChange("parenchyma")}
-            onDelete={() => onDeleteRoi("parenchyma")}
-            deleteLabel={t("roiDelete")}
+      {/* The transparent per-phase table. */}
+      <table
+        style={{
+          width: "100%",
+          borderCollapse: "collapse",
+          margin: "7px 0 4px",
+          fontVariantNumeric: "tabular-nums",
+        }}
+      >
+        <thead>
+          <tr style={{ color: "#94a3b8", fontSize: "0.7rem" }}>
+            <th style={{ textAlign: "left", fontWeight: 400, padding: "2px 4px" }} />
+            {phases.map((p) => (
+              <th
+                key={p.seriesId}
+                style={{ textAlign: "center", fontWeight: 600, padding: "2px 4px" }}
+              >
+                {p.acquisitionPhase ? t(`phase.${p.acquisitionPhase}`) : t("unclassified")}
+              </th>
+            ))}
+          </tr>
+        </thead>
+        <tbody>
+          <Row
+            label={t("stepLesion")}
+            isTarget={roiTarget === "lesion"}
+            onPickTarget={() => onRoiTargetChange("lesion")}
+            placedCount={placed.lesion.length}
+            total={phases.length}
+            onDelete={placed.lesion.length ? () => onDeleteRoi("lesion") : undefined}
+            cells={phases.map((p) => {
+              const s = lesionSample(p);
+              return (
+                <Cell
+                  key={p.seriesId}
+                  placed={lesionPlaced.has(p.seriesId)}
+                  hu={s?.hu_mean}
+                  sd={s?.hu_std}
+                  onClick={() => onCellClick(p.paneIndex)}
+                />
+              );
+            })}
           />
-        )}
-      </div>
+          {liver && (
+            <Row
+              label={t("stepParenchyma")}
+              isTarget={roiTarget === "parenchyma"}
+              onPickTarget={() => onRoiTargetChange("parenchyma")}
+              placedCount={placed.parenchyma.length}
+              total={phases.length}
+              onDelete={placed.parenchyma.length ? () => onDeleteRoi("parenchyma") : undefined}
+              cells={phases.map((p) => (
+                <Cell
+                  key={p.seriesId}
+                  placed={parenPlaced.has(p.seriesId)}
+                  hu={parenHu(p)}
+                  onClick={() => onCellClick(p.paneIndex)}
+                />
+              ))}
+            />
+          )}
+          {liver && (
+            <tr>
+              <td style={{ color: "#94a3b8", padding: "2px 4px" }}>{t("deltaRow")}</td>
+              {phases.map((p) => {
+                const d = deltaHu(p);
+                return (
+                  <td
+                    key={p.seriesId}
+                    style={{
+                      textAlign: "center",
+                      padding: "2px 4px",
+                      color: d == null ? "#64748b" : d < 0 ? ACCENT : "#cbd5e1",
+                    }}
+                  >
+                    {d == null ? "—" : `${d > 0 ? "+" : ""}${fmt(d, 0)}`}
+                  </td>
+                );
+              })}
+            </tr>
+          )}
+        </tbody>
+      </table>
 
-      {/* Interrupt a half-drawn ROI, or wipe everything and start over. */}
-      {(hasLesion || hasParenchyma || lesionActive || parenchymaActive) && (
-        <div style={{ display: "flex", gap: 6, marginTop: 8 }}>
+      {/* What a new draw fills + the copy accelerator. */}
+      <div style={{ display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap" }}>
+        <span style={{ color: "#94a3b8", fontSize: "0.72rem" }}>{t("placingLabel")}</span>
+        <button
+          type="button"
+          className="ghost"
+          aria-pressed={roiTarget === "lesion"}
+          onClick={() => onRoiTargetChange("lesion")}
+          style={targetBtn(roiTarget === "lesion")}
+        >
+          {t("stepLesion")}
+        </button>
+        {liver && (
+          <button
+            type="button"
+            className="ghost"
+            aria-pressed={roiTarget === "parenchyma"}
+            onClick={() => onRoiTargetChange("parenchyma")}
+            style={targetBtn(roiTarget === "parenchyma")}
+          >
+            {t("stepParenchyma")}
+          </button>
+        )}
+        <button
+          type="button"
+          className="ghost"
+          onClick={onCopyToAll}
+          title={t("copyToAllHint")}
+          style={{ marginLeft: "auto", fontSize: "0.72rem" }}
+        >
+          {t("copyToAll")}
+        </button>
+      </div>
+      <p style={{ color: "#64748b", fontSize: "0.68rem", margin: "4px 0 0" }}>{t("tableHint")}</p>
+
+      {anyPlaced && (
+        <div style={{ display: "flex", gap: 6, marginTop: 6 }}>
           <button
             type="button"
             className="ghost"
@@ -286,8 +305,36 @@ export default function WashoutPanel({
       {busy && <p className="meta">{t("computing")}</p>}
       {error && <p style={{ color: "var(--bv-danger, #f87171)" }}>{error}</p>}
 
-      {result && <WashoutBody result={result} region={region} />}
-      {result && <WashoutMapSection onRequestMap={onRequestMap} />}
+      {result && w && (
+        <div style={{ marginTop: 6, borderTop: "1px solid #1a1f2b", paddingTop: 6 }}>
+          <WashoutCurve curve={w.curve} parenchyma={liver ? w.parenchyma_curve : []} />
+          <WashoutTrendChip w={w} />
+          {region === "liver" ? (
+            <p className="meta" style={{ fontSize: "0.7rem", margin: "2px 0 0" }}>
+              {t("liverNote")}
+            </p>
+          ) : (
+            <AdrenalIndices w={w} region={region} />
+          )}
+          {result.samples.some((s) => s.hu_std > HIGH_SD_HU) && (
+            <p style={{ color: "var(--bv-warning, #fbbf24)", fontSize: "0.72rem" }}>
+              {t("highSdWarn")}
+            </p>
+          )}
+          {w.enhanced_phase == null && (
+            <p style={{ color: "var(--bv-warning, #fbbf24)", fontSize: "0.72rem" }}>
+              {t("missingEnhanced")}
+            </p>
+          )}
+          {result.skipped.length > 0 && (
+            <p className="meta" style={{ fontSize: "0.72rem" }}>
+              {t("skippedPhases", { count: result.skipped.length })}
+            </p>
+          )}
+        </div>
+      )}
+
+      {result && w && <WashoutMapSection onRequestMap={onRequestMap} />}
 
       {result && result.samples.length > 0 && (
         <button
@@ -300,7 +347,120 @@ export default function WashoutPanel({
           {saved ? t("saved") : t("save")}
         </button>
       )}
+      <p className="meta" style={{ fontSize: "0.66rem", marginTop: 6, opacity: 0.8 }}>
+        {t("notDiagnosis")}
+      </p>
     </aside>
+  );
+}
+
+function targetBtn(active: boolean): React.CSSProperties {
+  return {
+    fontSize: "0.72rem",
+    padding: "1px 9px",
+    border: active ? `1px solid ${ACCENT}` : "1px solid #1a1f2b",
+    color: active ? ACCENT : "#cbd5e1",
+    background: active ? "rgba(233,107,31,0.10)" : "transparent",
+    borderRadius: 4,
+  };
+}
+
+// One table row: a row label that doubles as the "place this ROI next" toggle,
+// the per-phase cells, a placed-count badge and a delete-all-phases button.
+function Row({
+  label,
+  isTarget,
+  onPickTarget,
+  placedCount,
+  total,
+  onDelete,
+  cells,
+}: {
+  label: string;
+  isTarget: boolean;
+  onPickTarget: () => void;
+  placedCount: number;
+  total: number;
+  onDelete?: () => void;
+  cells: React.ReactNode[];
+}) {
+  const t = useTranslations("contrast");
+  return (
+    <tr>
+      <td style={{ padding: "2px 4px", whiteSpace: "nowrap" }}>
+        <button
+          type="button"
+          className="ghost"
+          onClick={onPickTarget}
+          title={t("placingLabel")}
+          style={{
+            fontSize: "0.76rem",
+            padding: 0,
+            color: isTarget ? ACCENT : "#e6ecf3",
+            fontWeight: isTarget ? 700 : 500,
+          }}
+        >
+          {isTarget ? "▸ " : ""}
+          {label}
+        </button>{" "}
+        <span style={{ color: "#64748b", fontSize: "0.64rem" }}>
+          {placedCount}/{total}
+        </span>
+        {onDelete && (
+          <button
+            type="button"
+            className="ghost"
+            onClick={onDelete}
+            title={t("roiDelete")}
+            aria-label={t("roiDelete")}
+            style={{ color: "#f66", padding: "0 4px", fontSize: "0.82rem", lineHeight: 1 }}
+          >
+            ×
+          </button>
+        )}
+      </td>
+      {cells}
+    </tr>
+  );
+}
+
+// One per-phase cell: "—" not placed, "•" placed but HU not computed yet, else
+// the HU (with a ⚠ when the ROI is heterogeneous). Click jumps to the phase.
+function Cell({
+  placed,
+  hu,
+  sd,
+  onClick,
+}: {
+  placed: boolean;
+  hu: number | null | undefined;
+  sd?: number | null;
+  onClick: () => void;
+}) {
+  const t = useTranslations("contrast");
+  const hot = sd != null && sd > HIGH_SD_HU;
+  return (
+    <td style={{ padding: "1px 2px" }}>
+      <button
+        type="button"
+        onClick={onClick}
+        title={t("adjustHint")}
+        style={{
+          width: "100%",
+          textAlign: "center",
+          padding: "2px 4px",
+          cursor: "pointer",
+          borderRadius: 4,
+          border: "1px solid transparent",
+          font: "inherit",
+          fontVariantNumeric: "tabular-nums",
+          color: !placed ? "#64748b" : hot ? "var(--bv-warning, #fbbf24)" : "#e6ecf3",
+          background: placed ? "rgba(148,163,184,0.10)" : "transparent",
+        }}
+      >
+        {!placed ? "—" : hu == null ? "•" : `${hot ? "⚠ " : ""}${fmt(hu, 0)}`}
+      </button>
+    </td>
   );
 }
 
@@ -385,81 +545,9 @@ function WashoutMapSection({
   );
 }
 
-function WashoutBody({ result, region }: { result: PhaseRoiStats; region: Region }) {
-  const t = useTranslations("contrast");
-  const w: PhaseWashout = result.washout;
-
-  const heterogeneous = result.samples.filter((s) => s.hu_std > HIGH_SD_HU);
-  // The enhanced (arterial/portal) peak is what APW/RPW are measured against.
-  // For adrenal/other its absence makes the indices uncomputable; for liver
-  // the relative read still works, but it is worth flagging either way.
-  const missingEnhanced = w.enhanced_phase == null;
-
-  return (
-    <div>
-      <WashoutCurve curve={w.curve} parenchyma={region === "liver" ? w.parenchyma_curve : []} />
-      <WashoutTrendChip w={w} />
-
-      <table style={{ width: "100%", borderCollapse: "collapse", margin: "6px 0" }}>
-        <tbody>
-          {result.samples.map((s) => {
-            const hot = s.hu_std > HIGH_SD_HU;
-            return (
-              <tr key={s.series_id}>
-                <td style={{ color: "#94a3b8", padding: "1px 0" }}>
-                  {s.acquisition_phase ? t(`phase.${s.acquisition_phase}`) : t("unclassified")}
-                </td>
-                <td
-                  style={{
-                    textAlign: "right",
-                    fontVariantNumeric: "tabular-nums",
-                    color: hot ? "var(--bv-warning, #fbbf24)" : undefined,
-                  }}
-                >
-                  {hot && (
-                    <span title={t("highSdWarn")} style={{ marginRight: 3 }}>
-                      ⚠
-                    </span>
-                  )}
-                  {fmt(s.hu_mean, 0)} ± {fmt(s.hu_std, 0)} HU
-                </td>
-              </tr>
-            );
-          })}
-        </tbody>
-      </table>
-
-      {heterogeneous.length > 0 && (
-        <p style={{ color: "var(--bv-warning, #fbbf24)", fontSize: "0.72rem" }}>
-          {t("highSdWarn")}
-        </p>
-      )}
-
-      {/* Liver: lesion-vs-parenchyma relative wash-out (the LI-RADS signal). */}
-      {region === "liver" ? <LiverRelative w={w} /> : <AdrenalIndices w={w} region={region} />}
-
-      {missingEnhanced && (
-        <p style={{ color: "var(--bv-warning, #fbbf24)", fontSize: "0.72rem", marginTop: 4 }}>
-          {t("missingEnhanced")}
-        </p>
-      )}
-
-      {result.skipped.length > 0 && (
-        <p className="meta" style={{ fontSize: "0.72rem" }}>
-          {t("skippedPhases", { count: result.skipped.length })}
-        </p>
-      )}
-      <p className="meta" style={{ fontSize: "0.68rem", marginTop: 6, opacity: 0.8 }}>
-        {t("notDiagnosis")}
-      </p>
-    </div>
-  );
-}
-
 function WashoutTrendChip({ w }: { w: PhaseWashout }) {
   const t = useTranslations("contrast");
   if (w.enhanced_hu == null || w.delayed_hu == null) return null;
-  // Drop from the enhanced peak to the delayed phase: > 0 = washes out.
   const drop = w.enhanced_hu - w.delayed_hu;
   const washes = drop > 0;
   return (
@@ -528,62 +616,12 @@ function AdrenalIndices({ w, region }: { w: PhaseWashout; region: Region }) {
       {adrenal && w.unenhanced_below_10hu && (
         <p style={{ color: "var(--bv-success, #34d399)", fontSize: "0.74rem" }}>{t("lipidRich")}</p>
       )}
-      {/* The indices ARE the adrenal model; say so for any non-adrenal region. */}
       {!adrenal && (w.apw != null || w.rpw != null) && (
         <p className="meta" style={{ fontSize: "0.7rem" }}>
           {t("adrenalScopedNote")}
         </p>
       )}
     </>
-  );
-}
-
-function LiverRelative({ w }: { w: PhaseWashout }) {
-  const t = useTranslations("contrast");
-  const rel = w.relative_curve;
-  return (
-    <div style={{ margin: "6px 0" }}>
-      <div style={{ color: "#94a3b8", fontSize: "0.72rem", marginBottom: 2 }}>
-        {t("liverRelativeTitle")}
-      </div>
-      {rel.length === 0 ? (
-        <p className="meta" style={{ fontSize: "0.7rem" }}>
-          {t("drawParenchymaHint")}
-        </p>
-      ) : (
-        <table style={{ width: "100%", borderCollapse: "collapse" }}>
-          <thead>
-            <tr style={{ color: "#64748b", fontSize: "0.68rem" }}>
-              <th style={{ textAlign: "left", fontWeight: 400 }} />
-              <th style={{ textAlign: "right", fontWeight: 400 }}>{t("colLesion")}</th>
-              <th style={{ textAlign: "right", fontWeight: 400 }}>{t("colLiver")}</th>
-              <th style={{ textAlign: "right", fontWeight: 400 }}>Δ</th>
-            </tr>
-          </thead>
-          <tbody style={{ fontVariantNumeric: "tabular-nums" }}>
-            {rel.map((r) => (
-              <tr key={r.acquisition_phase}>
-                <td style={{ color: "#94a3b8" }}>{t(`phase.${r.acquisition_phase}`)}</td>
-                <td style={{ textAlign: "right" }}>{fmt(r.lesion_hu, 0)}</td>
-                <td style={{ textAlign: "right" }}>{fmt(r.parenchyma_hu, 0)}</td>
-                <td
-                  style={{
-                    textAlign: "right",
-                    color: r.delta_hu < 0 ? "var(--bv-accent, #e96b1f)" : undefined,
-                  }}
-                >
-                  {r.delta_hu > 0 ? "+" : ""}
-                  {fmt(r.delta_hu, 0)}
-                </td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
-      )}
-      <p className="meta" style={{ fontSize: "0.68rem", marginTop: 4 }}>
-        {t("liverNote")}
-      </p>
-    </div>
   );
 }
 
@@ -597,7 +635,7 @@ function WashoutCurve({
   const t = useTranslations("contrast");
   if (curve.length === 0) return null;
   const W = 250;
-  const H = 90;
+  const H = 80;
   const padX = 8;
   const padY = 10;
   const allHus = [...curve, ...parenchyma].map((p) => p.hu_mean);
@@ -628,7 +666,6 @@ function WashoutCurve({
           strokeDasharray="3 2"
         />
       )}
-      {/* Lesion curve, colour-coded per segment: HU dropping = wash-out, rising = uptake. */}
       {curve.slice(1).map((p, idx) => {
         const prev = curve[idx];
         const down = p.hu_mean < prev.hu_mean;
@@ -652,17 +689,6 @@ function WashoutCurve({
           </text>
         </g>
       ))}
-      {/* Legend: wash-out (down) vs uptake (up). */}
-      <g>
-        <line x1={padX} y1={7} x2={padX + 9} y2={7} stroke={WASHOUT_COLOR} strokeWidth={1.8} />
-        <text x={padX + 12} y={9} fontSize={6.5} fill="#94a3b8">
-          {t("legendWashout")}
-        </text>
-        <line x1={W / 2} y1={7} x2={W / 2 + 9} y2={7} stroke={UPTAKE_COLOR} strokeWidth={1.8} />
-        <text x={W / 2 + 12} y={9} fontSize={6.5} fill="#94a3b8">
-          {t("legendUptake")}
-        </text>
-      </g>
     </svg>
   );
 }
