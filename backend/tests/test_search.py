@@ -280,9 +280,7 @@ async def test_search_include_index_status_flags_embedded(
 
     client = await _client_for(db_session, user)
     try:
-        r = await client.get(
-            "/api/search", params={"q": marker, "include_index_status": "true"}
-        )
+        r = await client.get("/api/search", params={"q": marker, "include_index_status": "true"})
         assert r.status_code == 200, r.text
         by_id = {s["id"]: s for s in r.json()["items"]}
         assert by_id[str(study_yes.id)]["indexed"] is True
@@ -315,9 +313,7 @@ async def test_study_detail_reports_series_indexed(
         assert r.status_code == 200, r.text
         body = r.json()
         assert body["indexed"] is True
-        assert any(
-            s["id"] == str(series.id) and s["indexed"] is True for s in body["series"]
-        )
+        assert any(s["id"] == str(series.id) and s["indexed"] is True for s in body["series"])
 
         r2 = await client.get(f"/api/studies/{bare_study.id}")
         assert r2.status_code == 200, r2.text

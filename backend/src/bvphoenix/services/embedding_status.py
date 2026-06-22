@@ -26,28 +26,28 @@ from bvphoenix.db.models import Embedding, Series
 _IMAGE_MODEL_ID = "biomedclip-v1"
 
 
-async def embedded_series_ids(
-    db: AsyncSession, series_ids: Iterable[uuid.UUID]
-) -> set[uuid.UUID]:
+async def embedded_series_ids(db: AsyncSession, series_ids: Iterable[uuid.UUID]) -> set[uuid.UUID]:
     """Subset of ``series_ids`` that already have a BiomedCLIP vector."""
     ids = list(series_ids)
     if not ids:
         return set()
     rows = (
-        await db.execute(
-            select(Embedding.target_id).where(
-                Embedding.target_kind == "series",
-                Embedding.model_id == _IMAGE_MODEL_ID,
-                Embedding.target_id.in_(ids),
+        (
+            await db.execute(
+                select(Embedding.target_id).where(
+                    Embedding.target_kind == "series",
+                    Embedding.model_id == _IMAGE_MODEL_ID,
+                    Embedding.target_id.in_(ids),
+                )
             )
         )
-    ).scalars().all()
+        .scalars()
+        .all()
+    )
     return {uuid.UUID(str(r)) for r in rows}
 
 
-async def indexed_study_ids(
-    db: AsyncSession, study_ids: Iterable[uuid.UUID]
-) -> set[uuid.UUID]:
+async def indexed_study_ids(db: AsyncSession, study_ids: Iterable[uuid.UUID]) -> set[uuid.UUID]:
     """Subset of ``study_ids`` with at least one embedded image series.
 
     Mirrors how ``find_similar_studies`` resolves a study id: a study is
@@ -57,16 +57,20 @@ async def indexed_study_ids(
     if not ids:
         return set()
     rows = (
-        await db.execute(
-            select(Series.study_id)
-            .join(
-                Embedding,
-                (Embedding.target_id == Series.id)
-                & (Embedding.target_kind == "series")
-                & (Embedding.model_id == _IMAGE_MODEL_ID),
+        (
+            await db.execute(
+                select(Series.study_id)
+                .join(
+                    Embedding,
+                    (Embedding.target_id == Series.id)
+                    & (Embedding.target_kind == "series")
+                    & (Embedding.model_id == _IMAGE_MODEL_ID),
+                )
+                .where(Series.study_id.in_(ids))
+                .distinct()
             )
-            .where(Series.study_id.in_(ids))
-            .distinct()
         )
-    ).scalars().all()
+        .scalars()
+        .all()
+    )
     return {uuid.UUID(str(r)) for r in rows}
