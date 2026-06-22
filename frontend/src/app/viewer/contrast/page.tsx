@@ -32,6 +32,14 @@ import {
   studiesApi,
 } from "@/lib/api";
 import { defaultPhasePanes, reviewableSeries } from "@/lib/contrastPhases";
+import {
+  type PaneZGeom,
+  newestFreshCircle,
+  ownMeasurements,
+  phaseRoisFromGroup as phaseRoisFromGroupPure,
+  propagateZWorld,
+  samePoints as samePointsPure,
+} from "@/lib/contrastRois";
 import { dispatchViewportResetView, dispatchViewportZoom, useHotkeys } from "@/lib/hotkeys";
 import {
   type ViewerPaneProbe,
@@ -975,21 +983,19 @@ function ContrastViewerInner() {
       srcPane: number,
       worldPoints: [number, number, number][],
     ): Record<number, [number, number, number][]> => {
-      const srcPs = paneHandlesRef.current[srcPane]?.getProbeState?.();
-      const srcOz = srcPs?.volOrigin?.[2];
-      const srcSz = srcPs?.volSpacing?.[2];
-      const cz = worldPoints[0]?.[2] ?? 0;
-      const k = srcOz != null && srcSz != null && srcSz !== 0 ? (cz - srcOz) / srcSz : null;
+      const zgeom = (i: number): PaneZGeom => {
+        const ps = paneHandlesRef.current[i]?.getProbeState?.();
+        return {
+          originZ: ps?.volOrigin?.[2] ?? null,
+          spacingZ: ps?.volSpacing?.[2] ?? null,
+          crossZ: ps?.crosshairLps?.[2] ?? null,
+        };
+      };
+      const src = zgeom(srcPane);
       const out: Record<number, [number, number, number][]> = {};
       panes.forEach((_p, i) => {
         if (i === srcPane) return;
-        const ps = paneHandlesRef.current[i]?.getProbeState?.();
-        const oz = ps?.volOrigin?.[2];
-        const sz = ps?.volSpacing?.[2];
-        let zq = cz;
-        if (k != null && oz != null && sz != null) zq = oz + k * sz;
-        else if (ps?.crosshairLps?.[2] != null) zq = ps.crosshairLps[2];
-        out[i] = worldPoints.map((wp) => [wp[0], wp[1], zq] as [number, number, number]);
+        out[i] = propagateZWorld(src, zgeom(i), worldPoints);
       });
       return out;
     },
@@ -1020,39 +1026,14 @@ function ContrastViewerInner() {
   }
 
   // Per-phase ROIs for the wash-out, from each phase's CURRENT box position
-  // (the live drag if the operator re-centred it, else the propagated point).
-  function phaseRoisFromGroup(
-    which: "lesion" | "parenchyma",
-  ): Array<{ series_id: string; center_lps: [number, number, number]; radius_mm: number }> {
-    const group = roiGroupsRef.current[which];
-    const out: Array<{
-      series_id: string;
-      center_lps: [number, number, number];
-      radius_mm: number;
-    }> = [];
-    panes.forEach((p, i) => {
-      const m = group[i];
-      if (!m) return;
-      const live = (paneMeasurementsRef.current[i] ?? []).find(
-        (dm) => dm.markerId === m.markerId && (dm.worldPoints?.length ?? 0) >= 2,
-      );
-      const pts = (live?.worldPoints ?? m.worldPoints) as [number, number, number][];
-      if (!pts || pts.length < 2) return;
-      const c = pts[0];
-      const e = pts[1];
-      const r = Math.hypot(e[0] - c[0], e[1] - c[1], e[2] - c[2]);
-      if (!(r > 0)) return;
-      out.push({ series_id: p.series_id, center_lps: [c[0], c[1], c[2]], radius_mm: r });
-    });
-    return out;
-  }
-
-  function samePoints(a: [number, number, number][], b: [number, number, number][]): boolean {
-    if (a.length !== b.length) return false;
-    for (let i = 0; i < a.length; i++) {
-      for (let j = 0; j < 3; j++) if (Math.abs(a[i][j] - b[i][j]) > 1e-3) return false;
-    }
-    return true;
+  // (live drag if re-centred, else the stored point). Delegates to the unit-
+  // tested pure helper.
+  function phaseRoisFromGroup(which: "lesion" | "parenchyma") {
+    return phaseRoisFromGroupPure(
+      roiGroupsRef.current[which],
+      panes.map((p) => ({ series_id: p.series_id })),
+      paneMeasurementsRef.current,
+    );
   }
 
   // POST the wash-out, sampling EACH phase at its own (independently adjusted)
@@ -1130,29 +1111,30 @@ function ContrastViewerInner() {
   //     replacing only this phase's box of that target (not the other phases').
   function handleMeasurements(ms: DrawnMeasurement[], paneIndex: number) {
     if (!studyId) return;
+    const seriesId = panes[paneIndex]?.series_id;
+    if (!seriesId) return;
+    // Cornerstone fires annotation events on the GLOBAL target, so this callback
+    // receives EVERY pane's annotations. Keep only the ones drawn on THIS phase
+    // (matched by its synthetic FrameOfReference) — otherwise a circle drawn on
+    // the delayed phase gets captured by the unenhanced pane and the boxes
+    // cross-contaminate / vanish (the radiologist's bug). Verified in
+    // contrastRois.test.ts.
+    const own = ownMeasurements(ms, seriesId);
     let dragged = false;
-    for (const m of ms) {
+    for (const m of own) {
       if (!m.markerId || (m.worldPoints?.length ?? 0) < 2) continue;
       for (const which of ["lesion", "parenchyma"] as const) {
         const member = roiGroupsRef.current[which][paneIndex];
         if (member?.markerId !== m.markerId) continue;
         const wp = m.worldPoints as [number, number, number][];
-        if (samePoints(member.worldPoints, wp)) continue;
+        if (samePointsPure(member.worldPoints, wp)) continue;
         member.worldPoints = wp;
         updateSourceCapture(which, wp);
         dragged = true;
       }
     }
     if (dragged) debouncedRunWashout();
-    const fresh = [...ms]
-      .reverse()
-      .find(
-        (m) =>
-          (m.csToolName === "CircleROI" || m.tool === "sphere") &&
-          (m.worldPoints?.length ?? 0) >= 2 &&
-          m.markerId != null &&
-          !seenMarkersRef.current.has(m.markerId),
-      );
+    const fresh = newestFreshCircle(own, seenMarkersRef.current);
     if (!fresh?.markerId || !fresh.worldPoints) return;
     const target = region === "liver" ? roiTarget : "lesion";
     captureNewRoi(
