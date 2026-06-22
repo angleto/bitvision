@@ -110,6 +110,21 @@ CRON_JOBS = [
         minute={4, 9, 14, 19, 24, 29, 34, 39, 44, 49, 54, 59},
         run_at_startup=False,
     ),
+    # Self-healing Visual Search indexer (task: "indicizzazione automatica").
+    # Enqueues embed_series for any embeddable image series still missing a
+    # biomedclip-v1 vector, so /api/similar-to indexing converges with NO
+    # manual backfill. The import-time enqueue (services.ingest_jobs) is
+    # best-effort and was silently lost on a Redis blip / workers-down; this
+    # cron is the sweep that heals it. Bounded per tick + job-id deduped, so
+    # it is cheap when nothing is missing and never piles duplicates (see
+    # reconcile_embeddings). Minute 0/5/.. is the only free 5-minute slot,
+    # clear of the other crons' minutes. run_at_startup so a fresh deploy /
+    # large import starts draining immediately instead of waiting a tick.
+    cron(
+        "bvworkers.tasks.reconcile_embeddings.reconcile_missing_embeddings",
+        minute={0, 5, 10, 15, 20, 25, 30, 35, 40, 45, 50, 55},
+        run_at_startup=True,
+    ),
 ]
 
 

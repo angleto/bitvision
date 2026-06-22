@@ -43,6 +43,7 @@ from bvworkers.tasks.prefetch_series import prefetch_series
 from bvworkers.tasks.propagate_lesion import propagate_lesion
 from bvworkers.tasks.public_contribution import promote_submission
 from bvworkers.tasks.purge_documents import purge_expired_documents
+from bvworkers.tasks.reconcile_embeddings import reconcile_missing_embeddings
 from bvworkers.tasks.registration import register_series
 from bvworkers.tasks.reindex_batch import reindex_batch
 from bvworkers.tasks.review_checks import run_review_checks
@@ -73,6 +74,7 @@ FUNCTIONS = [
     export_patient_zip,
     export_study_zip,
     prefetch_series,
+    reconcile_missing_embeddings,
     reindex_batch,
     generate_summary,
     autotag_target,
