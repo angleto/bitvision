@@ -74,19 +74,30 @@ export type PaneZGeom = {
   crossZ?: number | null;
 };
 
-/** Map a box's world handle points from a source phase into a target phase by
- *  the SAME slice index: keep the in-plane (x, y), shift Z to the target's
- *  world-Z at that index (z_q = origin_q + k * spacing_q, k from the source).
- *  Falls back to the target's synced crosshair Z, then the drawn Z. */
+/** Map a box's world handle points from a source phase into a target phase,
+ *  keeping the in-plane (x, y) and choosing the target Z.
+ *
+ *  CRITICAL for the copy to be VISIBLE: a CircleROI is an in-plane annotation
+ *  and Cornerstone only renders it when it sits on the viewport's CURRENT slice
+ *  plane. The index-mapped Z (origin_q + k*spacing_q) uses a fractional k, so it
+ *  lands BETWEEN slices and the copy never draws (the bug: "I don't see the ROIs
+ *  on the views they were copied to"). The panes are index-synced, so the
+ *  target's currently displayed slice (``crossZ`` = its crosshair world-Z) is
+ *  the SAME anatomy AND exactly on the rendered plane. So prefer crossZ; fall
+ *  back to the index map, then the drawn Z. */
 export function propagateZWorld(src: PaneZGeom, tgt: PaneZGeom, worldPoints: Vec3[]): Vec3[] {
   const cz = worldPoints[0]?.[2] ?? 0;
-  const k =
-    src.originZ != null && src.spacingZ != null && src.spacingZ !== 0
-      ? (cz - src.originZ) / src.spacingZ
-      : null;
   let zq = cz;
-  if (k != null && tgt.originZ != null && tgt.spacingZ != null) zq = tgt.originZ + k * tgt.spacingZ;
-  else if (tgt.crossZ != null) zq = tgt.crossZ;
+  if (tgt.crossZ != null) {
+    zq = tgt.crossZ;
+  } else {
+    const k =
+      src.originZ != null && src.spacingZ != null && src.spacingZ !== 0
+        ? (cz - src.originZ) / src.spacingZ
+        : null;
+    if (k != null && tgt.originZ != null && tgt.spacingZ != null)
+      zq = tgt.originZ + k * tgt.spacingZ;
+  }
   return worldPoints.map((wp) => [wp[0], wp[1], zq] as Vec3);
 }
 
