@@ -1597,3 +1597,14 @@ dialog.care-phase-inner-editor::backdrop {
     filter: drop-shadow(0 0 4px rgba(251, 146, 60, 0.85));
   }
 }
+
+/* Hand (grab) cursor on a Cornerstone viewport while the pan tool is active.
+   ``!important`` beats the cursor Cornerstone writes inline on the element. */
+.cs-pan-cursor,
+.cs-pan-cursor * {
+  cursor: grab !important;
+}
+.cs-pan-cursor:active,
+.cs-pan-cursor *:active {
+  cursor: grabbing !important;
+}

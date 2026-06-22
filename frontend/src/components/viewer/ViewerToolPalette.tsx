@@ -6,7 +6,7 @@
 // ``activeTool`` contract that CornerstoneMPRLayout already understands.
 
 import { useTranslations } from "next-intl";
-import { TOOL_BUTTONS, TOOL_HINT_KEYS, type Tool } from "./toolTypes";
+import { TOOL_BUTTONS, TOOL_HINT_KEYS, TOOL_ICONS, type Tool } from "./toolTypes";
 
 export interface ViewerToolPaletteProps {
   activeTool: Tool | null;
@@ -40,19 +40,26 @@ export default function ViewerToolPalette({
   return (
     <div>
       <div style={{ display: "flex", gap: "0.3rem", flexWrap: "wrap" }}>
-        {buttons.map(([t, labelKey]) => (
-          <button
-            key={t}
-            type="button"
-            style={btnStyle}
-            className={activeTool === t ? "viewer-btn viewer-btn--active" : "viewer-btn"}
-            aria-pressed={activeTool === t}
-            // Click the active button = deselect (default crosshair-only mode).
-            onClick={() => onChange(activeTool === t ? null : t)}
-          >
-            {tv(labelKey)}
-          </button>
-        ))}
+        {buttons.map(([t, labelKey]) => {
+          const icon = TOOL_ICONS[t];
+          return (
+            <button
+              key={t}
+              type="button"
+              style={icon ? { ...btnStyle, lineHeight: 1 } : btnStyle}
+              className={activeTool === t ? "viewer-btn viewer-btn--active" : "viewer-btn"}
+              aria-pressed={activeTool === t}
+              // Show the glyph for icon tools (pan = hand), the word otherwise.
+              // The label stays the accessible name + tooltip either way.
+              aria-label={tv(labelKey)}
+              title={tv(labelKey)}
+              // Click the active button = deselect (default crosshair-only mode).
+              onClick={() => onChange(activeTool === t ? null : t)}
+            >
+              {icon ? <span aria-hidden="true">{icon}</span> : tv(labelKey)}
+            </button>
+          );
+        })}
         {onClearAll && (
           <button
             type="button"
