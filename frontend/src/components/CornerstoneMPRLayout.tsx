@@ -2137,6 +2137,20 @@ const CornerstoneMPRLayout = forwardRef<MPRLayoutHandle, ExtendedProps>(
         }
       }
       engine.renderViewports([vpAxial, vpSag, vpCor]);
+      // A raw addAnnotation + renderViewports does NOT always repaint the SVG
+      // annotation layer (it has its own rendering engine). Trigger it
+      // explicitly so a PROGRAMMATICALLY injected ROI (e.g. the contrast
+      // viewer's propagated per-phase copies) actually appears, not just the
+      // one drawn by hand on the source pane.
+      try {
+        (
+          csTools.utilities as unknown as {
+            triggerAnnotationRenderForViewportIds?: (ids: string[]) => void;
+          }
+        ).triggerAnnotationRenderForViewportIds?.([vpAxial, vpSag, vpCor]);
+      } catch {
+        /* render-trigger surface drifted across CS Tools versions — non-fatal */
+      }
     }, [incomingMeasurements, volumeId]);
 
     // Marker fade across slices: hide annotations whose anchor world
