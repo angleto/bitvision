@@ -107,13 +107,12 @@ describe("newestFreshCircle", () => {
 });
 
 describe("propagateZWorld — same-slice copy across phases", () => {
-  it("keeps in-plane x/y and shifts Z to the target phase's world-Z at the same slice", () => {
-    // Source (basale): origin z=-660, spacing 2.5 -> a box at z=-300 is slice
-    // k = (−300 − (−660)) / 2.5 = 144.
-    const src = { originZ: -660, spacingZ: 2.5 };
-    // Target (arteriosa) shifted: origin z=-600, same spacing -> slice 144 is
-    // world z = −600 + 144*2.5 = −240.
-    const tgt = { originZ: -600, spacingZ: 2.5 };
+  it("lands the copy on the target's DISPLAYED slice (crossZ) so it renders", () => {
+    // The target pane shows slice z=-240 (its crosshair). The copy must sit on
+    // that exact plane to draw — a fractional index-mapped Z would fall between
+    // slices and the CircleROI would be invisible (the copy-to-all bug).
+    const src = { originZ: -660, spacingZ: 2.5, crossZ: -300 };
+    const tgt = { originZ: -600, spacingZ: 2.5, crossZ: -240 };
     const wp: Vec3[] = [
       [10, 20, -300],
       [13, 20, -300],
@@ -121,18 +120,31 @@ describe("propagateZWorld — same-slice copy across phases", () => {
     const out = propagateZWorld(src, tgt, wp);
     expect(out[0][0]).toBe(10);
     expect(out[0][1]).toBe(20);
-    expect(out[0][2]).toBeCloseTo(-240, 6);
-    expect(out[1][2]).toBeCloseTo(-240, 6);
-    // Radius (in-plane distance) is preserved.
+    expect(out[0][2]).toBe(-240); // the displayed slice, not a between-slices Z
+    expect(out[1][2]).toBe(-240);
     expect(circleRadiusMm(out)).toBeCloseTo(3, 6);
   });
 
-  it("falls back to the synced crosshair Z when geometry is missing", () => {
-    const out = propagateZWorld({}, { crossZ: -123 }, [
+  it("falls back to the index-mapped Z when the target crosshair is unknown", () => {
+    // No crossZ -> origin/spacing map: slice k=144 in the source maps to
+    // world z = −600 + 144*2.5 = −240 in the target.
+    const out = propagateZWorld(
+      { originZ: -660, spacingZ: 2.5 },
+      { originZ: -600, spacingZ: 2.5 },
+      [
+        [10, 20, -300],
+        [13, 20, -300],
+      ],
+    );
+    expect(out[0][2]).toBeCloseTo(-240, 6);
+  });
+
+  it("falls back to the drawn Z when nothing about the target is known", () => {
+    const out = propagateZWorld({}, {}, [
       [1, 2, -300],
       [4, 2, -300],
     ]);
-    expect(out[0][2]).toBe(-123);
+    expect(out[0][2]).toBe(-300);
   });
 });
 
