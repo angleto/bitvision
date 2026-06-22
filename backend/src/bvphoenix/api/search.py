@@ -26,6 +26,7 @@ from bvphoenix.auth import optional_user
 from bvphoenix.db.models import Embedding, ImagingStudy, Series, Tag, User
 from bvphoenix.db.session import get_db
 from bvphoenix.middleware.problem_details import problem
+from bvphoenix.services.embedding_status import indexed_study_ids
 from bvphoenix.services.mmr import MMRCandidate, mmr_rerank
 from bvphoenix.services.permissions import (
     READ_METADATA,
@@ -82,6 +83,14 @@ async def search(
     facets: bool = Query(
         False,
         description="If true, compute per-field counts over the filtered set.",
+    ),
+    include_index_status: bool = Query(
+        False,
+        description=(
+            "If true, set ``indexed`` on each item (has a BiomedCLIP image "
+            "vector → can anchor /similar-to). One extra index-backed query "
+            "over the page. Used by the Visual Search picker."
+        ),
     ),
     limit: int = Query(50, ge=1, le=200),
     offset: int = Query(0, ge=0),
@@ -212,6 +221,14 @@ async def search(
             out_items.append(study_out)
     else:
         out_items = [StudyOut.model_validate(s) for s in items_result.scalars().all()]
+
+    if include_index_status and out_items:
+        # One bounded, index-backed query over just this page's study ids —
+        # cheaper than a correlated EXISTS per row and it never perturbs the
+        # main query's plan. Opt-in so the general /search path pays nothing.
+        indexed = await indexed_study_ids(db, [s.id for s in out_items])
+        for item in out_items:
+            item.indexed = item.id in indexed
 
     facet_payload = await _compute_facets(db, filtered_ids_subq) if facets else None
 

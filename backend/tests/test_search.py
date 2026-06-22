@@ -262,6 +262,73 @@ async def test_similar_to_filters_by_modality(
     app.dependency_overrides.clear()
 
 
+# ---- indexed flag (Visual Search picker) -----------------------------------
+
+
+@pytest.mark.asyncio
+async def test_search_include_index_status_flags_embedded(
+    db_session, make_user, make_study, make_embedding
+) -> None:
+    """``/search?include_index_status=true`` sets ``indexed`` per study:
+    True iff the study has an embedded image series. Without the opt-in
+    param the flag stays None (the general search path computes nothing)."""
+    user = await make_user()
+    marker = uuid.uuid4().hex[:8]
+    study_yes, series_yes = await make_study(user, description=f"embedded-{marker}")
+    study_no, _series_no = await make_study(user, description=f"bare-{marker}")
+    await make_embedding(series_yes)
+
+    client = await _client_for(db_session, user)
+    try:
+        r = await client.get(
+            "/api/search", params={"q": marker, "include_index_status": "true"}
+        )
+        assert r.status_code == 200, r.text
+        by_id = {s["id"]: s for s in r.json()["items"]}
+        assert by_id[str(study_yes.id)]["indexed"] is True
+        assert by_id[str(study_no.id)]["indexed"] is False
+
+        # Default: not computed -> None, so dead-end marking is strictly opt-in.
+        r2 = await client.get("/api/search", params={"q": marker})
+        assert r2.status_code == 200, r2.text
+        assert all(s.get("indexed") is None for s in r2.json()["items"])
+    finally:
+        await client.aclose()
+        app.dependency_overrides.clear()
+
+
+@pytest.mark.asyncio
+async def test_study_detail_reports_series_indexed(
+    db_session, make_user, make_study, make_embedding
+) -> None:
+    """``GET /studies/{id}`` flags each series' embedding state and the
+    study-level ``indexed`` (any series embedded), so the picker can disable
+    a dead-end exemplar before the user picks it."""
+    user = await make_user()
+    study, series = await make_study(user, description="detail-indexed")
+    await make_embedding(series)
+    bare_study, _bare_series = await make_study(user, description="detail-bare")
+
+    client = await _client_for(db_session, user)
+    try:
+        r = await client.get(f"/api/studies/{study.id}")
+        assert r.status_code == 200, r.text
+        body = r.json()
+        assert body["indexed"] is True
+        assert any(
+            s["id"] == str(series.id) and s["indexed"] is True for s in body["series"]
+        )
+
+        r2 = await client.get(f"/api/studies/{bare_study.id}")
+        assert r2.status_code == 200, r2.text
+        body2 = r2.json()
+        assert body2["indexed"] is False
+        assert all(s["indexed"] is False for s in body2["series"])
+    finally:
+        await client.aclose()
+        app.dependency_overrides.clear()
+
+
 # ---- Embedding model -------------------------------------------------------
 
 
