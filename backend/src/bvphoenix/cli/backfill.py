@@ -242,10 +242,12 @@ def chunks(
 
 
 # Image-embedding backfill ----------------------------------------------
-# ``bvphoenix-import`` only enqueues ``pack_volume`` for imported series,
-# never ``embed_series`` — so bulk-imported studies have no BiomedCLIP
-# image vector and similarity search (``/api/similar-to``) finds nothing.
-# This command backfills those vectors. ``embed_series`` is idempotent.
+# Every ingest path now enqueues ``embed_series`` at import time via
+# ``services.ingest_jobs.enqueue_postprocess_jobs`` (incl. ``bvphoenix-
+# import``), and the worker cron ``reconcile_missing_embeddings`` heals any
+# miss automatically. This command stays as the explicit, one-shot manual
+# trigger (CI/ops, or to force a full re-embed): it enqueues ``embed_series``
+# for embeddable image series, idempotently (skips series already vectored).
 _IMAGE_MODEL_ID = "biomedclip-v1"  # what workers/embed_series.py MODEL_ID writes
 
 
