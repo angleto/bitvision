@@ -3787,6 +3787,12 @@ const CornerstoneMPRLayout = forwardRef<MPRLayoutHandle, ExtendedProps>(
         >
           <div
             ref={ref}
+            // Hand (grab) cursor while the pan tool is active — the universal
+            // "drag to move" viewer affordance, on the image itself. ``!important``
+            // in the CSS rule beats the cursor Cornerstone sets inline on the
+            // element. Shared by every viewer that uses this layout, so they feel
+            // like one system.
+            className={activeTool === "pan" ? "cs-pan-cursor" : undefined}
             style={{
               position: "absolute",
               inset: 0,

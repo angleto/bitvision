@@ -40,6 +40,14 @@ export const TOOL_BUTTONS: readonly [Tool, string][] = [
   ["measure-lens", "toolLens"],
 ];
 
+// Glyph icons for tools that read better as a symbol than a word — the pan
+// "hand" is the universal viewer affordance (matches the in-viewport ✋ toggle
+// in CornerstoneMPRLayout), so both viewers show the SAME hand for panning
+// instead of a text button. Tools without an entry render their text label.
+export const TOOL_ICONS: Partial<Record<Tool, string>> = {
+  pan: "✋",
+};
+
 // active-tool -> i18n hint key (``viewer`` namespace).
 export const TOOL_HINT_KEYS: Record<string, string> = {
   none: "hintNone",
