@@ -8,6 +8,7 @@ from fastapi import APIRouter
 
 from bvphoenix.api.studies import _shared
 from bvphoenix.api.studies._shared import *  # noqa: F403
+from bvphoenix.services.embedding_status import embedded_series_ids
 
 router = APIRouter()
 
@@ -289,10 +290,18 @@ async def get_study(
         .scalars()
         .all()
     )
-    return StudyDetailOut(
-        **StudyOut.model_validate(study).model_dump(),
-        series=[SeriesOut.model_validate(s) for s in series],
-    )
+    # Mark which series carry a BiomedCLIP vector so the Visual Search
+    # picker can disable "use as reference" on dead-end exemplars. One
+    # bounded, index-backed query; the study is "indexed" iff any series is.
+    embedded = await embedded_series_ids(db, [s.id for s in series])
+    series_out: list[SeriesOut] = []
+    for s in series:
+        so = SeriesOut.model_validate(s)
+        so.indexed = so.id in embedded
+        series_out.append(so)
+    study_out = StudyOut.model_validate(study)
+    study_out.indexed = bool(embedded)
+    return StudyDetailOut(**study_out.model_dump(), series=series_out)
 
 
 @router.get("/studies/{study_id}/fusion-candidates", response_model=list[SeriesOut])

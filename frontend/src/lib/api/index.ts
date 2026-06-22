@@ -225,6 +225,11 @@ export interface Study {
   // server-side on StudyOut so the FE does not need the platform-owner
   // UUID. Drives the "OpenData" filter distinction in /search.
   is_opendata?: boolean;
+  // Whether the study has ≥1 image series with a BiomedCLIP vector, i.e.
+  // /similar-to can anchor on it. Present only when the endpoint computes
+  // it (/search?include_index_status=true, /studies/{id}); undefined =
+  // unknown (don't render a badge). Drives the Visual Search picker.
+  indexed?: boolean | null;
 }
 
 // -------- pathology whole-slide images --------
@@ -336,6 +341,10 @@ export interface Series {
   // WindowCenter / WindowWidth tags; null when absent.
   suggested_wc?: number | null;
   suggested_ww?: number | null;
+  // Whether this series carries a BiomedCLIP vector (can anchor a visual
+  // search). Present only on /studies/{id}; undefined = unknown. A
+  // non-image modality (SR/SEG/...) is never indexed.
+  indexed?: boolean | null;
 }
 
 export interface StudyDetail extends Study {

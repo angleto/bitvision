@@ -331,6 +331,10 @@ export interface SearchParams extends StudyListParams {
   // modality / body_part / year / top_tags). Used to populate
   // the SearchSidebar chip palette.
   facets?: boolean;
+  // When true each returned Study carries ``indexed`` (has a BiomedCLIP
+  // image vector → can anchor /similar-to). Used by the Visual Search
+  // picker; off by default so the general search path pays nothing.
+  include_index_status?: boolean;
   limit?: number;
   offset?: number;
 }

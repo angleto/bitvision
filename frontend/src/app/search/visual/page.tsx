@@ -63,6 +63,45 @@ function isEmbeddableModality(modality: string | null | undefined): boolean {
  */
 type Reference = { kind: "study"; study: Study } | { kind: "series"; study: Study; series: Series };
 
+/**
+ * Status pill for whether an exemplar carries a BiomedCLIP image vector,
+ * i.e. whether ``/similar-to`` can anchor on it. ``indexed == null`` (older
+ * backend, or an endpoint that didn't compute it) renders nothing so we
+ * never show a misleading state. ``false`` is the dead-end the picker now
+ * surfaces up front instead of after a pick.
+ */
+function IndexBadge({ indexed }: { indexed?: boolean | null }) {
+  if (indexed == null) return null;
+  return indexed ? (
+    <span
+      className="badge"
+      style={{ background: "#e7f5ec", color: "#1a7f43", borderColor: "#bce3cb" }}
+      title="Has an image embedding — can anchor a visual search"
+    >
+      Indexed
+    </span>
+  ) : (
+    <span
+      className="badge"
+      style={{ background: "#fff7ef", color: "#9a5b00", borderColor: "#fcd9b3" }}
+      title="No image vector yet — can't anchor a visual search until it's embedded"
+    >
+      Not indexed
+    </span>
+  );
+}
+
+// A reference can only anchor a similar-to search if it has an image vector.
+// ``indexed === false`` is an explicit dead-end (embeddable but not embedded
+// yet, or non-pixel only); ``true`` / ``undefined`` stay pickable (undefined =
+// unknown, so we don't block on a backend that didn't compute the flag).
+function isDeadEnd(indexed?: boolean | null): boolean {
+  return indexed === false;
+}
+
+const NOT_INDEXED_HINT =
+  "No image vector yet — open it to inspect, or run the embedding backfill, then retry.";
+
 export default function VisualSearchPage() {
   const [reference, setReference] = useState<Reference | null>(null);
   const [modality, setModality] = useState<ModalityFilter>("");
@@ -110,6 +149,10 @@ function ReferencePicker({ onPick }: { onPick: (r: Reference) => void }) {
           q: q.trim() || undefined,
           modality: modality || undefined,
           body_part: bodyPart.trim() || undefined,
+          // Ask the backend to flag which studies actually carry an image
+          // vector, so the row can mark/disable dead-end exemplars instead
+          // of letting the user discover "not indexed" only after picking.
+          include_index_status: true,
           limit: 50,
         });
         if (!cancelled) {
@@ -273,9 +316,33 @@ function ReferenceRow({
             {study.study_date ?? "—"} · UID {study.study_instance_uid.slice(0, 36)}…
           </div>
         </button>
-        <button type="button" onClick={() => onPick({ kind: "study", study })}>
-          Use this study
-        </button>
+        <div style={{ display: "flex", alignItems: "center", gap: "0.4rem", flexShrink: 0 }}>
+          <IndexBadge indexed={study.indexed} />
+          {/* Open the study detail page to inspect before anchoring on it.
+              New tab so the picker + any in-progress search state survives
+              the round-trip (the user typically opens a few candidates,
+              then comes back to pick one). */}
+          <Link
+            href={`/studies/${study.id}`}
+            target="_blank"
+            rel="noopener noreferrer"
+            className="ghost"
+            style={{ fontSize: "0.85rem", padding: "0.3rem 0.6rem", textDecoration: "none" }}
+            title="Open study details in a new tab"
+          >
+            Open study
+          </Link>
+          {/* Disabled on a dead-end exemplar so the user can't pick something
+              /similar-to would reject; the badge + tooltip say why. */}
+          <button
+            type="button"
+            onClick={() => onPick({ kind: "study", study })}
+            disabled={isDeadEnd(study.indexed)}
+            title={isDeadEnd(study.indexed) ? NOT_INDEXED_HINT : undefined}
+          >
+            Use this study
+          </button>
+        </div>
       </div>
 
       {expanded && (
@@ -337,16 +404,50 @@ function SeriesPickCard({
         seriesId={series.id}
         sliceCount={Math.max(1, series.received_instance_count)}
       />
-      <div style={{ marginTop: "0.4rem", fontSize: "0.82rem" }}>
-        <strong>{series.modality ?? "?"}</strong>
-        {series.series_description ? ` · ${series.series_description}` : ""}
+      <div
+        style={{
+          marginTop: "0.4rem",
+          fontSize: "0.82rem",
+          display: "flex",
+          alignItems: "center",
+          gap: "0.35rem",
+          flexWrap: "wrap",
+        }}
+      >
+        <span>
+          <strong>{series.modality ?? "?"}</strong>
+          {series.series_description ? ` · ${series.series_description}` : ""}
+        </span>
+        <IndexBadge indexed={series.indexed} />
       </div>
       <div className="meta" style={{ fontSize: "0.75rem" }}>
         #{series.series_number ?? "?"} · {series.received_instance_count} img
       </div>
-      <button type="button" onClick={onPick} style={{ marginTop: "0.4rem", fontSize: "0.82rem" }}>
-        Use this series
-      </button>
+      <div style={{ display: "flex", gap: "0.3rem", marginTop: "0.4rem" }}>
+        {/* Disabled on a not-yet-embedded series so it can't anchor a search
+            that /similar-to would reject; "Open viewer" stays available. */}
+        <button
+          type="button"
+          onClick={onPick}
+          disabled={isDeadEnd(series.indexed)}
+          title={isDeadEnd(series.indexed) ? NOT_INDEXED_HINT : undefined}
+          style={{ fontSize: "0.82rem" }}
+        >
+          Use this series
+        </button>
+        {/* Open the series in the MPR/2D viewer to inspect the pixels before
+            anchoring a visual search on it. New tab to preserve the picker. */}
+        <Link
+          href={`/viewer/series/${series.id}`}
+          target="_blank"
+          rel="noopener noreferrer"
+          className="ghost"
+          style={{ fontSize: "0.8rem", padding: "0.2rem 0.5rem", textDecoration: "none" }}
+          title="Open series in viewer (new tab)"
+        >
+          Open viewer
+        </Link>
+      </div>
     </div>
   );
 }
@@ -506,8 +607,8 @@ function NotIndexedCard({
       </strong>
       <p className="meta" style={{ marginTop: "0.4rem", marginBottom: "0.4rem" }}>
         {onUseStudy
-          ? "Visual search compares image pixels, and this series (a Structured Report, dose record, or segmentation) carries none. Search the whole study instead — it anchors on the first image series automatically."
-          : "Visual search runs on image embeddings produced by a background worker after upload. Indexing usually takes a few minutes. If the study is older than that, it may not contain pixel data a model can embed (for example, Structured Report-only series)."}
+          ? "Visual search compares image pixels, and this series (a Structured Report, dose record, or segmentation) carries none. Search the whole study instead: it anchors on the first image series automatically."
+          : "Visual search runs on image embeddings produced by a background worker. This study has no image vector yet. Either it was imported recently and the embedder hasn't reached it (bulk imports are embedded by a backfill pass that can lag the import), or it contains only non-pixel series (Structured Reports, segmentations) that can't be embedded."}
       </p>
       <div style={{ display: "flex", gap: "0.5rem", marginTop: "0.5rem" }}>
         {onUseStudy && (

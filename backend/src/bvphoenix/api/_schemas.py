@@ -50,6 +50,12 @@ class StudyOut(BaseModel):
     # was supplied, so callers can show *why* a result matched. None on
     # browse/listing responses.
     snippet: str | None = None
+    # Whether the study has at least one image series carrying a BiomedCLIP
+    # vector, i.e. ``/api/similar-to`` can anchor on it. ``None`` means "not
+    # computed for this response" (the default on most endpoints); only
+    # ``/search?include_index_status=true`` and ``/studies/{id}`` populate
+    # it. Drives the Visual Search picker's indexed/not-indexed badge.
+    indexed: bool | None = None
 
     @classmethod
     def model_validate(cls, obj, *args, **kwargs):  # type: ignore[override]
@@ -89,6 +95,10 @@ class SeriesOut(BaseModel):
     # Left as ``None`` on list endpoints to keep them cheap.
     suggested_wc: float | None = None
     suggested_ww: float | None = None
+    # Whether this series carries a BiomedCLIP vector (can anchor a visual
+    # search). ``None`` = not computed for this response; ``/studies/{id}``
+    # populates it. Note: a non-image modality (SR/SEG/...) is never indexed.
+    indexed: bool | None = None
 
 
 class InstanceOut(BaseModel):
