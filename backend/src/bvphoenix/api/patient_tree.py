@@ -1912,6 +1912,13 @@ async def create_patient_folder(
         name=body.name,
         owner_subject_id=user.subject_id,
         parent_folder_id=body.parent_folder_id,
+        # Scope by the patient_id column, not only the 'patient' marker
+        # FolderItem below: export + list_folders filter on this column,
+        # so leaving it NULL produced orphan folders invisible to the
+        # fascicolo tree. The DB trigger (0037) also enforces this, but a
+        # top-level patient folder (parent_folder_id=None) has no parent to
+        # inherit from, so set it explicitly here.
+        patient_id=patient.id,
         description=description,
     )
     db.add(folder)
