@@ -36,6 +36,7 @@ from bvmcp.tools import documents as documents_tools
 from bvmcp.tools import documents_upload as documents_upload_tools
 from bvmcp.tools import embeddings_admin as embeddings_admin_tools
 from bvmcp.tools import entities as entities_tools
+from bvmcp.tools import exports as exports_tools
 from bvmcp.tools import external_identifiers as external_identifiers_tools
 from bvmcp.tools import findings as findings_tools
 from bvmcp.tools import folders as folders_tools
@@ -98,6 +99,7 @@ TOOL_MODULES = (
     notifications_tools,
     documents_tools,
     documents_upload_tools,
+    exports_tools,
     external_identifiers_tools,
     provenance_tools,
     report_contents_tools,

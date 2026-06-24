@@ -52,6 +52,7 @@ from bvphoenix.services.documents.ingest_blob import (
     ingest_document_blob,
 )
 from bvphoenix.services.download_tokens import resolve_download_user
+from bvphoenix.services.file_ext import ensure_extension
 from bvphoenix.services.permissions import (
     DOWNLOAD_DERIVATIVE,
     READ_METADATA,
@@ -345,7 +346,11 @@ async def download_document(
         request=request,
         bucket=settings.s3_bucket_raw,
         key=doc.file_s3_key,
-        filename=doc.title or "document",
+        filename=ensure_extension(
+            doc.title or "document",
+            content_type=doc.file_content_type,
+            s3_key=doc.file_s3_key,
+        ),
         fallback_content_type=doc.file_content_type or "application/octet-stream",
     )
 
@@ -415,7 +420,11 @@ async def download_document_file(
         raise HTTPException(status_code=404, detail="file not found")
 
     settings = get_settings()
-    filename = row.original_filename or f"file-{row.sequence:03d}.bin"
+    filename = ensure_extension(
+        row.original_filename or f"file-{row.sequence:03d}",
+        content_type=row.file_content_type,
+        s3_key=row.file_s3_key,
+    )
     return await proxy_s3_object(
         request=request,
         bucket=settings.s3_bucket_raw,

@@ -127,9 +127,7 @@ async def export_patient_zip(
                 await db.commit()
                 return {"status": "error", "reason": "user not found"}
 
-            if not await can_patient(
-                db, user=user, action=READ_METADATA, patient=patient
-            ):
+            if not await can_patient(db, user=user, action=READ_METADATA, patient=patient):
                 await jobs_service.mark_failed(
                     db,
                     jid,
@@ -142,9 +140,7 @@ async def export_patient_zip(
                 return {"status": "error", "reason": "permission denied"}
 
             includes = set(canonical_input.get("includes") or [])
-            await jobs_service.update_progress(
-                db, jid, stage="building_zip"
-            )
+            await jobs_service.update_progress(db, jid, stage="building_zip")
             await db.commit()
 
             # Streaming pipeline: stream-zip iterator → S3 multipart
@@ -162,9 +158,7 @@ async def export_patient_zip(
                 AsyncSession as _AsyncSession,  # local — not exported
             )
 
-            async def _progress(
-                done: int, total: int, stage: str
-            ) -> None:
+            async def _progress(done: int, total: int, stage: str) -> None:
                 async with _AsyncSession(engine, expire_on_commit=False) as ps:
                     await set_current_subject(ps, SERVICE_SUBJECT)
                     await jobs_service.update_progress(
@@ -185,9 +179,13 @@ async def export_patient_zip(
             scope_study_ids = (
                 {uuid.UUID(x) for x in raw_studies} if raw_studies is not None else None
             )
-            scope_document_ids = (
-                {uuid.UUID(x) for x in raw_docs} if raw_docs is not None else None
-            )
+            scope_document_ids = {uuid.UUID(x) for x in raw_docs} if raw_docs is not None else None
+
+            # ``tree`` mirrors the patient's curated Folder structure
+            # with human-readable names; ``flat`` is the legacy
+            # UUID-keyed layout. Stored in canonical_input so it is part
+            # of the dedup hash (a flat and a tree export never collide).
+            layout = canonical_input.get("layout") or "flat"
 
             try:
                 bucket, key, manifest, size_bytes = await stream_export_to_s3(
@@ -199,6 +197,7 @@ async def export_patient_zip(
                     on_progress=_progress,
                     scope_study_ids=scope_study_ids,
                     scope_document_ids=scope_document_ids,
+                    layout=layout,
                 )
             except Exception as exc:
                 log.exception("zip build/upload failed for job %s", jid)
@@ -214,9 +213,7 @@ async def export_patient_zip(
                 return {"status": "error", "reason": "build failed"}
 
             result_uri = f"s3://{bucket}/{key}"
-            await jobs_service.mark_succeeded(
-                db, jid, result_uri=result_uri
-            )
+            await jobs_service.mark_succeeded(db, jid, result_uri=result_uri)
             await db.commit()
 
         # Audit row goes through its own session inside log_action;

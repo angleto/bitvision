@@ -177,6 +177,20 @@ SCOPE_CATALOG: tuple[ScopeDef, ...] = (
         "Mintaging a share exposes patient data to the outside.",
         sensitive=True,
     ),
+    # --- Fascicolo / study / folder export + tokenised download ---------------
+    # Enqueues a Job that bundles a patient's records (studies + DICOM +
+    # reports + documents) into a downloadable ZIP and mints the
+    # single-use download token that streams it off-platform. Sensitive:
+    # the artifact is the patient's full PHI, including raw pixel data,
+    # and the token is a bearer capability to fetch it. The backend
+    # re-gates every enqueue on owner/admin + the agent's patient scope,
+    # and download:dicom is still required for the pixel branch.
+    ScopeDef(
+        "fascicolo:export",
+        "Export a patient / study / folder Health Record to a ZIP and mint "
+        "the one-time download token. Egresses full PHI including DICOM.",
+        sensitive=True,
+    ),
     # --- Annotations + markers ------------------------------------------------
     ScopeDef("annotations:read", "Read in-viewer markers / annotations"),
     ScopeDef("annotations:write", "Create / update / delete in-viewer markers + annotations"),
@@ -457,6 +471,18 @@ TOOL_SCOPE: dict[str, str] = {
     "list_share_links": "sharing:write",
     "update_share_link": "sharing:write",
     "revoke_share_link": "sharing:write",
+    # --- Fascicolo export + tokenised download --------------------------
+    # The four enqueue tools + the download-token mint egress full PHI,
+    # so they ride the sensitive ``fascicolo:export`` scope. ``get_job``
+    # is a read-only status poll (ownership re-gated server-side, 404 on
+    # foreign jobs) and rides the lowest-privilege ``patients:read`` so
+    # any session that kicked off an export can watch it finish.
+    "export_fascicolo": "fascicolo:export",
+    "export_study": "fascicolo:export",
+    "export_folder": "fascicolo:export",
+    "bulk_download": "fascicolo:export",
+    "issue_download_token": "fascicolo:export",
+    "get_job": "patients:read",
     # --- Calendar transitions (FSM-checked sub-resources) ----------------
     "confirm_event": "events:write",
     "reschedule_event": "events:write",

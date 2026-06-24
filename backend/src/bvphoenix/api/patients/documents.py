@@ -11,6 +11,7 @@ from fastapi import APIRouter
 
 from bvphoenix.api.patients import _shared  # for runtime access
 from bvphoenix.api.patients._shared import *  # noqa: F403
+from bvphoenix.services.file_ext import ensure_extension
 
 router = APIRouter()
 
@@ -1691,7 +1692,11 @@ async def get_document_content(
     content_type = doc.file_content_type or "application/octet-stream"
     settings = get_settings()
     storage = get_s3_storage()
-    filename = (doc.title or "document").replace('"', "")
+    filename = ensure_extension(
+        doc.title or "document",
+        content_type=doc.file_content_type,
+        s3_key=doc.file_s3_key,
+    ).replace('"', "")
 
     # Small text/markdown files inline straight from the API so the caller
     # can render them in a div without paying for a streaming response. A
@@ -2598,7 +2603,11 @@ async def stream_document_binary(
     )
 
     settings = get_settings()
-    filename = (doc.title or "document").replace('"', "")
+    filename = ensure_extension(
+        doc.title or "document",
+        content_type=content_type,
+        s3_key=storage_key,
+    ).replace('"', "")
 
     await audit.log(
         action="document_binary_streamed",
@@ -2726,7 +2735,11 @@ async def get_document_file_content(
 
     settings = get_settings()
     storage = get_s3_storage()
-    filename = (row.original_filename or f"file-{row.sequence:03d}.bin").replace('"', "")
+    filename = ensure_extension(
+        row.original_filename or f"file-{row.sequence:03d}",
+        content_type=row.file_content_type,
+        s3_key=row.file_s3_key,
+    ).replace('"', "")
 
     try:
         body_iter, length, _ = await asyncio.to_thread(
