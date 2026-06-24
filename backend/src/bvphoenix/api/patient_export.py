@@ -41,6 +41,8 @@ from bvphoenix.services.arq_redis import redis_settings
 from bvphoenix.services.patient_export import (
     ALLOWED_INCLUDES,
     DEFAULT_INCLUDES,
+    DEFAULT_LAYOUT,
+    LAYOUTS,
 )
 from bvphoenix.services.permissions import (
     READ_METADATA,
@@ -117,11 +119,29 @@ def _parse_includes(include: str | None) -> set[str]:
     return parts
 
 
+def _parse_layout(layout: str | None) -> str:
+    """Validate the archive layout. ``flat`` (default) is the legacy
+    UUID-keyed tree; ``tree`` mirrors the patient's curated Folder
+    structure with human-readable names. Part of the dedup
+    canonical_input so a flat and a tree export of the same scope land
+    on distinct cached artifacts."""
+    value = (layout or DEFAULT_LAYOUT).strip().lower()
+    if value not in LAYOUTS:
+        raise HTTPException(
+            status_code=400,
+            detail=f"invalid layout: {layout!r} (allowed: {sorted(LAYOUTS)})",
+        )
+    return value
+
+
 class ExportJobIn(BaseModel):
     """Body for ``POST /patients/{id}/export``. ``include`` is the
-    same comma-joined section list the legacy GET accepted."""
+    same comma-joined section list the legacy GET accepted; ``layout``
+    chooses ``flat`` (legacy UUID-keyed) or ``tree`` (mirrors the
+    patient's curated Folder tree with human-readable names)."""
 
     include: str | None = None
+    layout: str | None = None
 
 
 @router.post(
@@ -148,8 +168,10 @@ async def export_patient_async(
         raise HTTPException(status_code=404, detail="patient not found")
 
     includes = _parse_includes(body.include)
+    layout = _parse_layout(body.layout)
     canonical_input: dict[str, Any] = {
         "includes": sorted(includes),
+        "layout": layout,
         "_display_label": _format_patient_label(patient),
     }
 
@@ -221,10 +243,14 @@ async def export_patient_async(
 class StudyExportIn(BaseModel):
     """Body for ``POST /api/studies/{id}/export``.
 
-    Empty for now; reserved for future per-call options
+    ``layout`` chooses ``flat`` (legacy UUID-keyed) or ``tree``
+    (the study filed under its curated Folder path with a
+    human-readable name). Reserved for future per-call options
     (de-identification toggle, optional ``include`` filters, ...) so
     the dedup hash has a stable place to grow.
     """
+
+    layout: str | None = None
 
 
 @router.post(
@@ -246,7 +272,7 @@ async def export_study_async(
     with the job descriptor; poll ``GET /api/jobs/{id}`` for progress
     and the result URL.
     """
-    del body  # placeholder for future options
+    layout = _parse_layout(body.layout if body else None)
     study = (
         await db.execute(select(ImagingStudy).where(ImagingStudy.id == study_id))
     ).scalar_one_or_none()
@@ -263,6 +289,7 @@ async def export_study_async(
     # surfaces in the JobsTray so two parallel study_export rows are
     # told apart instead of "Esporta studio DICOM" twice.
     canonical_input: dict[str, Any] = {
+        "layout": layout,
         "_display_label": _format_study_label(study),
     }
 
@@ -338,6 +365,7 @@ class FolderExportIn(BaseModel):
     include: str | None = None
     include_study_ids: list[uuid.UUID] | None = None
     include_document_ids: list[uuid.UUID] | None = None
+    layout: str | None = None
 
 
 async def _resolve_folder_scope(
@@ -474,8 +502,10 @@ async def export_folder_async(
         )
 
     includes = _parse_includes(body.include)
+    layout = _parse_layout(body.layout)
     canonical_input: dict[str, Any] = {
         "includes": sorted(includes),
+        "layout": layout,
         "scope_study_ids": sorted(str(x) for x in study_ids),
         "scope_document_ids": sorted(str(x) for x in document_ids),
         "scope_kind": "folder",
@@ -562,6 +592,7 @@ class BulkDownloadIn(BaseModel):
 
     items: list[BulkDownloadItem]
     include: str | None = None
+    layout: str | None = None
 
 
 @router.post(
@@ -625,8 +656,10 @@ async def bulk_download_async(
         raise HTTPException(status_code=404, detail="patient not found")
 
     includes = _parse_includes(body.include)
+    layout = _parse_layout(body.layout)
     canonical_input: dict[str, Any] = {
         "includes": sorted(includes),
+        "layout": layout,
         "scope_study_ids": sorted(str(x) for x in study_ids),
         "scope_document_ids": sorted(str(x) for x in document_ids),
         "scope_kind": "bulk",

@@ -78,6 +78,9 @@ async def export_study_zip(
     # (computed from canonical_input by the API layer) keeps
     # identifying and pseudonymized archives at distinct ZIPs.
     deidentify_dicom = bool(canonical_input.get("deidentify"))
+    # ``tree`` files the study under its curated Folder path with a
+    # human-readable name; ``flat`` keeps the legacy UUID-keyed layout.
+    layout = canonical_input.get("layout") or "flat"
 
     settings = get_settings()
 
@@ -219,6 +222,7 @@ async def export_study_zip(
                     s3_key_override=study_key,
                     should_cancel=_should_cancel,
                     deidentify_dicom=deidentify_dicom,
+                    layout=layout,
                 )
             except ExportCancelledError:
                 # User clicked Cancel mid-stream. Job.status was already

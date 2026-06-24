@@ -783,6 +783,16 @@ EXPECTED_TOOL_NAMES = {
     "list_share_links",
     "update_share_link",
     "revoke_share_link",
+    # --- Fascicolo / study / folder export + tokenised download
+    # (fascicolo:export, sensitive; get_job rides patients:read).
+    # Backend lives in api/patient_export.py + api/jobs.py +
+    # api/auth.py (download-token). The OTP->curl flow.
+    "export_fascicolo",
+    "export_study",
+    "export_folder",
+    "bulk_download",
+    "get_job",
+    "issue_download_token",
     # --- Public iCal subscription handles (calendar:subscribe /
     # calendar:read, sensitive). Backend lives in api/calendar.py;
     # parity for the /settings/calendar GUI.
