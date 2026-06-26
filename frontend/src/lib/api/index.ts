@@ -32,6 +32,21 @@ export interface Me {
   display_name: string;
   is_admin: boolean;
   email_verified: boolean;
+  /** True when the session is an anonymous share-link guest (PUBLIC
+   *  principal scoped to one grant), not a real account. Drives the
+   *  in-app "create an account to keep this access" banner. */
+  is_anonymous_share: boolean;
+}
+
+/** Reconcilable state of the current anonymous share session, for the
+ *  in-app banner. ``null`` for a normal logged-in account. */
+export interface ShareSession {
+  share_link_id: string;
+  resource_kind: string;
+  resource_id: string;
+  claimable: boolean;
+  bindable: boolean;
+  recipient_email_known: boolean;
 }
 
 export interface TokenResponse {
@@ -137,6 +152,38 @@ export const authApi = {
       json: { email, password, totp_code: totpCode },
     }),
   me: () => request<Me>("/api/auth/me"),
+  /** Reconcilable state of the current anonymous share session, for the
+   *  in-app "create an account to keep this access" banner. ``null`` for
+   *  a normal logged-in account. */
+  shareSessionCurrent: () => request<ShareSession | null>("/api/share-sessions/current"),
+  /** Create a real account from the current anonymous share session and
+   *  reconcile the grant onto it (logs in via the session cookie).
+   *  ``email`` is required only when the link carries no recipient_email
+   *  (i.e. ``recipient_email_known === false``). */
+  shareSessionClaim: (body: { password: string; display_name?: string; email?: string }) =>
+    request<{ subject_id: string; email: string; access_token: string; expires_in: number }>(
+      "/api/share-sessions/claim",
+      { method: "POST", json: body },
+    ),
+  /** Attach a share grant to the CURRENT logged-in account by its link
+   *  TOKEN — used by the /info "log in and connect" path (the landing page
+   *  holds the token). Email-match enforced server-side. */
+  bindShareLinkByToken: (token: string) =>
+    request<{
+      grant_id: string;
+      resource_kind: string;
+      resource_id: string;
+      permissions: string[];
+    }>(`/api/share-links/${token}/bind`, { method: "POST" }),
+  /** Attach a share grant (by id) to the CURRENT logged-in account — the
+   *  post-login step when the recipient already had an account. */
+  shareSessionBind: (shareLinkId: string) =>
+    request<{
+      grant_id: string;
+      resource_kind: string;
+      resource_id: string;
+      permissions: string[];
+    }>("/api/share-sessions/bind", { method: "POST", json: { share_link_id: shareLinkId } }),
   verifyEmail: (token: string) =>
     request<TokenResponse>("/api/auth/verify-email", {
       method: "POST",

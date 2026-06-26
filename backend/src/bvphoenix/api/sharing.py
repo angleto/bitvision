@@ -16,9 +16,9 @@ import uuid
 from datetime import UTC, datetime, timedelta
 from typing import Annotated, Any
 
-from fastapi import APIRouter, Depends, Header, HTTPException, Request, status
+from fastapi import APIRouter, Depends, Header, HTTPException, Request, Response, status
 from fastapi.responses import StreamingResponse
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, EmailStr, Field
 from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -29,6 +29,7 @@ from bvphoenix.auth import (
     require_user,
     verify_password,
 )
+from bvphoenix.auth.deps import set_session_cookie
 from bvphoenix.auth.tokens import decode_token, issue_access_token
 from bvphoenix.config import get_settings
 from bvphoenix.db.models import Document, Grant, ImagingStudy, Patient, ShareLink, User
@@ -336,6 +337,12 @@ class ShareInfoOut(BaseModel):
     # minting a second account. Exactly one of the two is ever true.
     claimable: bool = False
     bindable: bool = False
+    # Whether the link itself carries an addressee email. Drives the
+    # account-creation form on the landing page: when False the recipient
+    # supplies their own email (universal claim); when True the email is
+    # server-side and the form omits the field. Only the *presence* is
+    # exposed, never the value (see the PII note below).
+    recipient_email_known: bool = False
     # recipient_name / recipient_email intentionally NOT exposed here:
     # /shared/{token}/info is an unauthenticated public endpoint. Anyone
     # with the token can hit it, so returning the intended addressee
@@ -1370,6 +1377,12 @@ class ClaimShareLinkIn(BaseModel):
 
     password: str = Field(min_length=8, max_length=256)
     display_name: str | None = Field(default=None, max_length=255)
+    # Recipient-provided email, honoured ONLY when the link itself carries
+    # no ``recipient_email`` (a bare anonymous link not addressed to a
+    # specific person). When the link IS addressed, that email wins and a
+    # mismatching value here is refused — a forwarded, person-addressed
+    # link must not be redirected onto a different identity.
+    email: EmailStr | None = None
 
 
 class ClaimShareLinkOut(BaseModel):
@@ -1383,8 +1396,168 @@ class ClaimShareLinkOut(BaseModel):
     expires_in: int
 
 
+async def _perform_claim(
+    db: AsyncSession,
+    link: ShareLink,
+    *,
+    password: str,
+    display_name: str | None,
+    email_override: str | None,
+) -> tuple[User, Grant]:
+    """Core of "turn a share link into a real account", shared by the
+    token route (``/share-links/{token}/claim``) and the in-app session
+    route (``/share-sessions/claim``).
+
+    Validates the link, creates the Subject + User, repoints the grant
+    (and any contact delegation) off ``PUBLIC`` onto the new account,
+    marks the link claimed, materialises the wallet sponsorship
+    (best-effort), commits, and returns ``(user, grant)``. Raises
+    ``HTTPException`` on every precondition so the UI shows a precise
+    message. The caller owns audit logging + token/cookie minting.
+    """
+    if link.mode not in ("anonymous", "claim"):
+        raise HTTPException(status_code=400, detail="this link cannot be converted to an account")
+    if link.claimed_at is not None:
+        raise HTTPException(status_code=409, detail="this link has already been claimed")
+
+    grant = (await db.execute(select(Grant).where(Grant.id == link.grant_id))).scalar_one_or_none()
+    now = datetime.now(UTC)
+    if grant is None or grant.revoked_at is not None:
+        raise HTTPException(status_code=410, detail="grant has been revoked")
+    if grant.valid_until is not None and grant.valid_until < now:
+        raise HTTPException(status_code=410, detail="share link has expired")
+
+    # Email resolution. An *addressed* link (created with a
+    # recipient_email) pins the identity: a forwarded link must not be
+    # redirected onto a different account, so a mismatching override is
+    # refused. A *bare* anonymous link carries no addressee, so the
+    # recipient supplies their own email here.
+    addressed = (link.recipient_email or "").strip().lower()
+    override = (email_override or "").strip().lower()
+    if addressed:
+        if override and override != addressed:
+            raise HTTPException(
+                status_code=403, detail="this link was addressed to a different recipient"
+            )
+        email = addressed
+    else:
+        if not override:
+            raise HTTPException(
+                status_code=400, detail="an email is required to create an account for this link"
+            )
+        email = override
+
+    existing = (await db.execute(select(User).where(User.email == email))).scalar_one_or_none()
+    if existing is not None:
+        # The recipient already has an account; we can't mint a second one
+        # for the same email. They attach the grant via bind instead (the
+        # FE flips to "log in and connect" on this 409).
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "an account already exists for this email; log in and open "
+                "this link again to attach it to your account"
+            ),
+        )
+
+    # Lazy import keeps the sharing module light (Subject lives in
+    # db.models.principals).
+    from bvphoenix.db.models.principals import Subject
+
+    dn = (display_name or link.recipient_name or email).strip()
+    subject = Subject(kind="user", display_name=dn)
+    db.add(subject)
+    await db.flush()
+    user = User(subject_id=subject.id, email=email, password_hash=hash_password(password))
+    db.add(user)
+    await db.flush()
+
+    grant.grantee_subject_id = user.subject_id
+    link.claimed_by_subject_id = user.subject_id
+    link.claimed_at = now
+
+    from bvphoenix.db.models import PatientContact
+
+    contact = (
+        await db.execute(
+            select(PatientContact).where(PatientContact.delegation_share_link_id == link.id)
+        )
+    ).scalar_one_or_none()
+    if contact is not None:
+        contact.delegation_subject_id = user.subject_id
+
+    if link.ai_sponsorship_cap_cents and grant.resource_kind == "patient":
+        try:
+            from bvphoenix.services.sponsorship import create_sponsorship
+
+            sp = await create_sponsorship(
+                db,
+                sponsor_subject_id=grant.grantor_subject_id,
+                sponsored_subject_id=user.subject_id,
+                scope_kind="patient",
+                scope_id=grant.resource_id,
+                cap_cents=int(link.ai_sponsorship_cap_cents),
+                purpose=f"share-link claim ({link.label or link.recipient_name or 'unnamed'})",
+            )
+            link.ai_sponsorship_id = sp.id
+        except Exception as exc:
+            logger.warning("share_link claim sponsorship materialisation failed: %s", exc)
+
+    await db.commit()
+    await db.refresh(user)
+    return user, grant
+
+
+async def _perform_bind(db: AsyncSession, link: ShareLink, user: User) -> Grant:
+    """Core of "attach a PUBLIC-held link grant to the current account",
+    shared by the token route (``/share-links/{token}/bind``) and the
+    session route (``/share-sessions/bind``). Idempotent. Enforces the
+    addressee email-match so a forwarded link can't be redirected onto a
+    different account. Caller owns audit logging."""
+    if link.mode not in ("anonymous", "claim"):
+        raise HTTPException(status_code=400, detail="this link cannot be bound to an account")
+
+    grant = (await db.execute(select(Grant).where(Grant.id == link.grant_id))).scalar_one_or_none()
+    now = datetime.now(UTC)
+    if grant is None or grant.revoked_at is not None:
+        raise HTTPException(status_code=410, detail="grant has been revoked")
+    if grant.valid_until is not None and grant.valid_until < now:
+        raise HTTPException(status_code=410, detail="share link has expired")
+
+    if grant.grantee_subject_id == user.subject_id:
+        return grant  # idempotent
+    if grant.grantee_subject_id != PUBLIC_SUBJECT_ID:
+        raise HTTPException(status_code=409, detail="this link is already attached to an account")
+
+    recipient_email = (link.recipient_email or "").strip().lower()
+    if not recipient_email or recipient_email != user.email.lower():
+        raise HTTPException(
+            status_code=403, detail="this link was addressed to a different recipient"
+        )
+
+    grant.grantee_subject_id = user.subject_id
+    if link.claimed_at is None:
+        link.claimed_by_subject_id = user.subject_id
+        link.claimed_at = now
+
+    from bvphoenix.db.models import PatientContact
+
+    contact = (
+        await db.execute(
+            select(PatientContact).where(PatientContact.delegation_share_link_id == link.id)
+        )
+    ).scalar_one_or_none()
+    if contact is not None:
+        contact.delegation_subject_id = user.subject_id
+
+    await db.commit()
+    return grant
+
+
 @router.post("/share-links/{token}/claim", response_model=ClaimShareLinkOut)
 async def claim_share_link(
+    request: Request,
+    response: Response,
     token: str,
     body: ClaimShareLinkIn,
     db: Annotated[AsyncSession, Depends(get_db)],
@@ -1423,106 +1596,14 @@ async def claim_share_link(
     ).scalar_one_or_none()
     if link is None:
         raise HTTPException(status_code=404, detail="share link not found")
-    if link.mode not in ("anonymous", "claim"):
-        raise HTTPException(
-            status_code=400,
-            detail="this link cannot be converted to an account",
-        )
-    if link.claimed_at is not None:
-        raise HTTPException(
-            status_code=409,
-            detail="this link has already been claimed",
-        )
-    if not link.recipient_email:
-        raise HTTPException(
-            status_code=400,
-            detail="this link has no recipient_email; claim is not available",
-        )
 
-    grant = (await db.execute(select(Grant).where(Grant.id == link.grant_id))).scalar_one_or_none()
-    now = datetime.now(UTC)
-    if grant is None or grant.revoked_at is not None:
-        raise HTTPException(status_code=410, detail="grant has been revoked")
-    if grant.valid_until is not None and grant.valid_until < now:
-        raise HTTPException(status_code=410, detail="share link has expired")
-
-    email = link.recipient_email.lower()
-    existing = (await db.execute(select(User).where(User.email == email))).scalar_one_or_none()
-    if existing is not None:
-        # We can't mint a second account for this email. The recipient
-        # already has one (e.g. they registered separately before opening
-        # the delegation link), so they attach the grant to it via the
-        # authenticated ``/share-links/{token}/bind`` endpoint instead.
-        raise HTTPException(
-            status_code=409,
-            detail=(
-                "an account already exists for this email; log in and open "
-                "this link again to attach it to your account"
-            ),
-        )
-
-    # Avoid a circular import: Subject lives in db.models.principals
-    # which is loaded lazily here so the sharing module stays light.
-    from bvphoenix.db.models.principals import Subject
-
-    display_name = (body.display_name or link.recipient_name or email).strip()
-    subject = Subject(kind="user", display_name=display_name)
-    db.add(subject)
-    await db.flush()
-    user = User(
-        subject_id=subject.id,
-        email=email,
-        password_hash=hash_password(body.password),
+    user, grant = await _perform_claim(
+        db,
+        link,
+        password=body.password,
+        display_name=body.display_name,
+        email_override=body.email,
     )
-    db.add(user)
-    await db.flush()
-
-    # Rewrite the grant so the new user keeps the share's scope.
-    grant.grantee_subject_id = user.subject_id
-    link.claimed_by_subject_id = user.subject_id
-    link.claimed_at = now
-
-    # If this link backs a contact delegation, repoint the contact to the
-    # real subject too, so the fascicolo UI shows the delegate bound to
-    # their account and revocation keeps cascading through the FK.
-    from bvphoenix.db.models import PatientContact
-
-    contact = (
-        await db.execute(
-            select(PatientContact).where(PatientContact.delegation_share_link_id == link.id)
-        )
-    ).scalar_one_or_none()
-    if contact is not None:
-        contact.delegation_subject_id = user.subject_id
-
-    # Materialise the wallet sponsorship now that we know the
-    # recipient's subject_id. Best-effort: a failure here does not
-    # invalidate the claim — the recipient still gets the grant; the
-    # sponsor can manually create a sponsorship later via the
-    # /settings/wallet/sponsorships UI.
-    if link.ai_sponsorship_cap_cents and grant.resource_kind == "patient":
-        try:
-            from bvphoenix.services.sponsorship import create_sponsorship
-
-            sp = await create_sponsorship(
-                db,
-                sponsor_subject_id=grant.grantor_subject_id,
-                sponsored_subject_id=user.subject_id,
-                scope_kind="patient",
-                scope_id=grant.resource_id,
-                cap_cents=int(link.ai_sponsorship_cap_cents),
-                purpose=f"share-link claim ({link.label or link.recipient_name or 'unnamed'})",
-            )
-            link.ai_sponsorship_id = sp.id
-        except Exception as exc:
-            import logging
-
-            logging.getLogger(__name__).warning(
-                "share_link claim sponsorship materialisation failed: %s", exc
-            )
-
-    await db.commit()
-    await db.refresh(link)
 
     settings = get_settings()
     access_token = issue_access_token(
@@ -1542,6 +1623,12 @@ async def claim_share_link(
             "recipient_name": link.recipient_name,
         },
     )
+
+    # Same browser-session handoff as password login: the freshly
+    # created account is logged in via the HttpOnly cookie so the
+    # destination page authenticates without the (now no-op) localStorage
+    # bearer token.
+    set_session_cookie(response, request, access_token, max_age=settings.jwt_expires_seconds)
 
     return ClaimShareLinkOut(
         subject_id=str(user.subject_id),
@@ -1590,50 +1677,8 @@ async def bind_share_link(
     ).scalar_one_or_none()
     if link is None:
         raise HTTPException(status_code=404, detail="share link not found")
-    if link.mode not in ("anonymous", "claim"):
-        raise HTTPException(status_code=400, detail="this link cannot be bound to an account")
 
-    grant = (await db.execute(select(Grant).where(Grant.id == link.grant_id))).scalar_one_or_none()
-    now = datetime.now(UTC)
-    if grant is None or grant.revoked_at is not None:
-        raise HTTPException(status_code=410, detail="grant has been revoked")
-    if grant.valid_until is not None and grant.valid_until < now:
-        raise HTTPException(status_code=410, detail="share link has expired")
-
-    # Already attached to this user — idempotent success.
-    if grant.grantee_subject_id == user.subject_id:
-        return BindShareLinkOut(
-            grant_id=str(grant.id),
-            resource_kind=grant.resource_kind,
-            resource_id=str(grant.resource_id),
-            permissions=list(grant.permissions),
-        )
-    if grant.grantee_subject_id != PUBLIC_SUBJECT_ID:
-        raise HTTPException(status_code=409, detail="this link is already attached to an account")
-
-    recipient_email = (link.recipient_email or "").strip().lower()
-    if not recipient_email or recipient_email != user.email.lower():
-        raise HTTPException(
-            status_code=403,
-            detail="this link was addressed to a different recipient",
-        )
-
-    grant.grantee_subject_id = user.subject_id
-    if link.claimed_at is None:
-        link.claimed_by_subject_id = user.subject_id
-        link.claimed_at = now
-
-    from bvphoenix.db.models import PatientContact
-
-    contact = (
-        await db.execute(
-            select(PatientContact).where(PatientContact.delegation_share_link_id == link.id)
-        )
-    ).scalar_one_or_none()
-    if contact is not None:
-        contact.delegation_subject_id = user.subject_id
-
-    await db.commit()
+    grant = await _perform_bind(db, link, user)
 
     await audit.log(
         action="share_link_bound",
@@ -1641,6 +1686,159 @@ async def bind_share_link(
         resource_kind="share_link",
         resource_id=link.id,
         metadata={"grant_id": str(grant.id), "share_token": link.token},
+    )
+    return BindShareLinkOut(
+        grant_id=str(grant.id),
+        resource_kind=grant.resource_kind,
+        resource_id=str(grant.resource_id),
+        permissions=list(grant.permissions),
+    )
+
+
+# ---------------------------------------------------------------------------
+# In-app "keep this access — create an account" (token-less, session-based).
+#
+# After ``verify`` the recipient browses as an anonymous share session whose
+# HttpOnly JWT carries the originating ``share_link_id`` (pinned onto
+# ``request.state`` by ``auth.deps``). These three endpoints let the in-app
+# banner reconcile the share to a real account WITHOUT the share token ever
+# touching JS — the token-based ``/share-links/{token}/claim|bind`` routes
+# above stay for the on-landing (/info) flow where the token is in the URL.
+# ---------------------------------------------------------------------------
+
+
+class ShareSessionOut(BaseModel):
+    """What the current browser session can reconcile. Returned only for an
+    anonymous share-link session; ``null`` for a normal logged-in account."""
+
+    share_link_id: str
+    resource_kind: str
+    resource_id: str
+    claimable: bool
+    bindable: bool
+    recipient_email_known: bool
+
+
+class BindSessionIn(BaseModel):
+    share_link_id: uuid.UUID
+
+
+@router.get("/share-sessions/current", response_model=ShareSessionOut | None)
+async def current_share_session(
+    request: Request,
+    db: Annotated[AsyncSession, Depends(get_db)],
+    user: Annotated[User, Depends(require_user)],
+) -> ShareSessionOut | None:
+    """Describe the current anonymous share session so the in-app banner can
+    offer "keep this access — create an account". ``null`` for a normal
+    account (no ``share_link_id`` in the session JWT)."""
+    sid = getattr(request.state, "share_link_id", None)
+    if sid is None:
+        return None
+    link = (await db.execute(select(ShareLink).where(ShareLink.id == sid))).scalar_one_or_none()
+    if link is None:
+        return None
+    grant = (await db.execute(select(Grant).where(Grant.id == link.grant_id))).scalar_one_or_none()
+    if grant is None:
+        return None
+    now = datetime.now(UTC)
+    grant_alive = grant.revoked_at is None and (
+        grant.valid_until is None or grant.valid_until > now
+    )
+    recipient_email_known = bool(link.recipient_email)
+    recipient_has_account = False
+    if link.recipient_email:
+        recipient_has_account = (
+            await db.execute(
+                select(User.subject_id).where(User.email == link.recipient_email.lower())
+            )
+        ).first() is not None
+    attachable = (
+        link.mode in ("anonymous", "claim")
+        and link.claimed_at is None
+        and grant_alive
+        and grant.grantee_subject_id == PUBLIC_SUBJECT_ID
+    )
+    return ShareSessionOut(
+        share_link_id=str(link.id),
+        resource_kind=grant.resource_kind,
+        resource_id=str(grant.resource_id),
+        claimable=attachable and not recipient_has_account,
+        bindable=attachable and recipient_has_account and recipient_email_known,
+        recipient_email_known=recipient_email_known,
+    )
+
+
+@router.post("/share-sessions/claim", response_model=ClaimShareLinkOut)
+async def claim_current_share_session(
+    request: Request,
+    response: Response,
+    body: ClaimShareLinkIn,
+    db: Annotated[AsyncSession, Depends(get_db)],
+    user: Annotated[User, Depends(require_user)],
+    audit: AuditDep,
+) -> ClaimShareLinkOut:
+    """In-app account creation for an anonymous share session: reads the
+    originating link from the session JWT (no token in JS), creates the
+    account, reconciles the grant, and logs the new account in via the
+    session cookie."""
+    sid = getattr(request.state, "share_link_id", None)
+    if sid is None:
+        raise HTTPException(status_code=403, detail="not an anonymous share session")
+    link = (await db.execute(select(ShareLink).where(ShareLink.id == sid))).scalar_one_or_none()
+    if link is None:
+        raise HTTPException(status_code=404, detail="share link not found")
+
+    new_user, grant = await _perform_claim(
+        db,
+        link,
+        password=body.password,
+        display_name=body.display_name,
+        email_override=body.email,
+    )
+    await audit.log(
+        action="share_link_claimed",
+        actor_subject_id=new_user.subject_id,
+        resource_kind="share_link",
+        resource_id=link.id,
+        metadata={"grant_id": str(grant.id), "share_token": link.token, "via": "session"},
+    )
+    settings = get_settings()
+    access_token = issue_access_token(
+        subject_id=new_user.subject_id, email=new_user.email, is_admin=False
+    )
+    set_session_cookie(response, request, access_token, max_age=settings.jwt_expires_seconds)
+    return ClaimShareLinkOut(
+        subject_id=str(new_user.subject_id),
+        email=new_user.email,
+        access_token=access_token,
+        expires_in=settings.jwt_expires_seconds,
+    )
+
+
+@router.post("/share-sessions/bind", response_model=BindShareLinkOut)
+async def bind_share_session(
+    body: BindSessionIn,
+    db: Annotated[AsyncSession, Depends(get_db)],
+    user: Annotated[User, Depends(require_user)],
+    audit: AuditDep,
+) -> BindShareLinkOut:
+    """Attach a share link's grant to the CURRENT logged-in account,
+    addressed by ``share_link_id`` (the banner passes the id from
+    ``/share-sessions/current`` through the login redirect, so no token
+    round-trips through JS). Same email-match guard as the token route."""
+    link = (
+        await db.execute(select(ShareLink).where(ShareLink.id == body.share_link_id))
+    ).scalar_one_or_none()
+    if link is None:
+        raise HTTPException(status_code=404, detail="share link not found")
+    grant = await _perform_bind(db, link, user)
+    await audit.log(
+        action="share_link_bound",
+        actor_subject_id=user.subject_id,
+        resource_kind="share_link",
+        resource_id=link.id,
+        metadata={"grant_id": str(grant.id), "share_token": link.token, "via": "session"},
     )
     return BindShareLinkOut(
         grant_id=str(grant.id),
@@ -1883,15 +2081,20 @@ async def share_link_info(
                 select(User.subject_id).where(User.email == link.recipient_email.lower())
             )
         ).first() is not None
+    # A PUBLIC-held grant on an un-claimed anonymous/claim link is
+    # attachable to a real account. We no longer require ``recipient_email``
+    # on the link: a bare anonymous link is still claimable because the
+    # recipient supplies their own email at account-creation time
+    # (universal "register once inside" — see _perform_claim). ``bindable``
+    # still needs the addressee email so the email-match guard can run.
     attachable = (
         link.mode in ("anonymous", "claim")
         and link.claimed_at is None
-        and bool(link.recipient_email)
         and grant_alive
         and grant.grantee_subject_id == PUBLIC_SUBJECT_ID
     )
     claimable = attachable and not recipient_has_account
-    bindable = attachable and recipient_has_account
+    bindable = attachable and recipient_has_account and bool(link.recipient_email)
 
     # Pre-flight payload size for the landing page. A study share
     # aggregates over its instances; a patient share over every
@@ -2025,6 +2228,7 @@ async def share_link_info(
         mode=link.mode,
         claimable=claimable,
         bindable=bindable,
+        recipient_email_known=bool(link.recipient_email),
         deidentified=bool(grant.deidentify),
         total_files=total_files,
         total_bytes=total_bytes,
@@ -2039,6 +2243,7 @@ async def share_link_info(
 @limiter.limit(SHARE_VERIFY_LIMIT)
 async def verify_share_link(
     request: Request,
+    response: Response,
     token: str,
     body: VerifyIn,
     db: Annotated[AsyncSession, Depends(get_db)],
@@ -2178,6 +2383,16 @@ async def verify_share_link(
                 # leaves cached_url=None and the FE falls back to
                 # the standard JWT viewer flow.
                 logger.warning("verify cached-download token mint failed", exc_info=True)
+
+    # Mirror the password-login flow: hand the recipient the session as
+    # an HttpOnly ``bvp_session`` cookie so the SPA destination page
+    # (which authenticates via the cookie since the 2026-05-21 move off
+    # localStorage bearer tokens) carries the grant-scoped JWT
+    # automatically. Without this the recipient lands on /patients or
+    # /studies with no credential and ``require_user`` answers 401
+    # "authentication required". The JSON ``access_token`` stays for
+    # non-browser callers (curl, integration tests).
+    set_session_cookie(response, request, access_token, max_age=expires_in)
 
     return VerifyOut(
         access_token=access_token,

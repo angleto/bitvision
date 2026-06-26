@@ -4,6 +4,7 @@ import { getLocale, getMessages } from "next-intl/server";
 import { type ReactNode, Suspense } from "react";
 
 import { ModalProvider } from "@/components/ModalHost";
+import ShareGuestBanner from "@/components/ShareGuestBanner";
 import SiteHeader from "@/components/SiteHeader";
 import ThemeInit from "@/components/ThemeInit";
 import { AuthProvider } from "@/lib/auth-context";
@@ -30,6 +31,9 @@ export default async function RootLayout({ children }: { children: ReactNode }) 
               <Suspense fallback={<div style={{ height: 49 }} />}>
                 <SiteHeader />
               </Suspense>
+              {/* Always-visible "you're a guest — create an account to keep
+                  this access" bar; self-hides for normal accounts. */}
+              <ShareGuestBanner />
               {children}
             </ModalProvider>
           </AuthProvider>

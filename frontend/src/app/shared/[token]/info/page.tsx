@@ -1,31 +1,29 @@
 "use client";
 
-// Public landing page for a share link. Unlike the sibling verify page,
-// this route only describes the share — it never issues a JWT, so we
-// call the info endpoint directly without the stored bearer token.
+// Public landing for a share link — designed to be foolproof for a
+// non-technical recipient (often an external clinician). Two screens:
 //
-// Audience: a clinician (often external to the institution) who just
-// got an email saying "studio condiviso da X". Three goals:
-//   1. Reduce phishing-suspicion. Show the grantor by name, the
-//      institution chrome, the audit-trail commitment.
-//   2. Set expectations for the download. File count + size + whether
-//      PHI is stripped, all visible BEFORE the recipient clicks.
-//   3. Close the audit chain. A "I received it" affordance writes a
-//      ``share_receipt_confirmed`` row so the grantor knows the
-//      message arrived (decouples receipt confirmation from access:
-//      the consultant may want to confirm receipt before they have
-//      time to actually open the study).
+//   1. LANDING: one dominant action — "Apri" (passwordless) or a single
+//      password field + "Apri". Privacy banner + payload summary above.
+//      A secondary "Scarica DICOM" for recipients who only want the ZIP.
 //
-// Locale: pulls IT/EN from the shared messages catalogue via next-intl.
-// The platform's locale precedence (cookie → Accept-Language → IT
-// default) drives copy, so a recipient on an English-speaking browser
-// gets EN even though the email was sent by an Italian grantor.
+//   2. POST-OPEN INTERSTITIAL (after /verify sets the bvp_session cookie):
+//      "✓ Accesso effettuato" + a big "Vai all'esame/fascicolo", plus a
+//      "keep this access — create an account" card that reconciles the
+//      share grant onto a real account (claim) or routes an existing
+//      account through login+bind. This is the "register once inside"
+//      moment, gated behind a successful open so a password link has
+//      already proven the recipient holds the password.
+//
+// Receipt confirmation is fired AUTOMATICALLY on a successful open (the
+// strongest possible "they actually opened it" signal for the grantor),
+// so there is no separate, confusing "I received it" button.
 
 import { useTranslations } from "next-intl";
 import { useParams, useRouter } from "next/navigation";
 import { type FormEvent, useEffect, useRef, useState } from "react";
 
-import { API_BASE_URL, ApiError, setStoredToken } from "@/lib/api";
+import { API_BASE_URL, ApiError } from "@/lib/api";
 
 interface ShareInfo {
   study_title: string | null;
@@ -38,71 +36,50 @@ interface ShareInfo {
   uses_remaining: number | null;
   resource_kind: string;
   resource_id: string;
-  recipient_name?: string | null;
-  recipient_email?: string | null;
   deidentified?: boolean;
   total_files?: number | null;
   total_bytes?: number | null;
   grantor_display?: string | null;
-  /** Pre-export job state. Drives the recipient-side progress bar
-   *  and the "Scarica DICOM" button: enabled only when the cached
-   *  artifact is ``succeeded`` (and the link doesn't require a
-   *  password — password-protected links still go through verify). */
   prepared_status?: string | null;
   prepared_progress_done?: number | null;
   prepared_progress_total?: number | null;
+  // Account reconciliation hints (see backend ShareInfoOut).
+  mode?: string;
+  claimable?: boolean;
+  bindable?: boolean;
+  recipient_email_known?: boolean;
 }
 
 const PREP_TERMINAL = new Set(["succeeded", "failed", "cancelled"]);
 const PREP_POLL_MS = 4000;
+
+async function readErr(resp: Response): Promise<unknown> {
+  try {
+    return await resp.json();
+  } catch {
+    return await resp.text();
+  }
+}
 
 async function fetchInfo(token: string): Promise<ShareInfo> {
   const resp = await fetch(`${API_BASE_URL}/api/shared/${token}/info`, {
     credentials: "include",
     cache: "no-store",
   });
-  if (!resp.ok) {
-    let detail: unknown;
-    try {
-      detail = await resp.json();
-    } catch {
-      detail = await resp.text();
-    }
-    throw new ApiError(resp.status, detail);
-  }
+  if (!resp.ok) throw new ApiError(resp.status, await readErr(resp));
   return (await resp.json()) as ShareInfo;
 }
 
-async function confirmReceipt(token: string): Promise<{ received_at: string }> {
-  const resp = await fetch(`${API_BASE_URL}/api/shared/${token}/confirm-receipt`, {
+// Best-effort, fire-and-forget: closing the audit chain must never block
+// or fail the open. The grantor sees ``received_at`` either way.
+function confirmReceiptSilently(token: string): void {
+  void fetch(`${API_BASE_URL}/api/shared/${token}/confirm-receipt`, {
     credentials: "include",
     method: "POST",
     cache: "no-store",
-  });
-  if (!resp.ok) {
-    let detail: unknown;
-    try {
-      detail = await resp.json();
-    } catch {
-      detail = await resp.text();
-    }
-    throw new ApiError(resp.status, detail);
-  }
-  return (await resp.json()) as { received_at: string };
+  }).catch(() => {});
 }
 
-/**
- * Map a backend ``{reason: "..."}`` detail to a doctor-friendly
- * localised string. The recipient lands here from a chat / email /
- * SMS without context — "404 not found" alone is useless. Distinct
- * codes let us tell them what happened (revoked / expired / used up
- * already) so they can decide whether to retry the URL or ask the
- * grantor for a fresh link.
- *
- * Falls back to the generic "linkNotFoundFallback" string when the
- * detail shape is unexpected (legacy backend response, network
- * error, JSON parse failure).
- */
 function extractErrReason(e: unknown, t: ReturnType<typeof useTranslations>): string {
   if (e instanceof ApiError) {
     const detail = e.detail as { detail?: { reason?: string } } | undefined;
@@ -129,36 +106,41 @@ function formatBytes(n: number | null | undefined): string {
   return `${(n / 1024 / 1024 / 1024).toFixed(2)} GB`;
 }
 
+function resourceHref(info: ShareInfo | null): string {
+  if (!info) return "/studies";
+  if (info.resource_kind === "patient") return `/patients/${info.resource_id}`;
+  if (info.resource_kind === "study") return `/studies/${info.resource_id}`;
+  return "/studies";
+}
+
 export default function SharedInfoPage() {
   const t = useTranslations("sharedLanding");
   const params = useParams<{ token: string }>();
   const router = useRouter();
   const [info, setInfo] = useState<ShareInfo | null>(null);
   const [err, setErr] = useState<string | null>(null);
-  const [receiptBusy, setReceiptBusy] = useState(false);
-  const [receiptDone, setReceiptDone] = useState<string | null>(null);
-  const [receiptErr, setReceiptErr] = useState<string | null>(null);
-  // Inline verify state. Folding the verify call into this page
-  // collapses the previous two-hop UX (land on /info → click "Open
-  // Study" → land on legacy verify form → click again) into a
-  // single click for passwordless shares, and into a single
-  // password-input + submit for password-protected shares. The
-  // legacy /shared/{token} route still exists for back-compat with
-  // already-emailed links (it now redirects here on mount).
+
+  // Open (verify) state.
   const [openBusy, setOpenBusy] = useState(false);
   const [password, setPassword] = useState("");
   const [verifyErr, setVerifyErr] = useState<string | null>(null);
+  const [verified, setVerified] = useState(false);
   const passwordInputRef = useRef<HTMLInputElement | null>(null);
-  // Auto-focus the password field once /info has loaded and the
-  // share is password-protected. We use a ref + effect rather than
-  // ``autoFocus`` so the lint rule stays clean and the focus only
-  // fires after the form is actually rendered (not during the
-  // ``Loading…`` placeholder pass).
+
+  // "Create an account to keep access" (post-open) state.
+  const [regOpen, setRegOpen] = useState(false);
+  const [regPassword, setRegPassword] = useState("");
+  const [regName, setRegName] = useState("");
+  const [regEmail, setRegEmail] = useState("");
+  const [regBusy, setRegBusy] = useState(false);
+  const [regErr, setRegErr] = useState<string | null>(null);
+  const [emailExists, setEmailExists] = useState(false);
+
   useEffect(() => {
-    if (info?.requires_password && passwordInputRef.current) {
+    if (info?.requires_password && !verified && passwordInputRef.current) {
       passwordInputRef.current.focus();
     }
-  }, [info?.requires_password]);
+  }, [info?.requires_password, verified]);
 
   useEffect(() => {
     fetchInfo(params.token)
@@ -166,26 +148,18 @@ export default function SharedInfoPage() {
       .catch((e) => setErr(extractErrReason(e, t)));
   }, [params.token, t]);
 
-  // Adaptive polling: while the cached export is still queued or
-  // running, refresh /info every PREP_POLL_MS so the progress bar
-  // moves under the recipient's eye and the download button flips
-  // to "ready" without a manual reload. Stops as soon as the prep
-  // hits any terminal state (succeeded / failed / cancelled).
+  // Adaptive polling of the pre-export progress while it runs.
   useEffect(() => {
-    if (!info) return;
+    if (!info || verified) return;
     const status = info.prepared_status;
     if (!status || PREP_TERMINAL.has(status)) return;
     const handle = window.setInterval(() => {
       fetchInfo(params.token)
         .then(setInfo)
-        .catch(() => {
-          // Transient errors stay silent — the next tick retries.
-          // A persistent failure is surfaced by the next manual
-          // navigation or by /verify.
-        });
+        .catch(() => {});
     }, PREP_POLL_MS);
     return () => window.clearInterval(handle);
-  }, [info, params.token]);
+  }, [info, verified, params.token]);
 
   async function runVerify(passwordValue: string | null): Promise<void> {
     setOpenBusy(true);
@@ -198,37 +172,11 @@ export default function SharedInfoPage() {
         body: JSON.stringify({ password: passwordValue }),
         cache: "no-store",
       });
-      if (!resp.ok) {
-        let detail: unknown;
-        try {
-          detail = await resp.json();
-        } catch {
-          detail = await resp.text();
-        }
-        throw new ApiError(resp.status, detail);
-      }
-      const out = (await resp.json()) as { access_token: string; expires_in: number };
-      setStoredToken(out.access_token);
-      // Route the recipient to the destination they came for. The
-      // info-page metadata already told us resource_kind/id so we
-      // can deep-link without a follow-up fetch.
-      if (info?.resource_kind === "patient") {
-        router.push(`/patients/${info.resource_id}`);
-      } else if (info?.resource_kind === "study") {
-        router.push(`/studies/${info.resource_id}`);
-      } else if (info?.resource_kind === "folder") {
-        // Folder shares haven't got a dedicated public viewer yet
-        // (the cached ZIP is the deliverable). Bounce to the
-        // patient page if we know it; otherwise fall back to the
-        // generic studies list.
-        router.push("/studies");
-      } else {
-        router.push("/studies");
-      }
+      if (!resp.ok) throw new ApiError(resp.status, await readErr(resp));
+      // The backend set the bvp_session cookie; the recipient is now in.
+      confirmReceiptSilently(params.token);
+      setVerified(true);
     } catch (e) {
-      // Reuse the same granular extractErrReason mapping as the
-      // info-fetch error path so password-protected wrong-password
-      // shows "Password errata" (not "HTTP 401").
       setVerifyErr(extractErrReason(e, t));
     } finally {
       setOpenBusy(false);
@@ -241,16 +189,43 @@ export default function SharedInfoPage() {
     await runVerify(password);
   }
 
-  async function handleConfirm(): Promise<void> {
-    setReceiptBusy(true);
-    setReceiptErr(null);
+  async function handleRegister(e: FormEvent): Promise<void> {
+    e.preventDefault();
+    if (regPassword.length < 8) {
+      setRegErr(t("regErrorPasswordTooShort"));
+      return;
+    }
+    setRegBusy(true);
+    setRegErr(null);
     try {
-      const out = await confirmReceipt(params.token);
-      setReceiptDone(out.received_at);
+      const body: { password: string; display_name?: string; email?: string } = {
+        password: regPassword,
+      };
+      if (regName.trim()) body.display_name = regName.trim();
+      if (!info?.recipient_email_known) body.email = regEmail.trim();
+      // Token-based claim: creates the account, reconciles the grant, and
+      // logs in via the bvp_session cookie the response sets.
+      const resp = await fetch(`${API_BASE_URL}/api/share-links/${params.token}/claim`, {
+        credentials: "include",
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(body),
+        cache: "no-store",
+      });
+      if (!resp.ok) {
+        if (resp.status === 409) {
+          setEmailExists(true);
+          setRegErr(null);
+          return;
+        }
+        throw new ApiError(resp.status, await readErr(resp));
+      }
+      // Account created + grant reconciled + logged in via cookie.
+      router.push(resourceHref(info));
     } catch (e) {
-      setReceiptErr(e instanceof ApiError ? e.message : t("confirmReceiptError"));
+      setRegErr(e instanceof ApiError ? t("regError") : t("regError"));
     } finally {
-      setReceiptBusy(false);
+      setRegBusy(false);
     }
   }
 
@@ -283,11 +258,6 @@ export default function SharedInfoPage() {
   const grantor = info.grantor_display?.trim() || t("fallbackGrantor");
   const sizeSuffix = info.total_bytes != null ? ` · ${formatBytes(info.total_bytes)}` : "";
 
-  // Pre-export state-machine: the recipient gets a direct download
-  // button only when (a) no password gates the link AND (b) the
-  // cached export is ready. Password-protected links still route to
-  // /verify, after which the bytes are reachable via the standard
-  // job-result path inside the study viewer.
   const prepStatus = info.prepared_status ?? null;
   const prepReady = prepStatus === "succeeded";
   const prepFailed = prepStatus === "failed" || prepStatus === "cancelled";
@@ -297,24 +267,201 @@ export default function SharedInfoPage() {
   const prepPct = prepTotal > 0 ? Math.min(100, Math.floor((prepDone / prepTotal) * 100)) : null;
   const canDirectDownload = prepReady && !info.requires_password && !isExpired && !noUsesLeft;
   const directDownloadUrl = `${API_BASE_URL}/api/shared/${params.token}/download`;
+  const goLabel =
+    info.resource_kind === "patient" ? t("goToResourcePatient") : t("goToResourceStudy");
+  const loginBindHref = `/login?then=bind&token=${encodeURIComponent(params.token)}&next=${encodeURIComponent(resourceHref(info))}`;
 
+  // ---- POST-OPEN INTERSTITIAL ------------------------------------------
+  if (verified) {
+    return (
+      <main>
+        <BrandedShell brandTag={t("brandTag")}>
+          <div
+            aria-live="polite"
+            style={{
+              border: "1px solid var(--bv-success, #047857)",
+              background: "var(--bv-success-soft, #ecfdf5)",
+              borderRadius: 8,
+              padding: "0.9rem 1rem",
+              marginBottom: "1rem",
+            }}
+          >
+            <strong style={{ fontSize: "1.05rem" }}>✓ {t("accessGranted")}</strong>
+            <div className="meta" style={{ marginTop: "0.25rem" }}>
+              {t("receiptAuto")}
+            </div>
+          </div>
+
+          <button
+            type="button"
+            onClick={() => router.push(resourceHref(info))}
+            style={{
+              width: "100%",
+              background: "#111",
+              color: "#fff",
+              border: "none",
+              borderRadius: 8,
+              padding: "0.8rem 1rem",
+              fontSize: "1.05rem",
+              fontWeight: 600,
+              cursor: "pointer",
+            }}
+          >
+            {goLabel} →
+          </button>
+
+          {/* Keep-access card. Hidden once the link is already on an
+              account (neither claimable nor bindable). */}
+          {(info.claimable || info.bindable || emailExists) && (
+            <div
+              className="card"
+              style={{
+                marginTop: "1rem",
+                borderColor: "var(--bv-accent, #2563eb)",
+                background: "var(--bv-accent-soft, #eff6ff)",
+              }}
+            >
+              <h3 style={{ marginTop: 0, marginBottom: "0.25rem" }}>{t("keepAccessTitle")}</h3>
+              <p className="meta" style={{ fontSize: "0.9rem", marginTop: 0 }}>
+                {t("keepAccessBody")}
+              </p>
+
+              {/* Existing account → login + bind. */}
+              {(info.bindable || emailExists) && (
+                <>
+                  {emailExists && (
+                    <p className="meta" style={{ fontSize: "0.85rem" }}>
+                      {t("emailExistsBody")}
+                    </p>
+                  )}
+                  <a
+                    href={loginBindHref}
+                    style={{
+                      display: "block",
+                      textAlign: "center",
+                      background: "var(--bv-accent, #2563eb)",
+                      color: "#fff",
+                      borderRadius: 6,
+                      padding: "0.55rem 0.9rem",
+                      textDecoration: "none",
+                      fontWeight: 500,
+                      marginTop: "0.5rem",
+                    }}
+                  >
+                    {t("loginAndConnect")}
+                  </a>
+                </>
+              )}
+
+              {/* No account yet → inline create-account form. */}
+              {info.claimable &&
+                !emailExists &&
+                (!regOpen ? (
+                  <button
+                    type="button"
+                    onClick={() => setRegOpen(true)}
+                    style={{
+                      width: "100%",
+                      marginTop: "0.5rem",
+                      background: "var(--bv-accent, #2563eb)",
+                      color: "#fff",
+                      border: "none",
+                      borderRadius: 6,
+                      padding: "0.55rem 0.9rem",
+                      fontWeight: 500,
+                      cursor: "pointer",
+                    }}
+                  >
+                    {t("createAccountCta")}
+                  </button>
+                ) : (
+                  <form onSubmit={(e) => void handleRegister(e)} style={{ marginTop: "0.5rem" }}>
+                    {!info.recipient_email_known && (
+                      <label style={{ display: "block", marginBottom: "0.5rem" }}>
+                        <span className="meta">{t("regEmailLabel")}</span>
+                        <input
+                          type="email"
+                          required
+                          value={regEmail}
+                          onChange={(e) => setRegEmail(e.target.value)}
+                          placeholder={t("regEmailPlaceholder")}
+                          style={{ width: "100%" }}
+                        />
+                      </label>
+                    )}
+                    <label style={{ display: "block", marginBottom: "0.5rem" }}>
+                      <span className="meta">{t("regNameLabel")}</span>
+                      <input
+                        value={regName}
+                        onChange={(e) => setRegName(e.target.value)}
+                        style={{ width: "100%" }}
+                      />
+                    </label>
+                    <label style={{ display: "block", marginBottom: "0.5rem" }}>
+                      <span className="meta">{t("regPasswordLabel")}</span>
+                      <input
+                        type="password"
+                        required
+                        minLength={8}
+                        value={regPassword}
+                        onChange={(e) => setRegPassword(e.target.value)}
+                        style={{ width: "100%" }}
+                      />
+                    </label>
+                    <button
+                      type="submit"
+                      disabled={regBusy}
+                      style={{
+                        width: "100%",
+                        background: "var(--bv-accent, #2563eb)",
+                        color: "#fff",
+                        border: "none",
+                        borderRadius: 6,
+                        padding: "0.55rem 0.9rem",
+                        fontWeight: 500,
+                        cursor: regBusy ? "wait" : "pointer",
+                      }}
+                    >
+                      {regBusy ? t("regBusy") : t("regSubmit")}
+                    </button>
+                    {regErr && (
+                      <p className="error" style={{ fontSize: "0.85rem", marginTop: "0.4rem" }}>
+                        {regErr}
+                      </p>
+                    )}
+                  </form>
+                ))}
+            </div>
+          )}
+
+          <p className="meta" style={{ marginTop: "0.75rem", fontSize: "0.8rem" }}>
+            {t("skipForNow")}
+          </p>
+          <footer
+            style={{
+              marginTop: "1rem",
+              paddingTop: "0.75rem",
+              borderTop: "1px solid var(--border, #e5e7eb)",
+              fontSize: "0.78rem",
+              opacity: 0.7,
+            }}
+          >
+            {t("footerAuditNote")}
+          </footer>
+        </BrandedShell>
+      </main>
+    );
+  }
+
+  // ---- LANDING ----------------------------------------------------------
   return (
     <main>
       <BrandedShell brandTag={t("brandTag")}>
         <header style={{ marginBottom: "1rem" }}>
           <h1 style={{ marginBottom: "0.25rem" }}>{studyTitle}</h1>
-          <p className="meta">
-            {t("sharedBy", { grantor })}
-            {info.recipient_name ? (
-              <> {t("sharedWith", { recipient: info.recipient_name })}</>
-            ) : null}
-          </p>
+          <p className="meta">{t("sharedBy", { grantor })}</p>
         </header>
 
-        {/* Privacy banner. Pseudonymization is a strong claim worth
-            calling out — a consultant who skims the page should know
-            within 1 second whether to expect the patient's real name
-            on the DICOM headers. */}
         {info.deidentified ? (
           <div
             role="note"
@@ -353,61 +500,30 @@ export default function SharedInfoPage() {
               </span>
             ))}
           </div>
-
           {info.study_date && (
             <div className="meta">
               {t("studyDate")}: {info.study_date}
             </div>
           )}
-
-          {/* Pre-flight payload: if the recipient is on a phone tether,
-              "12 file, 350 MB" prevents an unwanted multi-GB pull. */}
           {(info.total_files != null || info.total_bytes != null) && (
             <div className="meta" style={{ marginTop: "0.35rem" }}>
-              {t("contentSummary", {
-                files: info.total_files ?? 0,
-                size: sizeSuffix,
-              })}
+              {t("contentSummary", { files: info.total_files ?? 0, size: sizeSuffix })}
             </div>
           )}
-
-          <div className="meta" style={{ marginTop: "0.35rem" }}>
-            {t("permissions")}:{" "}
-            {info.permissions.length > 0
-              ? info.permissions.map(permissionLabel).join(", ")
-              : t("permissionsNone")}
-          </div>
-
           {expiresAt && (
             <div className="meta" style={{ marginTop: "0.35rem" }}>
               {isExpired ? t("expiredOn") : t("expiresOn")}: {expiresAt.toLocaleString()}
             </div>
           )}
-
           {info.max_uses !== null && (
             <div className="meta" style={{ marginTop: "0.35rem" }}>
-              {t("usesRemaining", {
-                remaining: info.uses_remaining ?? 0,
-                max: info.max_uses,
-              })}
+              {t("usesRemaining", { remaining: info.uses_remaining ?? 0, max: info.max_uses })}
             </div>
           )}
-
-          <div className="meta" style={{ marginTop: "0.35rem" }}>
-            {info.requires_password ? t("passwordRequired") : t("passwordNotRequired")}
-          </div>
-
-          {/* Pre-export progress strip. Hidden when no prep state
-              is reported (e.g. patient/folder shares) or when prep
-              has reached terminal-success — at that point the
-              "Scarica DICOM" button below carries the meaning. */}
           {prepActive && (
             <div className="meta" style={{ marginTop: "0.5rem" }}>
               <div style={{ marginBottom: "0.25rem" }}>
-                {t("prepRunning", {
-                  done: prepDone,
-                  total: prepTotal || 0,
-                })}
+                {t("prepRunning", { done: prepDone, total: prepTotal || 0 })}
               </div>
               <div
                 aria-hidden
@@ -432,14 +548,6 @@ export default function SharedInfoPage() {
               </div>
             </div>
           )}
-          {prepReady && (
-            <div
-              className="meta"
-              style={{ marginTop: "0.5rem", color: "var(--bv-success, #047857)" }}
-            >
-              ✓ {t("prepReady")}
-            </div>
-          )}
           {prepFailed && (
             <div
               className="meta"
@@ -454,125 +562,10 @@ export default function SharedInfoPage() {
           <p className="error" style={{ marginTop: "0.75rem" }}>
             {t("linkNoLongerValid")}
           </p>
-        ) : (
-          <div
-            className="actions"
-            style={{
-              marginTop: "0.75rem",
-              display: "flex",
-              gap: "0.5rem",
-              flexWrap: "wrap",
-              justifyContent: "flex-end",
-            }}
-          >
-            {/* "I received it" button is independent of /verify — the
-                consultant might confirm before they actually have time
-                to view the study (e.g. between rounds). Closes the
-                audit chain for the grantor either way. */}
-            {receiptDone ? (
-              <span
-                style={{
-                  alignSelf: "center",
-                  fontSize: "0.85rem",
-                  color: "var(--bv-success, #047857)",
-                }}
-              >
-                {t("confirmReceiptDone", { when: new Date(receiptDone).toLocaleString() })}
-              </span>
-            ) : (
-              <button
-                type="button"
-                onClick={handleConfirm}
-                disabled={receiptBusy}
-                className="ghost"
-              >
-                {receiptBusy ? t("confirmReceiptBusy") : t("confirmReceiptButton")}
-              </button>
-            )}
-            {/* Direct download via the cached artifact (no-password
-                shares only). Anchor click streams the ZIP straight
-                to disk through the proxy — same Range/resume support
-                as document downloads. Disabled visually when prep is
-                still running so the recipient understands why the
-                button isn't actionable yet. */}
-            {!info.requires_password && (
-              <a
-                href={canDirectDownload ? directDownloadUrl : undefined}
-                aria-disabled={!canDirectDownload}
-                onClick={(e) => {
-                  if (!canDirectDownload) e.preventDefault();
-                }}
-                style={{
-                  background: canDirectDownload
-                    ? "var(--bv-success, #047857)"
-                    : "var(--bv-card-bg, #fff)",
-                  color: canDirectDownload ? "#fff" : "var(--bv-fg-soft, #475569)",
-                  border: canDirectDownload ? "none" : "1px solid var(--bv-card-border, #e5e7eb)",
-                  padding: "0.5rem 0.9rem",
-                  borderRadius: 6,
-                  textDecoration: "none",
-                  cursor: canDirectDownload ? "pointer" : "not-allowed",
-                  opacity: canDirectDownload ? 1 : 0.6,
-                }}
-              >
-                {prepReady
-                  ? t("downloadDicomButton")
-                  : prepActive
-                    ? t("downloadDicomPreparing")
-                    : prepFailed
-                      ? t("downloadDicomUnavailable")
-                      : t("downloadDicomButton")}
-              </a>
-            )}
-            {/* Inline open: one click for passwordless, password +
-                submit for protected. The legacy /shared/{token}
-                verify form is no longer in the user's path —
-                already-emailed links to that path 307 here. */}
-            {!info.requires_password && (
-              <button
-                type="button"
-                onClick={() => void runVerify(null)}
-                disabled={openBusy}
-                style={{
-                  background: "#111",
-                  color: "#fff",
-                  padding: "0.5rem 0.9rem",
-                  borderRadius: 6,
-                  border: "none",
-                  cursor: openBusy ? "wait" : "pointer",
-                  fontWeight: 500,
-                }}
-              >
-                {openBusy ? t("opening") : t("openButton")}
-              </button>
-            )}
-          </div>
-        )}
-        {info.requires_password && !isExpired && !noUsesLeft && (
-          <form
-            onSubmit={(e) => void handleSubmitPassword(e)}
-            style={{
-              display: "flex",
-              flexWrap: "wrap",
-              gap: "0.5rem",
-              alignItems: "center",
-              marginTop: "0.5rem",
-              background: "var(--bv-card-bg-soft, #f9fafb)",
-              border: "1px solid var(--border, #e5e7eb)",
-              borderRadius: 6,
-              padding: "0.5rem 0.75rem",
-            }}
-          >
-            <label
-              style={{
-                flex: "1 1 240px",
-                display: "flex",
-                flexDirection: "column",
-                gap: "0.25rem",
-                fontSize: "0.85rem",
-              }}
-            >
-              <span>{t("passwordRequired")}</span>
+        ) : info.requires_password ? (
+          <form onSubmit={(e) => void handleSubmitPassword(e)} style={{ marginTop: "0.9rem" }}>
+            <label style={{ display: "block", marginBottom: "0.5rem" }}>
+              <span className="meta">{t("passwordRequired")}</span>
               <input
                 ref={passwordInputRef}
                 type="password"
@@ -580,42 +573,86 @@ export default function SharedInfoPage() {
                 onChange={(e) => setPassword(e.target.value)}
                 disabled={openBusy}
                 placeholder={t("passwordPlaceholder")}
-                style={{ padding: "0.4rem 0.5rem", font: "inherit" }}
+                style={{ width: "100%", marginTop: "0.3rem" }}
               />
             </label>
             <button
               type="submit"
               disabled={openBusy || !password}
               style={{
+                width: "100%",
                 background: "#111",
                 color: "#fff",
-                padding: "0.5rem 0.9rem",
-                borderRadius: 6,
                 border: "none",
+                borderRadius: 8,
+                padding: "0.8rem 1rem",
+                fontSize: "1.05rem",
+                fontWeight: 600,
                 cursor: openBusy || !password ? "not-allowed" : "pointer",
-                fontWeight: 500,
                 opacity: !password ? 0.6 : 1,
               }}
             >
               {openBusy ? t("opening") : t("openButton")}
             </button>
           </form>
-        )}
-        {verifyErr && (
-          <p
-            className="error"
+        ) : (
+          <button
+            type="button"
+            onClick={() => void runVerify(null)}
+            disabled={openBusy}
             style={{
-              fontSize: "0.85rem",
-              marginTop: "0.4rem",
-              color: "var(--bv-danger, #b91c1c)",
+              width: "100%",
+              marginTop: "0.9rem",
+              background: "#111",
+              color: "#fff",
+              border: "none",
+              borderRadius: 8,
+              padding: "0.8rem 1rem",
+              fontSize: "1.1rem",
+              fontWeight: 600,
+              cursor: openBusy ? "wait" : "pointer",
             }}
           >
-            {verifyErr}
-          </p>
+            {openBusy ? t("opening") : t("openButton")}
+          </button>
         )}
-        {receiptErr && (
-          <p className="error" style={{ fontSize: "0.85rem" }}>
-            {receiptErr}
+
+        {/* Secondary: direct ZIP download (no-password links only). */}
+        {!info.requires_password && !isExpired && !noUsesLeft && (
+          <a
+            href={canDirectDownload ? directDownloadUrl : undefined}
+            aria-disabled={!canDirectDownload}
+            onClick={(e) => {
+              if (!canDirectDownload) e.preventDefault();
+            }}
+            style={{
+              display: "block",
+              textAlign: "center",
+              marginTop: "0.5rem",
+              padding: "0.5rem 0.9rem",
+              borderRadius: 6,
+              border: "1px solid var(--bv-card-border, #e5e7eb)",
+              background: "var(--bv-card-bg, #fff)",
+              color: "var(--bv-fg-soft, #475569)",
+              textDecoration: "none",
+              cursor: canDirectDownload ? "pointer" : "not-allowed",
+              opacity: canDirectDownload ? 1 : 0.6,
+              fontSize: "0.9rem",
+            }}
+          >
+            {prepReady
+              ? t("downloadDicomButton")
+              : prepActive
+                ? t("downloadDicomPreparing")
+                : prepFailed
+                  ? t("downloadDicomUnavailable")
+                  : t("downloadDicomButton")}
+          </a>
+        )}
+
+        {verifyErr && (
+          <p className="error" style={{ fontSize: "0.85rem", marginTop: "0.5rem" }}>
+            {verifyErr}
           </p>
         )}
 
