@@ -224,6 +224,25 @@ SCOPE_CATALOG: tuple[ScopeDef, ...] = (
     # --- Tags + metadata ------------------------------------------------------
     ScopeDef("tags:read", "Read tags + tag aliases"),
     ScopeDef("tags:write", "Add / replace / remove tags on study / series / patient"),
+    # Descriptive-metadata edits on the imaging hierarchy. Distinct from
+    # ``tags:write`` (a tag is a searchable label) and from
+    # ``imaging:compute`` (expensive derived-data production): these edit
+    # the human-readable ``*_description`` / ``body_part`` display fields.
+    # The DICOM-authoritative columns (UIDs, acquired modality) stay
+    # read-only at the endpoint. A dedicated scope lets an operator grant
+    # a metadata-tidying assistant exactly this, without tag or compute
+    # privileges.
+    ScopeDef(
+        "studies:write_metadata",
+        "Edit a study's safe descriptive fields (study_description). "
+        "DICOM-authoritative fields stay read-only.",
+    ),
+    ScopeDef(
+        "series:write_metadata",
+        "Edit a series' safe descriptive fields (series_description, "
+        "body_part_examined, corrected modality). DICOM-authoritative "
+        "fields stay read-only.",
+    ),
     # --- Folders (Google Drive-style hierarchical grouping) -------------------
     # Folders hold heterogeneous items (study / series / report / annotation /
     # document / consultation / sub-folder). They are the primary navigation
@@ -443,8 +462,8 @@ TOOL_SCOPE: dict[str, str] = {
     "add_tag_to_study": "tags:write",
     "remove_tag_from_study": "tags:write",
     "replace_study_tags": "tags:write",
-    "update_series_metadata": "imaging:compute",
-    "update_study_metadata": "tags:write",
+    "update_series_metadata": "series:write_metadata",
+    "update_study_metadata": "studies:write_metadata",
     "summarize": "search:read",
     "extract_document_entities": "reports:write",
     "similar_to": "search:read",

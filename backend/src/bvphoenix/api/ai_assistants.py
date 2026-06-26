@@ -117,8 +117,6 @@ _LEGACY_SCOPES: frozenset[str] = frozenset(
         "patient:images",
         "consultation:read",
         "consultation:write",
-        "studies:write_metadata",
-        "series:write_metadata",
         "consultations:finalize",
     }
 )
@@ -153,6 +151,8 @@ _SCOPE_LABELS: dict[str, str] = {
     "imaging:compute": "Trigger expensive imaging compute (segmentation, registration, embeddings)",
     "tags:read": "Read tags",
     "tags:write": "Modify tags on study, series, or patient",
+    "studies:write_metadata": "Edit study description (safe metadata)",
+    "series:write_metadata": "Edit series description + body part (safe metadata)",
     "folders:read": "List folders + read folder contents",
     "folders:write": "Create, rename, move, delete folders, add or remove items",
     "search:read": "Full-text + semantic search",
