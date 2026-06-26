@@ -34,6 +34,7 @@ from bvphoenix.auth import (
     require_user,
     verify_password,
 )
+from bvphoenix.auth.deps import clear_session_cookie, set_session_cookie
 from bvphoenix.auth.tokens import decode_token
 from bvphoenix.config import Settings, get_settings
 from bvphoenix.db.models import (
@@ -88,13 +89,6 @@ _reset_limiter = SlidingWindowRateLimiter(max_hits=10, window_seconds=60.0)
 SESSION_COOKIE_NAME = "bvp_session"
 
 
-def _is_secure_request(request: Request) -> bool:
-    """Set the cookie's ``Secure`` flag iff the request landed over
-    HTTPS. Local dev on http://localhost stays usable; production
-    behind Traefik always sees https."""
-    return request.url.scheme == "https"
-
-
 def _set_session_cookie(
     response: Response,
     request: Request,
@@ -102,32 +96,15 @@ def _set_session_cookie(
     *,
     max_age: int,
 ) -> None:
-    """Emit the HttpOnly session cookie alongside the legacy JSON
-    response. ``SameSite=Lax`` keeps OIDC's top-level redirect working
-    while still blocking cross-site POST attacks; the API does not
-    accept form-data on state-changing endpoints so the small remaining
-    window (top-level POST navigation) is closed at the content-type
-    layer.
-    """
-    response.set_cookie(
-        key=SESSION_COOKIE_NAME,
-        value=token,
-        max_age=max_age,
-        httponly=True,
-        secure=_is_secure_request(request),
-        samesite="lax",
-        path="/",
-    )
+    """Thin wrapper over the canonical writer in ``auth.deps`` so login,
+    OIDC, and the share-link recipient flows emit byte-identical cookie
+    attributes (the reader ``_creds_from_request`` lives next to it)."""
+    set_session_cookie(response, request, token, max_age=max_age)
 
 
 def _clear_session_cookie(response: Response, request: Request) -> None:
     """Mirror of ``_set_session_cookie`` for logout."""
-    response.delete_cookie(
-        key=SESSION_COOKIE_NAME,
-        path="/",
-        secure=_is_secure_request(request),
-        samesite="lax",
-    )
+    clear_session_cookie(response, request)
 
 
 class RegisterIn(BaseModel):
@@ -176,6 +153,11 @@ class UserOut(BaseModel):
     display_name: str
     is_admin: bool
     email_verified: bool
+    # True when the caller authenticated via a share-link JWT (anonymous
+    # PUBLIC principal scoped to one grant), not a real account. The SPA
+    # uses it to show the "create an account to keep this access" banner
+    # and to avoid treating the guest as a fully signed-in user.
+    is_anonymous_share: bool = False
 
 
 class ForgotPasswordIn(BaseModel):
@@ -464,11 +446,17 @@ async def logout(
 
 @router.get("/me", response_model=UserOut)
 async def me(
+    request: Request,
     user: Annotated[User, Depends(require_user)],
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> UserOut:
     subject = (await db.execute(select(Subject).where(Subject.id == user.subject_id))).scalar_one()
-    return _user_to_out(user, subject)
+    out = _user_to_out(user, subject)
+    # ``share_grant`` is pinned onto request.state by the share-link auth
+    # branch (auth.deps); its presence means this is an anonymous guest
+    # session, which the SPA surfaces as a "create an account" prompt.
+    out.is_anonymous_share = getattr(request.state, "share_grant", None) is not None
+    return out
 
 
 class StorageUsageOut(BaseModel):

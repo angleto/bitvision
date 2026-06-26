@@ -5,7 +5,7 @@ import Link from "next/link";
 import { useRouter, useSearchParams } from "next/navigation";
 import { type FormEvent, Suspense, useState } from "react";
 
-import { ApiError } from "@/lib/api";
+import { ApiError, authApi } from "@/lib/api";
 import { useAuth } from "@/lib/auth-context";
 import { safeInternalPath } from "@/lib/safe-redirect";
 
@@ -55,6 +55,24 @@ function LoginForm() {
         await loginMfa(email, password, totpCode.trim());
       } else {
         await login(email, password);
+      }
+      // Share-link reconciliation: when the recipient arrived here from a
+      // share's "log in and connect" CTA, attach the grant to the account
+      // they just authenticated as. Best-effort — a failure (e.g. the link
+      // was addressed to a different email) must not block the login: the
+      // user still lands on ``next`` and can retry from the share link.
+      if (search.get("then") === "bind") {
+        const bindToken = search.get("token");
+        const bindSid = search.get("sid");
+        try {
+          if (bindToken) {
+            await authApi.bindShareLinkByToken(bindToken);
+          } else if (bindSid) {
+            await authApi.shareSessionBind(bindSid);
+          }
+        } catch {
+          // swallow — see comment above
+        }
       }
       // Validate ``?next=`` before redirecting to defend against the
       // open-redirect / phishing vector: a crafted

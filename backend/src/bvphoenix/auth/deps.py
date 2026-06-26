@@ -26,7 +26,7 @@ import uuid
 from datetime import UTC, datetime
 from typing import Annotated
 
-from fastapi import Depends, HTTPException, Request, status
+from fastapi import Depends, HTTPException, Request, Response, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -72,6 +72,47 @@ def _creds_from_request(
     if cookie_token:
         return HTTPAuthorizationCredentials(scheme="Bearer", credentials=cookie_token)
     return None
+
+
+def set_session_cookie(
+    response: Response,
+    request: Request,
+    token: str,
+    *,
+    max_age: int,
+) -> None:
+    """Write the ``bvp_session`` HttpOnly cookie that
+    :func:`_creds_from_request` reads back.
+
+    Single source of truth for every flow that mints a *browser*
+    session: password login, OIDC, and the share-link ``verify`` /
+    ``claim`` recipient flows. Co-located with the reader so the two
+    never drift. ``SameSite=Lax`` keeps OIDC's top-level redirect
+    working while blocking cross-site POST attacks (the API rejects
+    form-data on state-changing endpoints, closing the residual
+    top-level-POST window at the content-type layer). ``Secure`` is set
+    iff the request arrived over HTTPS, so ``http://localhost`` dev
+    stays usable while prod behind Traefik is always secure.
+    """
+    response.set_cookie(
+        key=_SESSION_COOKIE_NAME,
+        value=token,
+        max_age=max_age,
+        httponly=True,
+        secure=request.url.scheme == "https",
+        samesite="lax",
+        path="/",
+    )
+
+
+def clear_session_cookie(response: Response, request: Request) -> None:
+    """Mirror of :func:`set_session_cookie` for logout."""
+    response.delete_cookie(
+        key=_SESSION_COOKIE_NAME,
+        path="/",
+        secure=request.url.scheme == "https",
+        samesite="lax",
+    )
 
 
 async def _resolve_user_from_creds(
