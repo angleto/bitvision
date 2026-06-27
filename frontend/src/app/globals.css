@@ -89,6 +89,15 @@ html.dark {
   --bv-success-soft: #102921;
   --bv-danger-soft: #2d1414;
   --bv-warning-soft: #2c2010;
+  /* Semantic FOREGROUND tokens must be re-tuned for dark: the light-mode
+     values (#1e40af / #047857 / #b91c1c / #b45309) sit at ~1.5-3.2:1 on
+     their dark *-soft backgrounds (the info badge and the allergies chip
+     are effectively illegible). These lighter shades clear WCAG AA (4.5:1)
+     on the dark soft surfaces and on the card background. */
+  --bv-info: #93b4ff;
+  --bv-success: #34d399;
+  --bv-danger: #f87171;
+  --bv-warning: #fbbf24;
   --bv-header-bg: #11151e;
   --bv-header-border: #1c2230;
   --bv-shadow-1: 0 1px 2px rgba(0, 0, 0, 0.5);
@@ -998,6 +1007,59 @@ dialog.care-phase-inner-editor::backdrop {
      and force a sideways scroll the user can't reach. */
   .viewer-layout--mobile [aria-label="sidebar sections"] {
     flex-wrap: wrap;
+  }
+}
+
+/* ---------- patient Fascicolo: edit form + contacts grids ----------
+   Two-column profile grid and the 5-track contacts row. ``min-width: 0``
+   at every width lets the fr tracks shrink below the inputs' intrinsic
+   width (without it the email/phone fields force horizontal overflow even
+   on desktop). Below 600px both collapse to a single column so phones get
+   a readable, full-width stack instead of slivers + sideways scroll. */
+.bv-edit-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 0.5rem;
+}
+.bv-contact-row {
+  display: grid;
+  grid-template-columns: 1.4fr 1fr 1.4fr 1.2fr auto;
+  gap: 0.4rem;
+  margin-bottom: 0.4rem;
+  align-items: center;
+}
+.bv-contact-row > * {
+  min-width: 0;
+}
+@media (max-width: 600px) {
+  .bv-edit-grid,
+  .bv-contact-row {
+    grid-template-columns: 1fr;
+  }
+  /* The remove (×) button shouldn't span a full row; keep it compact and
+     right-aligned once the fields stack. */
+  .bv-contact-row > button {
+    justify-self: end;
+  }
+}
+
+/* ---------- patient Fascicolo: Health Record tab strip ----------
+   Nine tabs wrap to ~3 rows on phones and the active-tab underline breaks
+   across rows. Below 600px switch to a single horizontally-scrollable row
+   so the baseline stays coherent and the strip never pushes content down. */
+@media (max-width: 600px) {
+  .fascicolo-view-toggle [role="tablist"] {
+    flex-wrap: nowrap;
+    overflow-x: auto;
+    -webkit-overflow-scrolling: touch;
+    scrollbar-width: none;
+  }
+  .fascicolo-view-toggle [role="tablist"]::-webkit-scrollbar {
+    display: none;
+  }
+  .fascicolo-view-toggle [role="tablist"] > button {
+    flex: 0 0 auto;
+    white-space: nowrap;
   }
 }
 
