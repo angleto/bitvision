@@ -428,6 +428,9 @@ export default function ClinicalNotesSticky({ patient, isOwner, onUpdated }: Pro
           <div
             id="bv-clinical-notes-body"
             data-clinical-notes-sticky-body=""
+            // Drives the COLLAPSED-only mobile max-height cap in globals.css
+            // (the ``!important`` rule must not clamp the expanded body).
+            data-expanded={expanded ? "true" : "false"}
             style={{
               position: "relative",
               padding: "0.6rem 0.85rem",

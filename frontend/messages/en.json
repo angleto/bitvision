@@ -513,6 +513,7 @@
     "languageItalian": "Italian"
   },
   "site": {
+    "menuToggle": "Menu",
     "search": "Search",
     "searchPlaceholder": "Search studies (e.g. angio, chest, MR...)",
     "studies": "Studies",

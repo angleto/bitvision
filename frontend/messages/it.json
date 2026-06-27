@@ -513,6 +513,7 @@
     "languageItalian": "Italiano"
   },
   "site": {
+    "menuToggle": "Menu",
     "search": "Cerca",
     "searchPlaceholder": "Cerca studi (es. angio, torace, RM...)",
     "studies": "Studi",

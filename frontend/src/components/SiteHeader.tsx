@@ -3,7 +3,7 @@
 import { useTranslations } from "next-intl";
 import Image from "next/image";
 import Link from "next/link";
-import { useRouter, useSearchParams } from "next/navigation";
+import { usePathname, useRouter, useSearchParams } from "next/navigation";
 import { useEffect, useRef, useState } from "react";
 
 import ActiveJobsPanel from "@/components/ActiveJobsPanel";
@@ -17,6 +17,19 @@ export default function SiteHeader() {
   const searchParams = useSearchParams();
   const [q, setQ] = useState(searchParams.get("q") ?? "");
   const t = useTranslations("site");
+  // Mobile nav collapse: below ~768px the nav is hidden behind a
+  // hamburger and rendered as an overlay panel, so the header (and the
+  // page) never overflow horizontally on phones.
+  const [menuOpen, setMenuOpen] = useState(false);
+  const rowRef = useRef<HTMLDivElement>(null);
+  const pathname = usePathname();
+  // Close the mobile menu whenever the route changes (a nav link was
+  // followed). Keyboard- and mouse-agnostic, so no click handler needed
+  // on the nav itself.
+  // biome-ignore lint/correctness/useExhaustiveDependencies: close on path change only
+  useEffect(() => {
+    setMenuOpen(false);
+  }, [pathname]);
 
   // Defer auth-conditional chrome until after first client commit.
   // The server renders the unauthenticated tree (no token in
@@ -32,9 +45,26 @@ export default function SiteHeader() {
   }, []);
   const isAuthed = hydrated && status === "ready" && !!user;
 
+  // Close the mobile menu on outside pointerdown / Escape.
+  useEffect(() => {
+    if (!menuOpen) return;
+    const onPointer = (e: PointerEvent) => {
+      if (rowRef.current && !rowRef.current.contains(e.target as Node)) setMenuOpen(false);
+    };
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") setMenuOpen(false);
+    };
+    document.addEventListener("pointerdown", onPointer);
+    document.addEventListener("keydown", onKey);
+    return () => {
+      document.removeEventListener("pointerdown", onPointer);
+      document.removeEventListener("keydown", onKey);
+    };
+  }, [menuOpen]);
+
   return (
     <header className="site-header">
-      <div className="site-header__row">
+      <div className="site-header__row" ref={rowRef}>
         <Link href="/" className="site-header__logo">
           <Image
             src="/brand/wordmark.png"
@@ -66,7 +96,20 @@ export default function SiteHeader() {
             />
           </form>
         )}
-        <nav className="site-header__nav">
+        <button
+          type="button"
+          className="site-header__menu-toggle ghost"
+          aria-label={t("menuToggle")}
+          aria-expanded={menuOpen}
+          aria-controls="site-header-nav"
+          onClick={() => setMenuOpen((o) => !o)}
+        >
+          ☰
+        </button>
+        <nav
+          id="site-header-nav"
+          className={menuOpen ? "site-header__nav is-open" : "site-header__nav"}
+        >
           {isAuthed && (
             <>
               <Link href="/patients">{t("patients")}</Link>
