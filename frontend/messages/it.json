@@ -2743,6 +2743,10 @@
     "agendaEmpty": "Nessun evento nel periodo selezionato."
   },
   "eventActions": {
+    "phaseLabel": "Fase di cura",
+    "phaseUnassigned": "Non assegnata",
+    "phaseSaving": "Salvataggio…",
+    "phaseAssignError": "Impossibile aggiornare la fase",
     "confirm": "Conferma",
     "reschedule": "Sposta",
     "complete": "Completa",
