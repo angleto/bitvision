@@ -291,14 +291,14 @@ export default function ClinicalNotesSticky({ patient, isOwner, onUpdated }: Pro
         // tab strip and stay there until collapsed.
         position: expanded || editing ? "relative" : "sticky",
         top: expanded || editing ? "auto" : "calc(var(--header-h, 56px) + 0.5rem)",
-        // High enough to stay above the folder grid below: FolderGlimpse
-        // promotes the folder glyph to z-index 99 (and tile peeks to ~13).
-        // Modal dialogs sit at 1000 so they still cover this when open.
-        zIndex: 100,
-        // Force a private stacking context so the expanded body never
-        // bleeds the folder grid through, regardless of the sibling's
-        // own z-indexed children.
-        isolation: "isolate",
+        // z-index + isolation are only needed while the memo is the
+        // collapsed STICKY overlay (it must float above the folder grid /
+        // tile peeks below). When expanded it returns to normal flow, so we
+        // drop both: a stacking context here would let the expanded card
+        // PAINT OVER the tabs/content below instead of pushing them down
+        // (the mobile-only overlap report). Modal dialogs sit at 1000.
+        zIndex: expanded || editing ? "auto" : 100,
+        isolation: expanded || editing ? "auto" : "isolate",
         marginTop: "1rem",
         marginBottom: "1rem",
         border: "1px solid var(--bv-card-border)",
@@ -443,7 +443,14 @@ export default function ClinicalNotesSticky({ patient, isOwner, onUpdated }: Pro
               WebkitMaskImage: expanded
                 ? "none"
                 : "linear-gradient(to bottom, black 60%, transparent 100%)",
-              transition: "max-height 0.2s ease",
+              // Only animate the COLLAPSE. Transitioning max-height to
+              // ``none`` is unreliable on WebKit (iOS/mobile Safari): the
+              // value stays stuck at the collapsed 140px while overflow
+              // flips to visible, so the body spills out and (with the old
+              // z-index) painted over the elements below — the mobile-only
+              // "expanded memo overflows over other elements" bug. Disabling
+              // the transition while expanded makes ``none`` apply at once.
+              transition: expanded ? "none" : "max-height 0.2s ease",
               lineHeight: 1.5,
               fontSize: "0.9rem",
             }}
