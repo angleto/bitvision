@@ -808,7 +808,15 @@ export default function FascicoloDriveLayout({ patientId, isOwner }: Props) {
             draggingId={draggingNodeId}
           />
 
-          <div style={{ display: "flex", gap: "0.35rem", alignItems: "center" }}>
+          <div
+            style={{
+              display: "flex",
+              gap: "0.35rem",
+              alignItems: "center",
+              flexWrap: "wrap",
+              rowGap: "0.35rem",
+            }}
+          >
             {VIEW_MODE_KEYS.map(([mode, key]) => (
               <ViewModeButton
                 key={mode}

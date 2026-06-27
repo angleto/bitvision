@@ -204,98 +204,100 @@ export default function DocumentsV3Panel({ patientId, isOwner }: Props) {
       </header>
 
       {docs.length === 0 ? (
-        <p style={{ color: "var(--muted-fg, #666)" }}>{t("empty")}</p>
+        <p style={{ color: "var(--bv-muted)" }}>{t("empty")}</p>
       ) : (
-        <table style={{ width: "100%", fontSize: "0.9rem" }}>
-          <thead>
-            <tr>
-              {isOwner && <th />}
-              <th style={{ textAlign: "left" }}>{t("colTitle")}</th>
-              <th style={{ textAlign: "left" }}>
-                <SortableHeader
-                  active={sortKey === "kind"}
-                  dir={sortDir}
-                  onClick={() => cycleSort("kind")}
-                  label={t("colKind")}
-                  ariaLabel={t("sortByKind")}
-                />
-              </th>
-              <th style={{ textAlign: "left" }}>{t("colAuthority")}</th>
-              <th style={{ textAlign: "left" }}>
-                <SortableHeader
-                  active={sortKey === "date"}
-                  dir={sortDir}
-                  onClick={() => cycleSort("date")}
-                  label={t("colDate")}
-                  ariaLabel={t("sortByDate")}
-                />
-              </th>
-              <th style={{ textAlign: "left" }}>{t("colHash")}</th>
-              <th />
-            </tr>
-          </thead>
-          <tbody>
-            {sortedDocs.map((d) => (
-              <tr key={d.id}>
-                {isOwner && (
+        <div style={{ overflowX: "auto" }}>
+          <table style={{ width: "100%", fontSize: "0.9rem" }}>
+            <thead>
+              <tr>
+                {isOwner && <th />}
+                <th style={{ textAlign: "left" }}>{t("colTitle")}</th>
+                <th style={{ textAlign: "left" }}>
+                  <SortableHeader
+                    active={sortKey === "kind"}
+                    dir={sortDir}
+                    onClick={() => cycleSort("kind")}
+                    label={t("colKind")}
+                    ariaLabel={t("sortByKind")}
+                  />
+                </th>
+                <th style={{ textAlign: "left" }}>{t("colAuthority")}</th>
+                <th style={{ textAlign: "left" }}>
+                  <SortableHeader
+                    active={sortKey === "date"}
+                    dir={sortDir}
+                    onClick={() => cycleSort("date")}
+                    label={t("colDate")}
+                    ariaLabel={t("sortByDate")}
+                  />
+                </th>
+                <th style={{ textAlign: "left" }}>{t("colHash")}</th>
+                <th />
+              </tr>
+            </thead>
+            <tbody>
+              {sortedDocs.map((d) => (
+                <tr key={d.id}>
+                  {isOwner && (
+                    <td>
+                      <input
+                        type="checkbox"
+                        checked={selected.has(d.id)}
+                        onChange={() => toggle(d.id)}
+                      />
+                    </td>
+                  )}
                   <td>
-                    <input
-                      type="checkbox"
-                      checked={selected.has(d.id)}
-                      onChange={() => toggle(d.id)}
-                    />
+                    <Link
+                      href={`/patients/${patientId}/documents/${d.id}?from=documents`}
+                      style={{ textDecoration: "none" }}
+                    >
+                      {d.title}
+                    </Link>
                   </td>
-                )}
-                <td>
-                  <Link
-                    href={`/patients/${patientId}/documents/${d.id}?from=documents`}
-                    style={{ textDecoration: "none" }}
-                  >
-                    {d.title}
-                  </Link>
-                </td>
-                <td>
-                  <small>{kindLabel(d.kind_id)}</small>
-                </td>
-                <td>
-                  <span
+                  <td>
+                    <small>{kindLabel(d.kind_id)}</small>
+                  </td>
+                  <td>
+                    <span
+                      style={{
+                        fontSize: "0.7rem",
+                        padding: "0.1rem 0.4rem",
+                        borderRadius: "999px",
+                        background: AUTHORITY_COLOR[d.authority_id] ?? "#9ca3af",
+                        color: "white",
+                      }}
+                    >
+                      {authorityLabel(d.authority_id)}
+                    </span>
+                  </td>
+                  <td>{d.document_date ?? d.created_at.slice(0, 10)}</td>
+                  <td
                     style={{
-                      fontSize: "0.7rem",
-                      padding: "0.1rem 0.4rem",
-                      borderRadius: "999px",
-                      background: AUTHORITY_COLOR[d.authority_id] ?? "#9ca3af",
-                      color: "white",
+                      fontFamily: "monospace",
+                      fontSize: "0.75em",
+                      color: "var(--bv-muted)",
                     }}
                   >
-                    {authorityLabel(d.authority_id)}
-                  </span>
-                </td>
-                <td>{d.document_date ?? d.created_at.slice(0, 10)}</td>
-                <td
-                  style={{
-                    fontFamily: "monospace",
-                    fontSize: "0.75em",
-                    color: "var(--muted-fg, #666)",
-                  }}
-                >
-                  {d.content_sha256 ? `${d.content_sha256.slice(0, 8)}…` : "—"}
-                </td>
-                <td style={{ textAlign: "right" }}>
-                  <Link
-                    href={`/provenance/document/${d.id}`}
-                    style={{ marginRight: "0.5rem", fontSize: "0.85rem" }}
-                  >
-                    {t("history")}
-                  </Link>
-                  {(d.kind_id === "imaging_study_bundle" ||
-                    d.provenance_id === "dicom_dvd_iso") && (
-                    <IsoDownloadButton documentId={d.id} filename={d.title} label="ISO" />
-                  )}
-                </td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
+                    {d.content_sha256 ? `${d.content_sha256.slice(0, 8)}…` : "—"}
+                  </td>
+                  <td style={{ textAlign: "right" }}>
+                    <Link
+                      href={`/provenance/document/${d.id}`}
+                      style={{ marginRight: "0.5rem", fontSize: "0.85rem" }}
+                    >
+                      {t("history")}
+                    </Link>
+                    {(d.kind_id === "imaging_study_bundle" ||
+                      d.provenance_id === "dicom_dvd_iso") && (
+                      <IsoDownloadButton documentId={d.id} filename={d.title} label="ISO" />
+                    )}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
       )}
 
       <IngestDocumentDialog

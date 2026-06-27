@@ -129,7 +129,7 @@ export default function FascicoloViewToggle({
           display: "flex",
           gap: "0.25rem",
           marginBottom: "1rem",
-          borderBottom: "1px solid var(--border, #d0d5dd)",
+          borderBottom: "1px solid var(--bv-card-border)",
           flexWrap: "wrap",
         }}
       >
@@ -174,7 +174,7 @@ export default function FascicoloViewToggle({
           id="fascicolo-tabpanel-events"
           aria-labelledby="fascicolo-tab-events"
         >
-          <p style={{ color: "var(--muted-fg, #666)", margin: "0 0 1rem" }}>{t("captionEvents")}</p>
+          <p style={{ color: "var(--bv-muted)", margin: "0 0 1rem" }}>{t("captionEvents")}</p>
           {mergedActive ? (
             <MergedTimelineView patientId={patient.id} isOwner={isOwner} />
           ) : (
@@ -189,7 +189,7 @@ export default function FascicoloViewToggle({
           id="fascicolo-tabpanel-tasks"
           aria-labelledby="fascicolo-tab-tasks"
         >
-          <p style={{ color: "var(--muted-fg, #666)", margin: "0 0 1rem" }}>{t("captionTasks")}</p>
+          <p style={{ color: "var(--bv-muted)", margin: "0 0 1rem" }}>{t("captionTasks")}</p>
           {mergedActive ? (
             <MergedTimelineView patientId={patient.id} isOwner={isOwner} />
           ) : (
@@ -204,9 +204,7 @@ export default function FascicoloViewToggle({
           id="fascicolo-tabpanel-calendar"
           aria-labelledby="fascicolo-tab-calendar"
         >
-          <p style={{ color: "var(--muted-fg, #666)", margin: "0 0 1rem" }}>
-            {t("captionCalendar")}
-          </p>
+          <p style={{ color: "var(--bv-muted)", margin: "0 0 1rem" }}>{t("captionCalendar")}</p>
           <EventCalendar patientId={patient.id} isOwner={isOwner} />
         </section>
       )}
@@ -217,9 +215,7 @@ export default function FascicoloViewToggle({
           id="fascicolo-tabpanel-documents"
           aria-labelledby="fascicolo-tab-documents"
         >
-          <p style={{ color: "var(--muted-fg, #666)", margin: "0 0 1rem" }}>
-            {t("captionDocuments")}
-          </p>
+          <p style={{ color: "var(--bv-muted)", margin: "0 0 1rem" }}>{t("captionDocuments")}</p>
           <DocumentsV3Panel patientId={patient.id} isOwner={isOwner} />
         </section>
       )}
@@ -230,9 +226,7 @@ export default function FascicoloViewToggle({
           id="fascicolo-tabpanel-evidence"
           aria-labelledby="fascicolo-tab-evidence"
         >
-          <p style={{ color: "var(--muted-fg, #666)", margin: "0 0 1rem" }}>
-            {t("captionEvidence")}
-          </p>
+          <p style={{ color: "var(--bv-muted)", margin: "0 0 1rem" }}>{t("captionEvidence")}</p>
           <EvidenceWorkspace patient={patient} />
         </section>
       )}
@@ -243,16 +237,14 @@ export default function FascicoloViewToggle({
           id="fascicolo-tabpanel-provenance"
           aria-labelledby="fascicolo-tab-provenance"
         >
-          <p style={{ color: "var(--muted-fg, #666)", margin: "0 0 1rem" }}>
-            {t("captionProvenance")}
-          </p>
+          <p style={{ color: "var(--bv-muted)", margin: "0 0 1rem" }}>{t("captionProvenance")}</p>
           <ProvenanceTimeline targetKind="patient" targetId={patient.id} />
         </section>
       )}
 
       {view === "ask" && (
         <section role="tabpanel" id="fascicolo-tabpanel-ask" aria-labelledby="fascicolo-tab-ask">
-          <p style={{ color: "var(--muted-fg, #666)", margin: "0 0 1rem" }}>{t("captionAsk")}</p>
+          <p style={{ color: "var(--bv-muted)", margin: "0 0 1rem" }}>{t("captionAsk")}</p>
           <PatientAskPanel patientId={patient.id} />
         </section>
       )}
@@ -263,7 +255,7 @@ export default function FascicoloViewToggle({
           id="fascicolo-tabpanel-shares"
           aria-labelledby="fascicolo-tab-shares"
         >
-          <p style={{ color: "var(--muted-fg, #666)", margin: "0 0 1rem" }}>{t("captionShares")}</p>
+          <p style={{ color: "var(--bv-muted)", margin: "0 0 1rem" }}>{t("captionShares")}</p>
           <ShareLinksTable patientId={patient.id} />
         </section>
       )}

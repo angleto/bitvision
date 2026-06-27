@@ -78,7 +78,24 @@ export default function EvidenceContent({ patientId, body, ctx }: Props) {
   const proc = (children: ReactNode) =>
     walkChildren(children, (text, k) => renderSegments(text, patientId, ctxToken, k));
   return (
-    <div style={{ lineHeight: 1.55 }}>
+    <div
+      style={{
+        lineHeight: 1.55,
+        // The read view must NEVER overflow its container, whatever the
+        // body holds. Without this, an expanded note (the sticky drops
+        // ``overflow:hidden`` to ``visible`` when expanded) spills long
+        // URLs / unbroken tokens / code blocks / long mention pills off
+        // the side of the page and becomes unreadable — worst on mobile
+        // where the box is ~343px wide. ``overflowWrap: anywhere`` breaks
+        // long strings; ``minWidth: 0`` lets the box shrink inside any
+        // flex/grid ancestor. ``maxWidth: min(72ch, 100%)`` also caps the
+        // reading measure on wide desktops without affecting narrow ones.
+        maxWidth: "min(72ch, 100%)",
+        minWidth: 0,
+        overflowWrap: "anywhere",
+        wordBreak: "break-word",
+      }}
+    >
       <ReactMarkdown
         urlTransform={urlTransform}
         components={{
@@ -89,6 +106,15 @@ export default function EvidenceContent({ patientId, body, ctx }: Props) {
           h4: ({ children }) => <h6 style={{ margin: "0.5rem 0 0.3rem" }}>{proc(children)}</h6>,
           h5: ({ children }) => <h6 style={{ margin: "0.5rem 0 0.3rem" }}>{proc(children)}</h6>,
           h6: ({ children }) => <h6 style={{ margin: "0.5rem 0 0.3rem" }}>{proc(children)}</h6>,
+          // Inline/pasted images must scale down to the card, never
+          // force the note wider than its container.
+          img: ({ src, alt }) => (
+            <img
+              src={typeof src === "string" ? src : undefined}
+              alt={alt ?? ""}
+              style={{ maxWidth: "100%", height: "auto", borderRadius: 4 }}
+            />
+          ),
           ul: ({ children }) => (
             <ul style={{ margin: "0.3rem 0", paddingLeft: "1.4em" }}>{children}</ul>
           ),
@@ -171,10 +197,32 @@ export default function EvidenceContent({ patientId, body, ctx }: Props) {
                 padding: "0.05em 0.35em",
                 borderRadius: 3,
                 fontSize: "0.92em",
+                overflowWrap: "anywhere",
               }}
             >
               {children}
             </code>
+          ),
+          // Fenced code blocks render as <pre><code>. Without an explicit
+          // override <pre> is ``white-space: pre`` (no wrapping), so a
+          // single long line escapes the card and breaks the whole page.
+          // Wrap it instead of clipping so the note stays readable.
+          pre: ({ children }) => (
+            <pre
+              style={{
+                margin: "0.4rem 0",
+                padding: "0.5rem 0.6rem",
+                background: "var(--bv-card-bg, #f6f8fa)",
+                borderRadius: 6,
+                fontSize: "0.85rem",
+                whiteSpace: "pre-wrap",
+                overflowWrap: "anywhere",
+                wordBreak: "break-word",
+                maxWidth: "100%",
+              }}
+            >
+              {children}
+            </pre>
           ),
         }}
       >
@@ -341,6 +389,9 @@ function MentionPill({
         textDecoration: "none",
         margin: "0 1px",
         whiteSpace: "nowrap",
+        maxWidth: "100%",
+        minWidth: 0,
+        verticalAlign: "bottom",
       }}
       title={`${kindLabel}${mention.raw ? ` — ${mention.raw}` : ""}`}
       aria-label={`${kindLabel}: ${mention.title ?? shortId(mention.targetId)}`}
@@ -367,7 +418,16 @@ function MentionPill({
         {style.glyph}
       </span>
       {mention.title ? (
-        <span>{mention.title}</span>
+        <span
+          style={{
+            overflow: "hidden",
+            textOverflow: "ellipsis",
+            whiteSpace: "nowrap",
+            minWidth: 0,
+          }}
+        >
+          {mention.title}
+        </span>
       ) : (
         <>
           <span style={{ fontWeight: 600 }}>{kindLabel}</span>
@@ -415,9 +475,21 @@ function TagPill({
         textDecoration: "none",
         margin: "0 1px",
         whiteSpace: "nowrap",
+        maxWidth: "100%",
+        minWidth: 0,
+        verticalAlign: "bottom",
       }}
     >
-      {label}
+      <span
+        style={{
+          overflow: "hidden",
+          textOverflow: "ellipsis",
+          whiteSpace: "nowrap",
+          minWidth: 0,
+        }}
+      >
+        {label}
+      </span>
     </Link>
   );
 }

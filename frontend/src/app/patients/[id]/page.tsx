@@ -435,6 +435,8 @@ function PatientHeader({
             borderRadius: "var(--bv-r-sm)",
             fontSize: "0.82rem",
             lineHeight: 1.35,
+            width: "fit-content",
+            maxWidth: "100%",
           }}
         >
           <strong style={{ marginRight: "0.35rem" }}>{t("allergiesLabel")}</strong>
@@ -553,7 +555,7 @@ function EditProfileForm({
     <form className="card" onSubmit={handleSave} style={{ marginBottom: "1rem" }}>
       <h2>{t("editTitle")}</h2>
       {saveErr && <p className="error">{saveErr}</p>}
-      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "0.5rem" }}>
+      <div className="bv-edit-grid">
         <label>
           <span className="meta">{t("fieldName")}</span>
           <input
@@ -663,16 +665,7 @@ function EditProfileForm({
           </p>
         )}
         {contacts.map((c, i) => (
-          <div
-            key={c._uiKey}
-            style={{
-              display: "grid",
-              gridTemplateColumns: "1.4fr 1fr 1.4fr 1.2fr auto",
-              gap: "0.4rem",
-              marginBottom: "0.4rem",
-              alignItems: "center",
-            }}
-          >
+          <div key={c._uiKey} className="bv-contact-row">
             <input
               value={c.label}
               onChange={(e) => updateContact(i, { label: e.target.value })}
@@ -809,7 +802,8 @@ function SharingMenu({
             border: "1px solid var(--bv-card-border)",
             borderRadius: "var(--bv-r-md, 6px)",
             padding: "0.3rem 0",
-            minWidth: 280,
+            minWidth: "min(280px, calc(100vw - 1.5rem))",
+            maxWidth: "calc(100vw - 1.5rem)",
             zIndex: 100,
             boxShadow: "0 8px 24px rgba(0,0,0,0.22)",
           }}
