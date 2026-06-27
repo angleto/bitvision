@@ -6,7 +6,7 @@
 // any action mounts the EventActionDialog with the corresponding
 // preset.
 
-import { useTranslations } from "next-intl";
+import { useLocale, useTranslations } from "next-intl";
 import { useEffect, useRef, useState } from "react";
 
 import AttachmentsManager from "@/components/AttachmentsManager";
@@ -14,7 +14,12 @@ import EditEventDialog from "@/components/EditEventDialog";
 import EventActionDialog, { type ActionKind } from "@/components/EventActionDialog";
 import EvidenceContent from "@/components/EvidenceContent";
 import { ApiError, request } from "@/lib/api";
-import type { ClinicalEvent, EventStatus } from "@/lib/api_records";
+import {
+  type CarePhaseDetail,
+  type ClinicalEvent,
+  type EventStatus,
+  carePhasesApi,
+} from "@/lib/api_records";
 import { eventStatusStyle } from "@/lib/event_status_style";
 
 interface Props {
@@ -36,10 +41,20 @@ const ALLOWED_FROM: Record<EventStatus, ActionKind[]> = {
 export default function EventDrawer({ eventId, isOwner, onClose, onChanged }: Props) {
   const t = useTranslations("eventActions");
   const tStatus = useTranslations("eventStatus");
+  const locale = useLocale();
   const [event, setEvent] = useState<ClinicalEvent | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [actionOpen, setActionOpen] = useState<ActionKind | null>(null);
   const [editOpen, setEditOpen] = useState(false);
+  // Care-phase assignment lives here so the user can (re)assign an event
+  // to a phase from the UI on any device — the only other path is the
+  // CareTimeline edit-mode drag-and-drop, which is invisible/unusable on
+  // touch. The individual-event endpoint omits phase_id, so we derive the
+  // current phase from the timeline's phase membership.
+  const [phases, setPhases] = useState<CarePhaseDetail[] | null>(null);
+  const [currentPhaseId, setCurrentPhaseId] = useState<string | null>(null);
+  const [phaseBusy, setPhaseBusy] = useState(false);
+  const [phaseError, setPhaseError] = useState<string | null>(null);
   // Drag-out protection on the slide-over backdrop (selecting text
   // and releasing outside the drawer would otherwise dismiss it).
   const mouseDownOnBackdrop = useRef(false);
@@ -58,6 +73,53 @@ export default function EventDrawer({ eventId, isOwner, onClose, onChanged }: Pr
       cancelled = true;
     };
   }, [eventId]);
+
+  // Load care phases + this event's current phase once the event (hence
+  // patient_id) is known.
+  useEffect(() => {
+    const patientId = event?.patient_id;
+    if (!patientId) return;
+    let cancelled = false;
+    carePhasesApi
+      .timeline(patientId, { lang: locale })
+      .then((tl) => {
+        if (cancelled) return;
+        setPhases(tl.phases);
+        const cur = tl.phases.find((p) => p.events.some((e) => e.id === eventId));
+        setCurrentPhaseId(cur?.id ?? null);
+      })
+      .catch(() => {
+        if (!cancelled) setPhases([]);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [event?.patient_id, eventId, locale]);
+
+  async function changePhase(nextPhaseId: string): Promise<void> {
+    const patientId = event?.patient_id;
+    if (!patientId || phaseBusy || nextPhaseId === (currentPhaseId ?? "")) return;
+    setPhaseBusy(true);
+    setPhaseError(null);
+    try {
+      if (nextPhaseId === "") {
+        if (currentPhaseId) await carePhasesApi.unassignEvent(patientId, currentPhaseId, eventId);
+        setCurrentPhaseId(null);
+      } else {
+        // PUT upserts the assignment, so reassigning from another phase
+        // needs no explicit unassign first.
+        await carePhasesApi.assignEvent(patientId, nextPhaseId, eventId);
+        setCurrentPhaseId(nextPhaseId);
+      }
+      onChanged();
+    } catch (e) {
+      setPhaseError(
+        e instanceof ApiError ? `${e.status}: ${String(e.detail)}` : t("phaseAssignError"),
+      );
+    } finally {
+      setPhaseBusy(false);
+    }
+  }
 
   useEffect(() => {
     function onKey(e: KeyboardEvent): void {
@@ -165,6 +227,49 @@ export default function EventDrawer({ eventId, isOwner, onClose, onChanged }: Pr
               {event.status_change_reason && <Row label="Reason">{event.status_change_reason}</Row>}
               {event.parent_event_id && <Row label="Parent">{event.parent_event_id}</Row>}
             </dl>
+            <section style={{ marginTop: "0.6rem" }}>
+              <h4 style={sectionHeading}>{t("phaseLabel")}</h4>
+              {phases === null ? (
+                <p style={{ margin: 0, fontSize: "0.85rem", color: "var(--bv-fg-soft)" }}>…</p>
+              ) : isOwner ? (
+                <>
+                  <select
+                    value={currentPhaseId ?? ""}
+                    onChange={(e) => void changePhase(e.target.value)}
+                    disabled={phaseBusy}
+                    aria-label={t("phaseLabel")}
+                    style={phaseSelectStyle}
+                  >
+                    <option value="">{t("phaseUnassigned")}</option>
+                    {phases.map((p) => (
+                      <option key={p.id} value={p.id}>
+                        {p.name}
+                      </option>
+                    ))}
+                  </select>
+                  {phaseBusy && (
+                    <span style={{ marginLeft: 8, fontSize: "0.8rem", color: "var(--bv-fg-soft)" }}>
+                      {t("phaseSaving")}
+                    </span>
+                  )}
+                  {phaseError && (
+                    <p
+                      style={{
+                        color: "var(--bv-danger)",
+                        fontSize: "0.8rem",
+                        margin: "0.3rem 0 0",
+                      }}
+                    >
+                      {phaseError}
+                    </p>
+                  )}
+                </>
+              ) : (
+                <p style={{ margin: 0, fontSize: "0.88rem" }}>
+                  {phases.find((p) => p.id === currentPhaseId)?.name ?? t("phaseUnassigned")}
+                </p>
+              )}
+            </section>
             {event.narrative && (
               <section style={{ marginTop: "0.6rem" }}>
                 <h4 style={sectionHeading}>{t("noteLabel")}</h4>
@@ -306,6 +411,16 @@ const sectionHeading = {
   letterSpacing: "0.04em",
   color: "var(--bv-fg-soft)",
   margin: "0 0 0.3rem 0",
+} as const;
+
+const phaseSelectStyle = {
+  fontSize: "0.88rem",
+  padding: "0.35rem 0.5rem",
+  border: "1px solid var(--bv-card-border, #d0d5dd)",
+  borderRadius: 6,
+  background: "var(--bv-card-bg, transparent)",
+  color: "var(--bv-fg)",
+  maxWidth: "100%",
 } as const;
 
 const listReset = {

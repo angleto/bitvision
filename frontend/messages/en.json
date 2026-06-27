@@ -2743,6 +2743,10 @@
     "agendaEmpty": "No events in the selected period."
   },
   "eventActions": {
+    "phaseLabel": "Care phase",
+    "phaseUnassigned": "Unassigned",
+    "phaseSaving": "Saving…",
+    "phaseAssignError": "Could not update the phase",
     "confirm": "Confirm",
     "reschedule": "Reschedule",
     "complete": "Complete",
