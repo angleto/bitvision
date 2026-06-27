@@ -1063,6 +1063,64 @@ dialog.care-phase-inner-editor::backdrop {
   }
 }
 
+/* ---------- SiteHeader: mobile nav collapse (hamburger) ----------
+   The header nav holds ~10 links/controls; on phones it didn't fit the
+   56px row and pushed the whole PAGE wider than the viewport (horizontal
+   scroll on every page). Below 768px we hide the nav behind a hamburger
+   and render it as an absolute overlay panel so it never adds to page
+   width. Desktop layout is unchanged (the toggle is display:none). */
+.site-header__menu-toggle {
+  display: none;
+  font-size: 1.2rem;
+  line-height: 1;
+  padding: 0.3rem 0.6rem;
+  cursor: pointer;
+}
+@media (max-width: 768px) {
+  .site-header__row {
+    position: relative;
+  }
+  .site-header__menu-toggle {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    min-width: 44px;
+    min-height: 40px;
+  }
+  .site-header__nav {
+    display: none;
+  }
+  .site-header__nav.is-open {
+    display: flex;
+    flex-direction: column;
+    align-items: stretch;
+    gap: 0.1rem;
+    position: absolute;
+    top: 100%;
+    right: 0;
+    margin-top: 0.25rem;
+    min-width: min(80vw, 300px);
+    max-width: calc(100vw - 1rem);
+    padding: 0.4rem;
+    background: var(--bv-card-bg);
+    border: 1px solid var(--bv-card-border);
+    border-radius: var(--bv-r-md);
+    box-shadow: var(--bv-shadow-2);
+    z-index: 210;
+    max-height: calc(100vh - var(--header-h) - 0.75rem);
+    overflow-y: auto;
+  }
+  .site-header__nav.is-open > * {
+    width: 100%;
+  }
+  .site-header__nav.is-open > a,
+  .site-header__nav.is-open > button {
+    text-align: left;
+    padding: 0.55rem 0.6rem;
+    border-radius: var(--bv-r-sm);
+  }
+}
+
 @keyframes spin {
   to {
     transform: rotate(360deg);
@@ -1583,7 +1641,12 @@ dialog.care-phase-inner-editor::backdrop {
  * lean and so the rules are visible alongside the rest of the print
  * overrides below. */
 @media (max-width: 600px) {
-  [data-clinical-notes-sticky-body] {
+  /* Compact collapsed-preview cap on phones — COLLAPSED ONLY. Scoped to
+     ``[data-expanded="false"]`` because this is ``!important`` and would
+     otherwise override the inline ``max-height: none`` the component sets
+     when expanded, leaving a 96px box with ``overflow: visible`` whose
+     full note paints over the entire page (the mobile expand-overflow bug). */
+  [data-clinical-notes-sticky-body][data-expanded="false"] {
     max-height: 96px !important;
   }
 }
