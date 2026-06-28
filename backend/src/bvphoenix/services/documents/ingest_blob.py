@@ -21,7 +21,6 @@ nothing here commits.
 
 from __future__ import annotations
 
-import asyncio
 import hashlib
 import uuid
 from datetime import date
@@ -35,6 +34,7 @@ from bvphoenix.db.models.folders import Folder
 from bvphoenix.services.folders import get_or_create_root_folder, link_resource_to_folder
 from bvphoenix.services.provenance_log import record_provenance_event
 from bvphoenix.services.review_queue.actor import ReviewActor
+from bvphoenix.services.storage_staging import stage_upload
 from bvphoenix.storage import get_s3_storage
 
 
@@ -85,11 +85,15 @@ async def ingest_document_blob(
         s3_key = f"patient-docs/{patient.id}/{doc_id}.{ext}"
         settings = get_settings()
         storage = get_s3_storage()
-        await asyncio.to_thread(
-            storage.upload_bytes,
-            binary,
+        # Caller owns the commit; tie the object to it so a rolled-back
+        # ingest (failed flush, promotion-hook error) reaps the key
+        # instead of orphaning it in the bucket.
+        await stage_upload(
+            db,
             bucket=settings.s3_bucket_raw,
             key=s3_key,
+            data=binary,
+            storage=storage,
         )
 
     doc = Document(
