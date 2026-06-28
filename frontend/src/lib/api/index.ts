@@ -919,13 +919,16 @@ export interface LLMProviderStatusBundle {
 export const searchApi = {
   run: (params: SearchParams) =>
     request<Paginated<Study>>(`/api/search${qs(params as Record<string, QSValue>)}`),
-  similarTo: (targetId: string, params: { k?: number; modality?: string } = {}) =>
+  similarTo: (
+    targetId: string,
+    params: { k?: number; modality?: string; scope?: "all" | "public" | "mine" | "shared" } = {},
+  ) =>
     request<SimilarStudy[]>(`/api/similar-to/${targetId}${qs(params as Record<string, QSValue>)}`),
   hybrid: (params: {
     q: string;
     k?: number;
     weights?: string;
-    scope?: "all" | "public" | "mine";
+    scope?: "all" | "public" | "mine" | "shared";
   }) => request<HybridSearchOut>(`/api/search/hybrid${qs(params as Record<string, QSValue>)}`),
 };
 

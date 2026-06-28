@@ -102,9 +102,16 @@ function isDeadEnd(indexed?: boolean | null): boolean {
 const NOT_INDEXED_HINT =
   "No image vector yet — open it to inspect, or run the embedding backfill, then retry.";
 
+// Visibility scope of the neighbour results. Pure UX narrowing on top of
+// the backend auth filter — it can only restrict what the caller may
+// already see, never widen it (see /api/similar-to ``scope``). 'shared' =
+// studies visible only via a grant (shared with you, not owned/public).
+type VisualScope = "all" | "mine" | "shared" | "public";
+
 export default function VisualSearchPage() {
   const [reference, setReference] = useState<Reference | null>(null);
   const [modality, setModality] = useState<ModalityFilter>("");
+  const [scope, setScope] = useState<VisualScope>("all");
 
   return (
     <main>
@@ -118,7 +125,9 @@ export default function VisualSearchPage() {
         <NeighborsView
           reference={reference}
           modality={modality}
+          scope={scope}
           onModalityChange={setModality}
+          onScopeChange={setScope}
           onReset={() => setReference(null)}
           onUseStudy={() => setReference({ kind: "study", study: reference.study })}
         />
@@ -455,13 +464,17 @@ function SeriesPickCard({
 function NeighborsView({
   reference,
   modality,
+  scope,
   onModalityChange,
+  onScopeChange,
   onReset,
   onUseStudy,
 }: {
   reference: Reference;
   modality: ModalityFilter;
+  scope: VisualScope;
   onModalityChange: (m: ModalityFilter) => void;
+  onScopeChange: (s: VisualScope) => void;
   onReset: () => void;
   onUseStudy: () => void;
 }) {
@@ -479,7 +492,11 @@ function NeighborsView({
     setErr(null);
     setErrCode(null);
     searchApi
-      .similarTo(targetId, { k: 12, modality: modality || undefined })
+      .similarTo(targetId, {
+        k: 12,
+        modality: modality || undefined,
+        scope: scope === "all" ? undefined : scope,
+      })
       .then((resp) => {
         if (!cancelled) setResults(resp);
       })
@@ -497,7 +514,7 @@ function NeighborsView({
     return () => {
       cancelled = true;
     };
-  }, [targetId, modality]);
+  }, [targetId, modality, scope]);
 
   const referenceLabel =
     reference.kind === "series"
@@ -547,6 +564,26 @@ function NeighborsView({
                   {m}
                 </option>
               ))}
+            </select>
+          </label>
+          <label style={{ fontSize: "0.85rem", color: "#444" }}>
+            Scope{" "}
+            <select
+              value={scope}
+              onChange={(e) => onScopeChange(e.target.value as VisualScope)}
+              title="Which exams to compare against. Only narrows what you can already see — never widens it."
+              style={{
+                font: "inherit",
+                padding: "0.4rem 0.6rem",
+                border: "1px solid #d0d5dd",
+                borderRadius: 6,
+                background: "#fff",
+              }}
+            >
+              <option value="all">All visible</option>
+              <option value="mine">Mine</option>
+              <option value="shared">Shared with me</option>
+              <option value="public">Public</option>
             </select>
           </label>
           <button type="button" className="ghost" onClick={onReset}>
@@ -672,6 +709,10 @@ function NeighborCard({ hit }: { hit: SimilarStudy }) {
                   {m}
                 </span>
               ))}
+              {hit.study.is_public && <span className="badge badge--public">public</span>}
+              <span className="badge" title="Contribution tier">
+                tier {hit.study.contribution_tier}
+              </span>
               <span className="badge badge--llm">score {hit.score.toFixed(3)}</span>
             </span>
           </div>
