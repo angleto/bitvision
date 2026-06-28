@@ -100,6 +100,15 @@ TOOLS = [
                     "type": "string",
                     "description": "Optionally filter results by modality (CT, MR, etc.)",
                 },
+                "scope": {
+                    "type": "string",
+                    "enum": ["all", "public", "mine", "shared"],
+                    "description": (
+                        "Visibility scope (UX narrowing only — never widens what you may "
+                        "see). 'public' = OpenData + is_public; 'mine' = owned by you; "
+                        "'shared' = shared with you via a grant; default 'all'."
+                    ),
+                },
                 "diversify": {
                     "type": "boolean",
                     "description": (
@@ -148,6 +157,8 @@ async def handle(name: str, arguments: dict) -> str:
         params = {"k": arguments.get("k", 10)}
         if arguments.get("modality"):
             params["modality"] = arguments["modality"]
+        if arguments.get("scope"):
+            params["scope"] = arguments["scope"]
         if arguments.get("diversify"):
             params["diversify"] = True
         result = await api_get(

@@ -28,7 +28,7 @@ import uuid
 from datetime import UTC, datetime
 
 from fastapi import HTTPException, Request
-from sqlalchemy import Select, or_, select
+from sqlalchemy import Select, and_, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import Session
 
@@ -234,6 +234,23 @@ async def can(db: AsyncSession, *, user: User | None, action: str, study: Imagin
     return action in await effective_permissions_on_study(db, user=user, study=study)
 
 
+def _active_grant_subqueries(principals: set[uuid.UUID]) -> tuple[Select, Select]:
+    """The study-id and patient-id subqueries of grants currently active for
+    ``principals`` (un-revoked, inside the validity window). Shared by
+    ``visible_studies_filter`` (the auth boundary) and the ``shared`` scope so
+    the two never drift."""
+    now = datetime.now(UTC)
+    active = (
+        Grant.revoked_at.is_(None),
+        Grant.valid_from <= now,
+        or_(Grant.valid_until.is_(None), Grant.valid_until >= now),
+        Grant.grantee_subject_id.in_(principals),
+    )
+    study_subq = select(Grant.resource_id).where(Grant.resource_kind == "study", *active)
+    patient_subq = select(Grant.resource_id).where(Grant.resource_kind == "patient", *active)
+    return study_subq, patient_subq
+
+
 async def visible_studies_filter(db: AsyncSession, user: User | None) -> Select:
     """Build a SELECT on ImagingStudy filtered to rows ``user`` can read.
 
@@ -256,22 +273,7 @@ async def visible_studies_filter(db: AsyncSession, user: User | None) -> Select:
         # Unknown share kind for studies — fail closed.
         return base.where(ImagingStudy.id.is_(None))
     principals = await principal_set(db, user)
-    now = datetime.now(UTC)
-    grant_subq = select(Grant.resource_id).where(
-        Grant.resource_kind == "study",
-        Grant.revoked_at.is_(None),
-        Grant.valid_from <= now,
-        or_(Grant.valid_until.is_(None), Grant.valid_until >= now),
-        Grant.grantee_subject_id.in_(principals),
-    )
-    # Studies visible via patient-level grants
-    patient_grant_subq = select(Grant.resource_id).where(
-        Grant.resource_kind == "patient",
-        Grant.revoked_at.is_(None),
-        Grant.valid_from <= now,
-        or_(Grant.valid_until.is_(None), Grant.valid_until >= now),
-        Grant.grantee_subject_id.in_(principals),
-    )
+    grant_subq, patient_grant_subq = _active_grant_subqueries(principals)
     return base.where(
         or_(
             ImagingStudy.is_public.is_(True),
@@ -323,6 +325,38 @@ def apply_scope_filter(query: Select, scope: str | None, user: User | None) -> S
     # FE deploy does not break the page. The OpenAPI Literal type is
     # the enforcement boundary for new callers.
     return query
+
+
+async def narrow_to_scope(
+    db: AsyncSession, query: Select, scope: str | None, user: User | None
+) -> Select:
+    """Async scope narrowing that also supports ``shared``.
+
+    ``all`` / ``public`` / ``mine`` delegate to the sync
+    :func:`apply_scope_filter`; ``shared`` adds the studies visible to
+    ``user`` ONLY through an active grant — not owned by them, not public,
+    not the OpenData library — the "shared with me" set the visual-search
+    scope selector offers. Like ``apply_scope_filter`` it can only NARROW the
+    auth-allowed set (it AND-restricts a query already passed through
+    ``visible_studies_filter``), never widen it."""
+    if scope != "shared":
+        return apply_scope_filter(query, scope, user)
+    if user is None or user.subject_id is None:
+        # Anonymous / share-link sessions have no "shared with me" set.
+        return query.where(ImagingStudy.id.is_(None))
+    principals = await principal_set(db, user)
+    study_subq, patient_subq = _active_grant_subqueries(principals)
+    return query.where(
+        and_(
+            or_(
+                ImagingStudy.id.in_(study_subq),
+                ImagingStudy.patient_id.in_(patient_subq),
+            ),
+            ImagingStudy.owner_subject_id != user.subject_id,
+            ImagingStudy.owner_subject_id != platform_owner_subject_id(),
+            ImagingStudy.is_public.is_(False),
+        )
+    )
 
 
 # ---- Patient-level permissions ----

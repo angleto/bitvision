@@ -43,7 +43,7 @@ from bvphoenix.api._schemas import StudyOut
 from bvphoenix.auth import optional_user
 from bvphoenix.db.models import Embedding, ImagingStudy, Series, Tag, User
 from bvphoenix.db.session import get_db
-from bvphoenix.services.permissions import apply_scope_filter, visible_studies_filter
+from bvphoenix.services.permissions import narrow_to_scope, visible_studies_filter
 from bvphoenix.services.rate_limit import SEARCH_LIMIT, limiter
 from bvphoenix.services.rrf import rrf_fuse, rrf_signal_contribution
 from bvphoenix.services.thesaurus import expand_tsquery
@@ -333,11 +333,13 @@ async def search_hybrid(
         description="Comma-separated ``signal:weight`` (e.g. ``tag:2,text:1,image:2``).",
         max_length=128,
     ),
-    scope: Literal["all", "public", "mine"] | None = Query(
+    scope: Literal["all", "public", "mine", "shared"] | None = Query(
         None,
         description=(
             "Visibility scope. 'public' = OpenData library + studies marked "
-            "is_public. 'mine' = studies owned by the caller. Default 'all'."
+            "is_public. 'mine' = studies owned by the caller. 'shared' = "
+            "studies visible only via a grant (shared with the caller). "
+            "Default 'all'."
         ),
     ),
 ) -> HybridSearchOut:
@@ -348,11 +350,11 @@ async def search_hybrid(
     parsed_weights = _parse_weights(weights)
 
     visible_base = await visible_studies_filter(db, user)
-    # UX scope narrowing (see apply_scope_filter): the auth filter is
-    # the ceiling, scope can only further restrict. Each of the three
-    # signal queries below joins against ``visible_ids_sq`` so applying
-    # scope here is enough to constrain all of them.
-    visible_base = apply_scope_filter(visible_base, scope, user)
+    # UX scope narrowing (see narrow_to_scope): the auth filter is the
+    # ceiling, scope can only further restrict. Each of the three signal
+    # queries below joins against ``visible_ids_sq`` so applying scope here
+    # is enough to constrain all of them.
+    visible_base = await narrow_to_scope(db, visible_base, scope, user)
     visible_ids_sq = visible_base.with_only_columns(ImagingStudy.id).subquery().select()
 
     async def _safe(name: str, coro):
