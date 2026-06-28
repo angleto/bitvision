@@ -5,6 +5,19 @@ project follows semantic versioning; pre-release suffixes (`alpha`,
 `beta`) gate Kubernetes deployments via the GHCR image tag (without
 the leading `v`, see deployment guide).
 
+## 4.4.81 (2026-06-28)
+
+### Visual Search: full i18n (en/it)
+
+* The `/search/visual` page was hardcoded in English (including the scope
+  selector + tier badges added in 4.4.80), so it ignored the selected
+  language. Every user-facing string now lives in a new `visualSearch`
+  next-intl namespace and is translated for English and Italian — the scope
+  options (All visible / Mine / Shared with me / Public → Tutti visibili /
+  Miei / Condivisi con me / Pubblici), the tier badges, the step headings,
+  the reference picker, and the not-indexed cards. en/it key sets are at
+  parity.
+
 ## 4.4.80 (2026-06-28)
 
 ### Visual Search: scope selector + tier badges
