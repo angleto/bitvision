@@ -5,6 +5,26 @@ project follows semantic versioning; pre-release suffixes (`alpha`,
 `beta`) gate Kubernetes deployments via the GHCR image tag (without
 the leading `v`, see deployment guide).
 
+## 4.4.78 (2026-06-28)
+
+### De-identification provenance for OpenData studies
+
+* `GET /studies/{id}/deidentification-provenance` (and the MCP
+  `get_deidentification_provenance` tool) return the per-study text
+  de-identification record: counts per redaction category (Italian tax
+  code, phone, email, precise dates, addresses, LLM scrub) with the LLM
+  model / provider when an LLM scrub ran, plus the contribution tier. It
+  turns the redaction ledger into the auditable artifact an irreversible
+  black-box cannot offer.
+* Aggregate + storage-isolated: category counts only, never an excerpt /
+  prompt hash, actor, note id, or storage location. A public OpenData
+  study's record is public (same gate as the study detail); the read runs
+  with service privilege after the boundary check so the table's
+  authenticated-only RLS does not silently zero the anonymous record.
+* Honest scope: it records TEXT de-identification of clinical notes only.
+  DICOM PS3.15 header / pixel handling is applied separately at ingest and
+  is explicitly NOT claimed by this ledger. No migration. (Flow 0f706c4a)
+
 ## 4.4.77 (2026-06-28)
 
 ### Promote live PET-VOI measurements onto a finding
