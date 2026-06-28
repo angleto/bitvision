@@ -1,5 +1,6 @@
 "use client";
 
+import { useTranslations } from "next-intl";
 import Link from "next/link";
 import { useEffect, useMemo, useState } from "react";
 
@@ -71,22 +72,23 @@ type Reference = { kind: "study"; study: Study } | { kind: "series"; study: Stud
  * surfaces up front instead of after a pick.
  */
 function IndexBadge({ indexed }: { indexed?: boolean | null }) {
+  const t = useTranslations("visualSearch");
   if (indexed == null) return null;
   return indexed ? (
     <span
       className="badge"
       style={{ background: "#e7f5ec", color: "#1a7f43", borderColor: "#bce3cb" }}
-      title="Has an image embedding — can anchor a visual search"
+      title={t("indexedTitle")}
     >
-      Indexed
+      {t("indexed")}
     </span>
   ) : (
     <span
       className="badge"
       style={{ background: "#fff7ef", color: "#9a5b00", borderColor: "#fcd9b3" }}
-      title="No image vector yet — can't anchor a visual search until it's embedded"
+      title={t("notIndexedTitle")}
     >
-      Not indexed
+      {t("notIndexed")}
     </span>
   );
 }
@@ -99,9 +101,6 @@ function isDeadEnd(indexed?: boolean | null): boolean {
   return indexed === false;
 }
 
-const NOT_INDEXED_HINT =
-  "No image vector yet — open it to inspect, or run the embedding backfill, then retry.";
-
 // Visibility scope of the neighbour results. Pure UX narrowing on top of
 // the backend auth filter — it can only restrict what the caller may
 // already see, never widen it (see /api/similar-to ``scope``). 'shared' =
@@ -109,17 +108,15 @@ const NOT_INDEXED_HINT =
 type VisualScope = "all" | "mine" | "shared" | "public";
 
 export default function VisualSearchPage() {
+  const t = useTranslations("visualSearch");
   const [reference, setReference] = useState<Reference | null>(null);
   const [modality, setModality] = useState<ModalityFilter>("");
   const [scope, setScope] = useState<VisualScope>("all");
 
   return (
     <main>
-      <h1>Visual Search</h1>
-      <p className="meta">
-        Find cases similar to a reference study or series. Search by DICOM metadata (description,
-        modality, body part) to pick the exemplar, then jump into any neighbour&apos;s viewer.
-      </p>
+      <h1>{t("title")}</h1>
+      <p className="meta">{t("intro")}</p>
 
       {reference ? (
         <NeighborsView
@@ -139,6 +136,7 @@ export default function VisualSearchPage() {
 }
 
 function ReferencePicker({ onPick }: { onPick: (r: Reference) => void }) {
+  const t = useTranslations("visualSearch");
   const [q, setQ] = useState("");
   const [modality, setModality] = useState<ModalityFilter>("");
   const [bodyPart, setBodyPart] = useState("");
@@ -182,11 +180,8 @@ function ReferencePicker({ onPick }: { onPick: (r: Reference) => void }) {
 
   return (
     <>
-      <h2>Step 1 — Pick a reference</h2>
-      <p className="meta">
-        Pick a whole study, or expand a row to choose a single series. The chosen exemplar is what
-        neighbours are scored against.
-      </p>
+      <h2>{t("step1Title")}</h2>
+      <p className="meta">{t("step1Intro")}</p>
       <div
         style={{
           display: "flex",
@@ -197,7 +192,7 @@ function ReferencePicker({ onPick }: { onPick: (r: Reference) => void }) {
       >
         <input
           type="search"
-          placeholder="Description / patient / accession…"
+          placeholder={t("searchPlaceholder")}
           value={q}
           onChange={(e) => setQ(e.target.value)}
           style={{ flex: "1 1 240px", minWidth: 200 }}
@@ -212,7 +207,7 @@ function ReferencePicker({ onPick }: { onPick: (r: Reference) => void }) {
             borderRadius: 6,
           }}
         >
-          <option value="">Any modality</option>
+          <option value="">{t("anyModality")}</option>
           {MODALITIES.map((m) => (
             <option key={m} value={m}>
               {m}
@@ -221,7 +216,7 @@ function ReferencePicker({ onPick }: { onPick: (r: Reference) => void }) {
         </select>
         <input
           type="search"
-          placeholder="Body part…"
+          placeholder={t("bodyPartPlaceholder")}
           value={bodyPart}
           onChange={(e) => setBodyPart(e.target.value)}
           style={{ width: 160 }}
@@ -229,11 +224,10 @@ function ReferencePicker({ onPick }: { onPick: (r: Reference) => void }) {
       </div>
 
       {err && <p className="error">{err}</p>}
-      {!data && !err && <p className="meta">Loading…</p>}
+      {!data && !err && <p className="meta">{t("loading")}</p>}
       {data && data.items.length === 0 && !loading && (
         <p className="meta">
-          No studies match. Try removing a filter, or <Link href="/upload">upload a new study</Link>
-          .
+          {t("noStudiesPrefix")} <Link href="/upload">{t("uploadNewStudy")}</Link>.
         </p>
       )}
 
@@ -243,7 +237,7 @@ function ReferencePicker({ onPick }: { onPick: (r: Reference) => void }) {
 
       {data && data.total > data.items.length && (
         <p className="meta" style={{ marginTop: "0.5rem" }}>
-          Showing {data.items.length} of {data.total}. Refine the search to narrow.
+          {t("showingOfTotal", { shown: data.items.length, total: data.total })}
         </p>
       )}
     </>
@@ -257,6 +251,7 @@ function ReferenceRow({
   study: Study;
   onPick: (r: Reference) => void;
 }) {
+  const t = useTranslations("visualSearch");
   const [expanded, setExpanded] = useState(false);
   const [seriesList, setSeriesList] = useState<Series[] | null>(null);
   const [seriesErr, setSeriesErr] = useState<string | null>(null);
@@ -297,7 +292,7 @@ function ReferenceRow({
           type="button"
           onClick={() => setExpanded((v) => !v)}
           aria-expanded={expanded}
-          aria-label={expanded ? "Collapse series" : "Expand series"}
+          aria-label={expanded ? t("collapseSeries") : t("expandSeries")}
           style={{
             background: "transparent",
             border: "none",
@@ -312,7 +307,7 @@ function ReferenceRow({
         >
           <h3 style={{ margin: 0 }}>
             <span style={{ display: "inline-block", width: "0.9rem" }}>{expanded ? "▾" : "▸"}</span>{" "}
-            {study.study_description ?? "(no description)"}
+            {study.study_description ?? t("noDescription")}
             <span className="badges">
               {study.modalities.map((m) => (
                 <span key={m} className="badge">
@@ -337,9 +332,9 @@ function ReferenceRow({
             rel="noopener noreferrer"
             className="ghost"
             style={{ fontSize: "0.85rem", padding: "0.3rem 0.6rem", textDecoration: "none" }}
-            title="Open study details in a new tab"
+            title={t("openStudyTitle")}
           >
-            Open study
+            {t("openStudy")}
           </Link>
           {/* Disabled on a dead-end exemplar so the user can't pick something
               /similar-to would reject; the badge + tooltip say why. */}
@@ -347,9 +342,9 @@ function ReferenceRow({
             type="button"
             onClick={() => onPick({ kind: "study", study })}
             disabled={isDeadEnd(study.indexed)}
-            title={isDeadEnd(study.indexed) ? NOT_INDEXED_HINT : undefined}
+            title={isDeadEnd(study.indexed) ? t("notIndexedHint") : undefined}
           >
-            Use this study
+            {t("useThisStudy")}
           </button>
         </div>
       </div>
@@ -357,10 +352,8 @@ function ReferenceRow({
       {expanded && (
         <div style={{ marginTop: "0.6rem" }}>
           {seriesErr && <p className="error">{seriesErr}</p>}
-          {seriesList === null && !seriesErr && <p className="meta">Loading series…</p>}
-          {seriesList && seriesList.length === 0 && (
-            <p className="meta">No series in this study.</p>
-          )}
+          {seriesList === null && !seriesErr && <p className="meta">{t("loadingSeries")}</p>}
+          {seriesList && seriesList.length === 0 && <p className="meta">{t("noSeriesInStudy")}</p>}
           {embeddableSeries && embeddableSeries.length > 0 && (
             <div className="series-grid">
               {embeddableSeries.map((s) => (
@@ -375,16 +368,10 @@ function ReferenceRow({
           {embeddableSeries &&
             embeddableSeries.length === 0 &&
             seriesList &&
-            seriesList.length > 0 && (
-              <p className="meta">
-                This study has no image series to anchor a visual search (only reports /
-                segmentations). Use &ldquo;Use this study&rdquo;, or pick another reference.
-              </p>
-            )}
+            seriesList.length > 0 && <p className="meta">{t("noImageSeries")}</p>}
           {hiddenCount > 0 && embeddableSeries && embeddableSeries.length > 0 && (
             <p className="meta" style={{ fontSize: "0.78rem", marginTop: "0.4rem" }}>
-              {hiddenCount} non-image series (reports, segmentations) hidden &mdash; they
-              can&rsquo;t be visually searched.
+              {t("hiddenSeries", { count: hiddenCount })}
             </p>
           )}
         </div>
@@ -400,6 +387,7 @@ function SeriesPickCard({
   series: Series;
   onPick: () => void;
 }) {
+  const t = useTranslations("visualSearch");
   return (
     <div
       className="card series-card"
@@ -430,7 +418,7 @@ function SeriesPickCard({
         <IndexBadge indexed={series.indexed} />
       </div>
       <div className="meta" style={{ fontSize: "0.75rem" }}>
-        #{series.series_number ?? "?"} · {series.received_instance_count} img
+        #{series.series_number ?? "?"} · {series.received_instance_count} {t("imgAbbrev")}
       </div>
       <div style={{ display: "flex", gap: "0.3rem", marginTop: "0.4rem" }}>
         {/* Disabled on a not-yet-embedded series so it can't anchor a search
@@ -439,10 +427,10 @@ function SeriesPickCard({
           type="button"
           onClick={onPick}
           disabled={isDeadEnd(series.indexed)}
-          title={isDeadEnd(series.indexed) ? NOT_INDEXED_HINT : undefined}
+          title={isDeadEnd(series.indexed) ? t("notIndexedHint") : undefined}
           style={{ fontSize: "0.82rem" }}
         >
-          Use this series
+          {t("useThisSeries")}
         </button>
         {/* Open the series in the MPR/2D viewer to inspect the pixels before
             anchoring a visual search on it. New tab to preserve the picker. */}
@@ -452,9 +440,9 @@ function SeriesPickCard({
           rel="noopener noreferrer"
           className="ghost"
           style={{ fontSize: "0.8rem", padding: "0.2rem 0.5rem", textDecoration: "none" }}
-          title="Open series in viewer (new tab)"
+          title={t("openSeriesViewerTitle")}
         >
-          Open viewer
+          {t("openViewer")}
         </Link>
       </div>
     </div>
@@ -478,6 +466,7 @@ function NeighborsView({
   onReset: () => void;
   onUseStudy: () => void;
 }) {
+  const t = useTranslations("visualSearch");
   const [results, setResults] = useState<SimilarStudy[] | null>(null);
   const [err, setErr] = useState<string | null>(null);
   const [errCode, setErrCode] = useState<string | null>(null);
@@ -518,10 +507,10 @@ function NeighborsView({
 
   const referenceLabel =
     reference.kind === "series"
-      ? `${reference.study.study_description ?? "(no description)"} · series ${reference.series.modality ?? "?"}${
+      ? `${reference.study.study_description ?? t("noDescription")} · ${t("seriesWord")} ${reference.series.modality ?? "?"}${
           reference.series.series_description ? ` "${reference.series.series_description}"` : ""
         }`
-      : (reference.study.study_description ?? "(no description)");
+      : (reference.study.study_description ?? t("noDescription"));
 
   return (
     <>
@@ -536,9 +525,9 @@ function NeighborsView({
         }}
       >
         <div>
-          <h2 style={{ margin: 0 }}>Step 2 — Similar cases</h2>
+          <h2 style={{ margin: 0 }}>{t("step2Title")}</h2>
           <p className="meta" style={{ marginBottom: 0 }}>
-            Reference: <strong style={{ color: "#111" }}>{referenceLabel}</strong>
+            {t("referenceLabel")} <strong style={{ color: "#111" }}>{referenceLabel}</strong>
             {reference.study.modalities.length > 0
               ? ` · ${reference.study.modalities.join(", ")}`
               : null}
@@ -546,7 +535,7 @@ function NeighborsView({
         </div>
         <div style={{ display: "flex", alignItems: "center", gap: "0.5rem" }}>
           <label style={{ fontSize: "0.85rem", color: "#444" }}>
-            Modality{" "}
+            {t("modality")}{" "}
             <select
               value={modality}
               onChange={(e) => onModalityChange(e.target.value as ModalityFilter)}
@@ -558,7 +547,7 @@ function NeighborsView({
                 background: "#fff",
               }}
             >
-              <option value="">All</option>
+              <option value="">{t("all")}</option>
               {MODALITIES.map((m) => (
                 <option key={m} value={m}>
                   {m}
@@ -567,11 +556,11 @@ function NeighborsView({
             </select>
           </label>
           <label style={{ fontSize: "0.85rem", color: "#444" }}>
-            Scope{" "}
+            {t("scope")}{" "}
             <select
               value={scope}
               onChange={(e) => onScopeChange(e.target.value as VisualScope)}
-              title="Which exams to compare against. Only narrows what you can already see — never widens it."
+              title={t("scopeTitle")}
               style={{
                 font: "inherit",
                 padding: "0.4rem 0.6rem",
@@ -580,14 +569,14 @@ function NeighborsView({
                 background: "#fff",
               }}
             >
-              <option value="all">All visible</option>
-              <option value="mine">Mine</option>
-              <option value="shared">Shared with me</option>
-              <option value="public">Public</option>
+              <option value="all">{t("scopeAllVisible")}</option>
+              <option value="mine">{t("scopeMine")}</option>
+              <option value="shared">{t("scopeShared")}</option>
+              <option value="public">{t("scopePublic")}</option>
             </select>
           </label>
           <button type="button" className="ghost" onClick={onReset}>
-            Change reference
+            {t("changeReference")}
           </button>
         </div>
       </div>
@@ -603,10 +592,11 @@ function NeighborsView({
       ) : (
         err && <p className="error">{err}</p>
       )}
-      {!results && !err && <p className="meta">Searching…</p>}
+      {!results && !err && <p className="meta">{t("searching")}</p>}
       {results && results.length === 0 && (
         <p className="meta">
-          No similar cases found.{modality ? " Try removing the modality filter." : ""}
+          {t("noSimilar")}
+          {modality ? t("tryRemovingModality") : ""}
         </p>
       )}
 
@@ -628,6 +618,7 @@ function NotIndexedCard({
   // offers a one-click retry against the whole study.
   onUseStudy?: () => void;
 }) {
+  const t = useTranslations("visualSearch");
   return (
     <div
       className="card"
@@ -637,24 +628,18 @@ function NotIndexedCard({
         padding: "1rem 1.25rem",
       }}
     >
-      <strong>
-        {onUseStudy
-          ? "This series has no image data for visual search."
-          : "This study isn’t indexed for visual search yet."}
-      </strong>
+      <strong>{onUseStudy ? t("seriesNoImageData") : t("studyNotIndexed")}</strong>
       <p className="meta" style={{ marginTop: "0.4rem", marginBottom: "0.4rem" }}>
-        {onUseStudy
-          ? "Visual search compares image pixels, and this series (a Structured Report, dose record, or segmentation) carries none. Search the whole study instead: it anchors on the first image series automatically."
-          : "Visual search runs on image embeddings produced by a background worker. This study has no image vector yet. Either it was imported recently and the embedder hasn't reached it (bulk imports are embedded by a backfill pass that can lag the import), or it contains only non-pixel series (Structured Reports, segmentations) that can't be embedded."}
+        {onUseStudy ? t("seriesNoImageBody") : t("studyNotIndexedBody")}
       </p>
       <div style={{ display: "flex", gap: "0.5rem", marginTop: "0.5rem" }}>
         {onUseStudy && (
           <button type="button" onClick={onUseStudy}>
-            Search the whole study
+            {t("searchWholeStudy")}
           </button>
         )}
         <button type="button" className="ghost" onClick={onReset}>
-          Pick a different reference
+          {t("pickDifferentReference")}
         </button>
       </div>
     </div>
@@ -662,6 +647,7 @@ function NotIndexedCard({
 }
 
 function NeighborCard({ hit }: { hit: SimilarStudy }) {
+  const t = useTranslations("visualSearch");
   // Fetch the *whole* study detail so the card can show the radiology-
   // relevant summary (N series · M images). The matched series'
   // ``received_instance_count`` is also already in there — no need
@@ -695,12 +681,12 @@ function NeighborCard({ hit }: { hit: SimilarStudy }) {
       <Link
         href={`/viewer/series/${hit.matched_series_id}`}
         style={{ display: "block", color: "inherit", textDecoration: "none" }}
-        title="Open in viewer (use the browser back button to return to search)"
+        title={t("openInViewerTitle")}
       >
         <SeriesPreview seriesId={hit.matched_series_id} sliceCount={sliceCount} />
         <div style={{ padding: "0.6rem 0 0" }}>
           <h3 style={{ fontSize: "0.9rem" }}>
-            {hit.study.study_description ?? "(no description)"}
+            {hit.study.study_description ?? t("noDescription")}
           </h3>
           <div className="meta" style={{ fontSize: "0.8rem" }}>
             <span className="badges" style={{ marginLeft: 0 }}>
@@ -709,11 +695,15 @@ function NeighborCard({ hit }: { hit: SimilarStudy }) {
                   {m}
                 </span>
               ))}
-              {hit.study.is_public && <span className="badge badge--public">public</span>}
-              <span className="badge" title="Contribution tier">
-                tier {hit.study.contribution_tier}
+              {hit.study.is_public && (
+                <span className="badge badge--public">{t("publicBadge")}</span>
+              )}
+              <span className="badge" title={t("contributionTier")}>
+                {t("tier", { tier: hit.study.contribution_tier })}
               </span>
-              <span className="badge badge--llm">score {hit.score.toFixed(3)}</span>
+              <span className="badge badge--llm">
+                {t("score", { score: hit.score.toFixed(3) })}
+              </span>
             </span>
           </div>
           {(seriesCount !== null || instanceCount !== null) && (
@@ -721,12 +711,10 @@ function NeighborCard({ hit }: { hit: SimilarStudy }) {
               className="meta"
               style={{ fontSize: "0.75rem", marginTop: "0.2rem", opacity: 0.85 }}
             >
-              {seriesCount !== null
-                ? `${seriesCount} ${seriesCount === 1 ? "serie" : "serie"}`
-                : ""}
+              {seriesCount !== null ? `${seriesCount} ${t("seriesWord")}` : ""}
               {seriesCount !== null && instanceCount !== null ? " · " : ""}
               {instanceCount !== null
-                ? `${instanceCount} ${instanceCount === 1 ? "immagine" : "immagini"}`
+                ? `${instanceCount} ${instanceCount === 1 ? t("imageOne") : t("imageOther")}`
                 : ""}
             </div>
           )}
@@ -738,14 +726,14 @@ function NeighborCard({ hit }: { hit: SimilarStudy }) {
           className="ghost"
           style={{ fontSize: "0.8rem", padding: "0.2rem 0.5rem", textDecoration: "none" }}
         >
-          Open viewer
+          {t("openViewer")}
         </Link>
         <Link
           href={`/studies/${hit.study.id}`}
           className="ghost"
           style={{ fontSize: "0.8rem", padding: "0.2rem 0.5rem", textDecoration: "none" }}
         >
-          Study details
+          {t("studyDetails")}
         </Link>
       </div>
     </div>
