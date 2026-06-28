@@ -624,6 +624,7 @@ EXPECTED_TOOL_NAMES = {
     "delete_finding",
     "restore_finding",
     "add_finding_geometry",
+    "promote_finding_measurement",
     # --- Lesion tracks — longitudinal lesion follow-up ---
     "list_lesion_tracks",
     "get_lesion_track",
@@ -775,6 +776,12 @@ EXPECTED_TOOL_NAMES = {
     "download_clinical_event_attachment",
     "delete_clinical_event_attachment",
     "promote_clinical_event_attachment",
+    # --- Event ↔ document reconciliation (v4.4.75). Backend lives in
+    # api/clinical_event_documents.py.
+    "link_event_document",
+    "list_event_documents",
+    "unlink_event_document",
+    "find_documents_by_content_hash",
     # --- Share-link CRUD (sharing:write, sensitive). Backend lives
     # in api/sharing.py. Mintaging exposes patient data to the
     # outside, hence the sensitive scope.
