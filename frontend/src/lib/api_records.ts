@@ -79,7 +79,31 @@ export interface ClinicalEventAttachment {
   mime: string;
   size_bytes: number;
   uploaded_by_kind: "human" | "agent" | "system";
-  promoted_to_document_id: string | null;
+  created_at: string;
+  /** Curated drive Document this raw upload is linked to (reconciled by
+   *  content hash on upload, or promoted). Drives the "Open in Drive"
+   *  affordance; null when the upload is not (yet) in the Drive. */
+  document_id: string | null;
+  /** True when ``document_id`` matched an already-curated document
+   *  rather than a freshly ingested one. Absent on the list payload. */
+  document_reconciled?: boolean | null;
+}
+
+/** A curated drive Document linked to a ClinicalEvent ("attach from
+ *  Drive", or the curated face of a reconciled raw upload). */
+export interface EventDocument {
+  id: string; // link id
+  event_id: string;
+  patient_id: string;
+  document_id: string;
+  document_title: string;
+  document_kind: string | null;
+  document_date: string | null;
+  /** Set when the link came from reconciling a raw event upload;
+   *  null for a pure "attach from Drive" reference. */
+  source_attachment_id: string | null;
+  link_role: string;
+  created_by_kind: string;
   created_at: string;
 }
 

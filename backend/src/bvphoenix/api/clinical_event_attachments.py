@@ -5,8 +5,9 @@ event lifecycle and lives in object storage under
 ``s3_bucket_raw/clinical_event_attachments/{patient}/{event}/{att}/...``.
 When the user decides an attachment is worth keeping beyond the event
 (e.g. a referral letter that should also show up on the patient drive),
-``POST /promote-to-document`` materialises it as a regular Document
-and back-fills ``promoted_to_document_id``.
+``POST /promote-to-document`` reconciles it against the Drive — linking
+to a byte-identical document when one exists, else materialising a new
+one — and records a :class:`ClinicalEventDocument` link.
 
 Endpoints:
 
@@ -22,14 +23,25 @@ Endpoints:
   Restore endpoint can rehydrate; cleanup deferred to a separate
   lifecycle job).
 - ``POST /api/clinical-events/{event_id}/attachments/{att_id}/promote-to-document``
-  — placeholder for the documents-promote flow; for the first round we
-  mark the attachment as "promoted" with a synthetic document_id and
-  leave the actual Document creation to the next iteration so we ship
-  the upload UX without blocking on the full documents pipeline.
+  — reconcile-or-ingest: link the raw upload to a byte-identical drive
+  Document when one already exists, otherwise materialise one through
+  the canonical ingest pipeline; either way an event↔document link is
+  recorded so the event points at the curated drive document.
+
+Sibling surface — references to *already curated* drive documents,
+"attach from Drive" without re-uploading bytes:
+
+- ``POST /api/clinical-events/{event_id}/documents`` — link an existing
+  patient Document to the event.
+- ``GET /api/clinical-events/{event_id}/documents`` — list linked
+  curated documents.
+- ``DELETE /api/clinical-events/{event_id}/documents/{link_id}`` —
+  unlink (soft; the document stays in the Drive).
 """
 
 from __future__ import annotations
 
+import hashlib
 import uuid
 from datetime import UTC, datetime
 from typing import Annotated
@@ -52,17 +64,27 @@ from bvphoenix.config import get_settings
 from bvphoenix.db.models import (
     ClinicalEvent,
     ClinicalEventAttachment,
+    ClinicalEventDocument,
+    Document,
     Patient,
     User,
 )
 from bvphoenix.db.session import get_db
 from bvphoenix.middleware.audit_dependency import AuditDep
+from bvphoenix.services.clinical_event_documents import (
+    EventDocumentLinkError,
+    get_or_create_event_document_link,
+    promote_attachment,
+    reconcile_attachment,
+    soft_delete_event_document_link,
+)
 from bvphoenix.services.permissions import (
     READ_METADATA,
     WRITE_REPORT,
     can_patient,
 )
 from bvphoenix.services.provenance_log import record_provenance
+from bvphoenix.services.review_queue.actor import ReviewActor
 from bvphoenix.storage.s3 import get_s3_storage
 
 router = APIRouter(tags=["clinical-event-attachments"])
@@ -81,11 +103,40 @@ class AttachmentOut(BaseModel):
     mime: str
     size_bytes: int
     uploaded_by_kind: str
-    promoted_to_document_id: str | None
+    created_at: str
+    # The curated drive Document this raw upload is linked to, if any
+    # (set when the bytes were reconciled against an existing document
+    # or promoted into a new one). Drives the "Open in Drive" action.
+    document_id: str | None = None
+    # True when ``document_id`` matched an already-curated document
+    # rather than a freshly ingested one. ``None`` when unknown (list).
+    document_reconciled: bool | None = None
+
+
+class EventDocumentOut(BaseModel):
+    id: str  # link id
+    event_id: str
+    patient_id: str
+    document_id: str
+    document_title: str
+    document_kind: str | None
+    document_date: str | None
+    source_attachment_id: str | None
+    link_role: str
+    created_by_kind: str
     created_at: str
 
 
-def _to_out(a: ClinicalEventAttachment) -> AttachmentOut:
+class EventDocumentLinkIn(BaseModel):
+    document_id: uuid.UUID
+
+
+def _to_out(
+    a: ClinicalEventAttachment,
+    *,
+    document_id: str | None = None,
+    document_reconciled: bool | None = None,
+) -> AttachmentOut:
     return AttachmentOut(
         id=str(a.id),
         event_id=str(a.event_id),
@@ -94,11 +145,50 @@ def _to_out(a: ClinicalEventAttachment) -> AttachmentOut:
         mime=a.mime,
         size_bytes=a.size_bytes,
         uploaded_by_kind=a.uploaded_by_kind,
-        promoted_to_document_id=(
-            str(a.promoted_to_document_id) if a.promoted_to_document_id else None
-        ),
         created_at=a.created_at.isoformat(),
+        document_id=document_id,
+        document_reconciled=document_reconciled,
     )
+
+
+def _event_doc_out(link: ClinicalEventDocument, doc: Document) -> EventDocumentOut:
+    return EventDocumentOut(
+        id=str(link.id),
+        event_id=str(link.event_id),
+        patient_id=str(link.patient_id),
+        document_id=str(link.document_id),
+        document_title=doc.title,
+        document_kind=doc.kind_id,
+        document_date=doc.document_date.isoformat() if doc.document_date else None,
+        source_attachment_id=str(link.source_attachment_id) if link.source_attachment_id else None,
+        link_role=link.link_role,
+        created_by_kind=link.created_by_kind,
+        created_at=link.created_at.isoformat(),
+    )
+
+
+async def _live_links_by_attachment(
+    db: AsyncSession, event_id: uuid.UUID
+) -> dict[uuid.UUID, uuid.UUID]:
+    """Map ``source_attachment_id -> document_id`` for the event's live
+    attachment-derived links, so the list view can show each raw upload
+    as "in the Drive" without an N+1."""
+    rows = (
+        await db.execute(
+            select(
+                ClinicalEventDocument.source_attachment_id,
+                ClinicalEventDocument.document_id,
+            )
+            .join(Document, Document.id == ClinicalEventDocument.document_id)
+            .where(
+                ClinicalEventDocument.event_id == event_id,
+                ClinicalEventDocument.source_attachment_id.is_not(None),
+                ClinicalEventDocument.deleted_at.is_(None),
+                Document.deleted_at.is_(None),
+            )
+        )
+    ).all()
+    return {att_id: doc_id for att_id, doc_id in rows if att_id is not None}
 
 
 async def _load_event_for_access(
@@ -171,6 +261,7 @@ async def upload_attachment(
         storage_key=storage_key,
         uploaded_by_subject_id=user.subject_id,
         uploaded_by_kind=author_kind,
+        content_sha256=hashlib.sha256(data).hexdigest(),
     )
     db.add(att)
     await db.flush()
@@ -183,9 +274,17 @@ async def upload_attachment(
         request=request,
         diff={"attachment_id": str(att_id), "filename": file.filename, "size": len(data)},
     )
+    # Auto-reconcile: if these exact bytes are already curated in the
+    # patient's Drive, link the upload to that document (system-authored)
+    # so the user immediately sees "already in the Drive". No new copy.
+    link = await reconcile_attachment(db, event=ev, attachment=att)
     await db.commit()
     await db.refresh(att)
-    return _to_out(att)
+    return _to_out(
+        att,
+        document_id=str(link.document_id) if link else None,
+        document_reconciled=True if link else None,
+    )
 
 
 @router.get(
@@ -198,7 +297,9 @@ async def list_attachments(
     db: Annotated[AsyncSession, Depends(get_db)],
     audit: AuditDep,
 ) -> list[AttachmentOut]:
-    """List active (non-deleted) attachments on the event."""
+    """List active (non-deleted) attachments on the event, each
+    carrying ``document_id`` when it has been reconciled/promoted into
+    the Drive."""
     del audit
     ev = await _load_event_for_access(db, event_id=event_id, user=user, action=READ_METADATA)
     rows = (
@@ -215,7 +316,8 @@ async def list_attachments(
         .scalars()
         .all()
     )
-    return [_to_out(a) for a in rows]
+    links = await _live_links_by_attachment(db, ev.id)
+    return [_to_out(a, document_id=str(links[a.id]) if a.id in links else None) for a in rows]
 
 
 @router.get(
@@ -314,13 +416,16 @@ async def promote_attachment_to_document(
 ) -> AttachmentOut:
     """Move an attachment into the patient Documents drive.
 
-    Implementation note: the v3 Documents ingest pipeline (incl. OCR /
-    classifier / authority tagging) lives in the dedicated documents
-    services. For the first iteration we record the intent
-    (``promoted_to_document_id`` set to a freshly minted UUID) and
-    queue the actual Documents materialisation as a follow-up — that
-    way the UX ships now and the heavy ingest plumbing comes in a
-    dedicated PR without blocking this round.
+    Reconcile-or-ingest, idempotent:
+
+    * if a byte-identical document already lives in the patient's Drive
+      (``content_sha256`` / ``original_blob_hash`` match), the upload is
+      linked to it — no second copy (``document_reconciled=True``);
+    * otherwise the bytes are materialised into a new Document through
+      the canonical ingest pipeline (folder placement + provenance) and
+      linked (``document_reconciled=False``).
+
+    Re-promoting returns the existing link without raising 409.
     """
     del audit
     ev = await _load_event_for_access(db, event_id=event_id, user=user, action=WRITE_REPORT)
@@ -335,12 +440,17 @@ async def promote_attachment_to_document(
     ).scalar_one_or_none()
     if att is None:
         raise HTTPException(status_code=404, detail="attachment not found")
-    if att.promoted_to_document_id is not None:
-        # Idempotent: returning the existing promotion target lets
-        # the UI render the "already promoted" state without a 409.
-        return _to_out(att)
-    promoted_id = uuid.uuid4()
-    att.promoted_to_document_id = promoted_id
+    actor = ReviewActor.from_request(user, request)
+    try:
+        link, reconciled = await promote_attachment(
+            db,
+            event=ev,
+            attachment=att,
+            actor=actor,
+            uploaded_by_subject_id=user.subject_id,
+        )
+    except EventDocumentLinkError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
     record_provenance(
         db,
         target_kind="clinical_event",
@@ -350,9 +460,112 @@ async def promote_attachment_to_document(
         request=request,
         diff={
             "attachment_id": str(att_id),
-            "promoted_to_document_id": str(promoted_id),
+            "document_id": str(link.document_id),
+            "reconciled": reconciled,
         },
     )
     await db.commit()
     await db.refresh(att)
-    return _to_out(att)
+    return _to_out(att, document_id=str(link.document_id), document_reconciled=reconciled)
+
+
+# ---------------------------------------------------------------------
+# Event ↔ curated drive Document links ("attach from Drive").
+# ---------------------------------------------------------------------
+
+
+@router.post(
+    "/clinical-events/{event_id}/documents",
+    response_model=EventDocumentOut,
+    status_code=201,
+)
+async def attach_document_from_drive(
+    event_id: uuid.UUID,
+    body: EventDocumentLinkIn,
+    request: Request,
+    user: Annotated[User, Depends(require_user)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+    audit: AuditDep,
+) -> EventDocumentOut:
+    """Link an already-curated patient Document to the event without
+    re-uploading bytes. Idempotent on (event, document): a second call
+    returns the existing link. The document must belong to the event's
+    patient and be live, else 404 (cross-patient linking is
+    unrepresentable)."""
+    del audit
+    ev = await _load_event_for_access(db, event_id=event_id, user=user, action=WRITE_REPORT)
+    doc = (
+        await db.execute(
+            select(Document).where(
+                Document.id == body.document_id,
+                Document.patient_id == ev.patient_id,
+                Document.deleted_at.is_(None),
+            )
+        )
+    ).scalar_one_or_none()
+    if doc is None:
+        raise HTTPException(status_code=404, detail="document not found")
+    actor = ReviewActor.from_request(user, request)
+    try:
+        link, _created = await get_or_create_event_document_link(
+            db, event=ev, document=doc, actor=actor, link_role="reference"
+        )
+    except EventDocumentLinkError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    await db.commit()
+    await db.refresh(link)
+    return _event_doc_out(link, doc)
+
+
+@router.get(
+    "/clinical-events/{event_id}/documents",
+    response_model=list[EventDocumentOut],
+)
+async def list_event_documents(
+    event_id: uuid.UUID,
+    user: Annotated[User, Depends(require_user)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+    audit: AuditDep,
+) -> list[EventDocumentOut]:
+    """List curated drive documents linked to the event (live links to
+    live documents), newest first."""
+    del audit
+    ev = await _load_event_for_access(db, event_id=event_id, user=user, action=READ_METADATA)
+    rows = (
+        await db.execute(
+            select(ClinicalEventDocument, Document)
+            .join(Document, Document.id == ClinicalEventDocument.document_id)
+            .where(
+                ClinicalEventDocument.event_id == ev.id,
+                ClinicalEventDocument.deleted_at.is_(None),
+                Document.deleted_at.is_(None),
+            )
+            .order_by(ClinicalEventDocument.created_at.desc())
+        )
+    ).all()
+    return [_event_doc_out(link, doc) for link, doc in rows]
+
+
+@router.delete(
+    "/clinical-events/{event_id}/documents/{link_id}",
+    status_code=204,
+)
+async def unlink_event_document(
+    event_id: uuid.UUID,
+    link_id: uuid.UUID,
+    request: Request,
+    user: Annotated[User, Depends(require_user)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+    audit: AuditDep,
+) -> Response:
+    """Soft-unlink a curated document from the event. The document
+    stays in the Drive; only the event's reference is removed. 404 when
+    the link does not exist."""
+    del audit
+    ev = await _load_event_for_access(db, event_id=event_id, user=user, action=WRITE_REPORT)
+    actor = ReviewActor.from_request(user, request)
+    ok = await soft_delete_event_document_link(db, event=ev, link_id=link_id, actor=actor)
+    if not ok:
+        raise HTTPException(status_code=404, detail="link not found")
+    await db.commit()
+    return Response(status_code=204)

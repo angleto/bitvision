@@ -166,6 +166,29 @@ TOOLS: list[Tool] = [
             "required": ["patient_id", "document_id"],
         },
     ),
+    Tool(
+        name="find_documents_by_content_hash",
+        description=(
+            "Trova i documenti vivi del paziente i cui byte (o "
+            "l'artefatto originario) hanno un dato SHA-256. È la lookup "
+            "di riconciliazione: usala per verificare se un file è già "
+            "curato nel Drive prima di caricarlo su un evento (poi "
+            "link_event_document invece di ricaricarlo). ``matched_on`` "
+            "vale ``content`` o ``original``. Read-only; scope "
+            "``documents:read``. Same-patient per costruzione."
+        ),
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "patient_id": {"type": "string"},
+                "sha256": {
+                    "type": "string",
+                    "description": "Digest SHA-256, 64 char esadecimali minuscoli.",
+                },
+            },
+            "required": ["patient_id", "sha256"],
+        },
+    ),
 ]
 
 
@@ -326,10 +349,20 @@ async def _get_document_references(args: dict[str, Any]) -> str:
     return json.dumps(payload, indent=2, ensure_ascii=False)
 
 
+async def _find_documents_by_content_hash(args: dict[str, Any]) -> str:
+    patient_id = args["patient_id"]
+    payload = await api_get(
+        f"/api/patients/{patient_id}/documents-by-hash",
+        params={"sha256": args["sha256"]},
+    )
+    return json.dumps(payload, indent=2, ensure_ascii=False)
+
+
 _DISPATCH = {
     "download_document_binary": _download_document_binary,
     "get_document_text": _get_document_text,
     "get_document_references": _get_document_references,
+    "find_documents_by_content_hash": _find_documents_by_content_hash,
 }
 
 

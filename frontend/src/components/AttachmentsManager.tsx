@@ -2,31 +2,37 @@
 
 // Real-binary attachments manager for a ClinicalEvent.
 //
+// Two ways to attach:
+//   - from the PC: a raw file (a receipt, a prep sheet, a photo). On
+//     upload the backend computes its content hash and auto-reconciles
+//     it against the patient Drive — if the exact bytes are already a
+//     curated document, the row shows "Open in Drive" instead of being
+//     an isolated blob.
+//   - from the Drive ("Allega dal Drive"): pick an already-curated
+//     document (the referto you uploaded earlier) and reference it on
+//     the event without re-uploading. No second copy.
+//
 // Three call sites:
 //   - PlanEventDialog: ``eventId`` is null (event not created yet); we
 //     accumulate File objects in ``pending`` and the parent uploads
-//     them after create.
-//   - EditEventDialog: ``eventId`` is set; pending files upload
-//     immediately on submit, and the existing list is editable
-//     (delete / promote).
-//   - EventDrawer (read-only mode): ``readOnly`` true; only the list +
-//     download + promote actions are visible.
-//
-// Why not URL-list: an event attachment is usually a referral letter,
-// prescription, prep sheet, anonymous photo. The user wants drag &
-// drop or file-picker, not "paste a Drive URL". URL references stay
-// on the ``links`` field for portals / external services.
+//     them after create. "Attach from Drive" needs a persisted event,
+//     so it is hidden here.
+//   - EditEventDialog / EventDrawer: ``eventId`` + ``patientId`` set;
+//     uploads, promote, attach-from-Drive and unlink are all live.
 
 import { useTranslations } from "next-intl";
+import Link from "next/link";
 import { useEffect, useRef, useState } from "react";
 
-import { ApiError, authedDownload } from "@/lib/api";
-import type { ClinicalEventAttachment } from "@/lib/api_records";
+import { ApiError, type PatientDocument, authedDownload, patientsApi } from "@/lib/api";
+import type { ClinicalEventAttachment, EventDocument } from "@/lib/api_records";
 import { calendarApi } from "@/lib/calendar_api";
 
 interface Props {
   // When null the manager is in "pending only" mode (create flow).
   eventId: string | null;
+  // Patient owning the event — required to enable "attach from Drive".
+  patientId?: string;
   // Local file queue for the create flow. Parent owns the state so it
   // can upload after the event has been created.
   pending?: File[];
@@ -42,28 +48,38 @@ function fmtSize(bytes: number): string {
 
 export default function AttachmentsManager({
   eventId,
+  patientId,
   pending,
   onPendingChange,
   readOnly = false,
 }: Props) {
   const t = useTranslations("eventActions");
   const [existing, setExisting] = useState<ClinicalEventAttachment[]>([]);
+  const [linkedDocs, setLinkedDocs] = useState<EventDocument[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [busyAtt, setBusyAtt] = useState<string | null>(null);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
 
+  // Drive picker state.
+  const [pickerOpen, setPickerOpen] = useState(false);
+  const [pickerDocs, setPickerDocs] = useState<PatientDocument[] | null>(null);
+  const [pickerLoading, setPickerLoading] = useState(false);
+  const [pickerFilter, setPickerFilter] = useState("");
+
   useEffect(() => {
     if (!eventId) {
       setExisting([]);
+      setLinkedDocs([]);
       return;
     }
     let cancelled = false;
     setLoading(true);
-    calendarApi
-      .listAttachments(eventId)
-      .then((rows) => {
-        if (!cancelled) setExisting(rows);
+    Promise.all([calendarApi.listAttachments(eventId), calendarApi.listEventDocuments(eventId)])
+      .then(([atts, docs]) => {
+        if (cancelled) return;
+        setExisting(atts);
+        setLinkedDocs(docs);
       })
       .catch((e: unknown) => {
         if (!cancelled) setError(e instanceof Error ? e.message : "load failed");
@@ -80,7 +96,6 @@ export default function AttachmentsManager({
     if (!files || files.length === 0) return;
     const list = Array.from(files);
     if (eventId && !readOnly) {
-      // Upload immediately when the event exists.
       void uploadNow(list);
     } else if (onPendingChange) {
       onPendingChange([...(pending ?? []), ...list]);
@@ -138,10 +153,68 @@ export default function AttachmentsManager({
     }
   }
 
+  async function openPicker(): Promise<void> {
+    setPickerOpen(true);
+    if (pickerDocs !== null || !patientId) return;
+    setPickerLoading(true);
+    try {
+      const docs = await patientsApi.listDocuments(patientId);
+      setPickerDocs(docs);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "load documents failed");
+    } finally {
+      setPickerLoading(false);
+    }
+  }
+
+  async function linkFromDrive(doc: PatientDocument): Promise<void> {
+    if (!eventId) return;
+    setBusyAtt(doc.id);
+    try {
+      const link = await calendarApi.linkEventDocument(eventId, doc.id);
+      // Idempotent backend: drop any existing row for the same document
+      // before prepending so a double-click doesn't duplicate the row.
+      setLinkedDocs((cur) => [link, ...cur.filter((x) => x.document_id !== link.document_id)]);
+      setPickerOpen(false);
+      setPickerFilter("");
+    } catch (e) {
+      setError(
+        e instanceof ApiError
+          ? `${e.status}: ${String(e.detail)}`
+          : e instanceof Error
+            ? e.message
+            : "link failed",
+      );
+    } finally {
+      setBusyAtt(null);
+    }
+  }
+
+  async function unlinkDoc(link: EventDocument): Promise<void> {
+    if (!eventId) return;
+    setBusyAtt(link.id);
+    try {
+      await calendarApi.unlinkEventDocument(eventId, link.id);
+      setLinkedDocs((cur) => cur.filter((x) => x.id !== link.id));
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "unlink failed");
+    } finally {
+      setBusyAtt(null);
+    }
+  }
+
+  // Pure "attach from Drive" references; reconciled raw uploads already
+  // appear in the attachments list (with an "Open in Drive" link), so
+  // exclude them here to avoid showing the same document twice.
+  const referenceDocs = linkedDocs.filter((d) => d.source_attachment_id === null);
+  const filteredPicker = (pickerDocs ?? []).filter((d) =>
+    (d.title || "").toLowerCase().includes(pickerFilter.trim().toLowerCase()),
+  );
+
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
       {!readOnly && (
-        <div>
+        <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
           <input
             ref={fileInputRef}
             type="file"
@@ -157,10 +230,80 @@ export default function AttachmentsManager({
           >
             📎 {t("addAttachmentFile")}
           </button>
+          {eventId && patientId && (
+            <button
+              type="button"
+              className="ghost"
+              onClick={() => void openPicker()}
+              style={{ fontSize: "0.82rem", padding: "0.3rem 0.7rem" }}
+            >
+              🗂️ {t("addFromDrive")}
+            </button>
+          )}
         </div>
       )}
+
+      {pickerOpen && (
+        <div style={pickerStyle}>
+          <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
+            <input
+              type="text"
+              value={pickerFilter}
+              onChange={(e) => setPickerFilter(e.target.value)}
+              placeholder={t("pickerSearchPlaceholder")}
+              style={pickerSearch}
+            />
+            <button
+              type="button"
+              className="ghost"
+              onClick={() => setPickerOpen(false)}
+              aria-label={t("pickerClose")}
+              style={iconBtn}
+            >
+              ✕
+            </button>
+          </div>
+          {pickerLoading && (
+            <p style={{ color: "var(--bv-fg-soft)", fontSize: "0.78rem", margin: 0 }}>…</p>
+          )}
+          {!pickerLoading && filteredPicker.length === 0 && (
+            <p style={{ color: "var(--bv-fg-soft)", fontSize: "0.78rem", margin: 0 }}>
+              {t("pickerEmpty")}
+            </p>
+          )}
+          {!pickerLoading && filteredPicker.length > 0 && (
+            <ul style={{ ...listReset, maxHeight: 220, overflowY: "auto" }}>
+              {filteredPicker.map((d) => (
+                <li key={d.id} style={rowStyle}>
+                  <button
+                    type="button"
+                    className="ghost"
+                    onClick={() => void linkFromDrive(d)}
+                    disabled={busyAtt === d.id}
+                    style={{
+                      flex: 1,
+                      textAlign: "left",
+                      background: "none",
+                      border: "none",
+                      padding: 0,
+                      cursor: "pointer",
+                      color: "var(--bv-fg)",
+                      fontSize: "0.82rem",
+                    }}
+                  >
+                    📄 {d.title || t("untitledDocument")}
+                  </button>
+                  {d.document_date && <span style={meta}>{d.document_date}</span>}
+                </li>
+              ))}
+            </ul>
+          )}
+        </div>
+      )}
+
       {loading && <p style={{ color: "var(--bv-fg-soft)", fontSize: "0.78rem" }}>…</p>}
       {error && <p style={{ color: "var(--bv-danger, #c00)", fontSize: "0.78rem" }}>{error}</p>}
+
       {pending && pending.length > 0 && (
         <ul style={listReset}>
           {pending.map((f, i) => (
@@ -187,6 +330,7 @@ export default function AttachmentsManager({
           ))}
         </ul>
       )}
+
       {existing.length > 0 && (
         <ul style={listReset}>
           {existing.map((a) => (
@@ -223,10 +367,13 @@ export default function AttachmentsManager({
                 📎 {a.filename}
               </button>
               <span style={meta}>{fmtSize(a.size_bytes)}</span>
-              {a.promoted_to_document_id ? (
-                <span style={{ ...meta, color: "var(--bv-status-confirmed-border, #1e8e3e)" }}>
-                  ✓ {t("attachmentPromoted")}
-                </span>
+              {a.document_id ? (
+                <Link
+                  href={`/patients/${a.patient_id}/documents/${a.document_id}`}
+                  style={driveLink}
+                >
+                  ↗ {t("attachmentInDrive")}
+                </Link>
               ) : (
                 !readOnly && (
                   <button
@@ -256,6 +403,44 @@ export default function AttachmentsManager({
             </li>
           ))}
         </ul>
+      )}
+
+      {referenceDocs.length > 0 && (
+        <>
+          <span style={{ ...meta, marginTop: 2 }}>{t("linkedDocsLabel")}</span>
+          <ul style={listReset}>
+            {referenceDocs.map((d) => (
+              <li key={d.id} style={rowStyle}>
+                <Link
+                  href={`/patients/${d.patient_id}/documents/${d.document_id}`}
+                  style={{
+                    flex: 1,
+                    textAlign: "left",
+                    color: "var(--bv-fg)",
+                    textDecoration: "none",
+                    fontSize: "0.82rem",
+                  }}
+                >
+                  🗂️ {d.document_title || t("untitledDocument")}
+                </Link>
+                {d.document_date && <span style={meta}>{d.document_date}</span>}
+                {!readOnly && (
+                  <button
+                    type="button"
+                    className="ghost"
+                    onClick={() => void unlinkDoc(d)}
+                    disabled={busyAtt === d.id}
+                    aria-label={t("unlinkDocument")}
+                    title={t("unlinkDocument")}
+                    style={iconBtn}
+                  >
+                    ✕
+                  </button>
+                )}
+              </li>
+            ))}
+          </ul>
+        </>
       )}
     </div>
   );
@@ -299,4 +484,33 @@ const iconBtn = {
   fontSize: "0.85rem",
   padding: 0,
   borderRadius: 6,
+};
+
+const driveLink = {
+  fontSize: "0.7rem",
+  padding: "0.15rem 0.45rem",
+  borderRadius: 6,
+  color: "var(--bv-status-confirmed-border, #1e8e3e)",
+  textDecoration: "none",
+  whiteSpace: "nowrap" as const,
+};
+
+const pickerStyle = {
+  display: "flex",
+  flexDirection: "column" as const,
+  gap: 6,
+  padding: 8,
+  border: "1px solid var(--bv-card-border, #e5e7eb)",
+  borderRadius: 8,
+  background: "var(--bv-card-bg, #fff)",
+};
+
+const pickerSearch = {
+  flex: 1,
+  padding: "0.3rem 0.5rem",
+  fontSize: "0.82rem",
+  borderRadius: 6,
+  border: "1px solid var(--bv-card-border, #e5e7eb)",
+  background: "var(--bv-input-bg, #fff)",
+  color: "var(--bv-fg)",
 };

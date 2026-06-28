@@ -364,6 +364,7 @@ TOOL_SCOPE: dict[str, str] = {
     "list_reports": "reports:read",
     "get_document_text": "documents:read",
     "get_document_references": "documents:read",
+    "find_documents_by_content_hash": "documents:read",
     "download_document_binary": "documents:download",
     "get_fascicolo_bundle": "patients:read",
     "get_lab_timeseries": "patients:read",
@@ -484,6 +485,14 @@ TOOL_SCOPE: dict[str, str] = {
     "download_clinical_event_attachment": "events:read",
     "delete_clinical_event_attachment": "events:write",
     "promote_clinical_event_attachment": "events:write",
+    # Event ↔ curated drive Document links. Linking/unlinking a document
+    # to the event is part of the event's surface, so it rides
+    # ``events:write``; the list is ``events:read``. The document the
+    # link points at is still gated by the patient read/write the
+    # backend enforces on top.
+    "link_event_document": "events:write",
+    "list_event_documents": "events:read",
+    "unlink_event_document": "events:write",
     # --- Sharing (sensitive scope; see SCOPE_CATALOG sharing:write) ----
     "create_study_share_link": "sharing:write",
     "create_folder_share_link": "sharing:write",

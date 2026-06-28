@@ -14,10 +14,16 @@ a DB-level guarantee. Storage key layout::
 under ``settings.s3_bucket_raw``.
 
 When a user wants to keep an attachment beyond the event lifecycle,
-the ``promote-to-document`` action creates a regular Document in the
-patient drive and back-fills ``promoted_to_document_id``. The
-attachment row stays around as a breadcrumb; ``deleted_at`` is set
-when the user removes it from the event surface.
+the ``promote-to-document`` action reconciles it against the patient
+drive: it matches the bytes against an existing Document by
+``content_sha256`` (and creates one via the canonical ingest path when
+there is no match), then records a :class:`ClinicalEventDocument` link.
+The raw attachment row stays around as the downloadable source;
+``deleted_at`` is set when the user removes it from the event surface.
+
+``content_sha256`` is the reconciliation anchor: identical bytes
+already curated in the drive are detected without a second copy. It is
+``NULL`` on pre-0038 rows until the backfill streams them from S3.
 """
 
 from __future__ import annotations
@@ -59,7 +65,10 @@ class ClinicalEventAttachment(Base):
     uploaded_by_kind: Mapped[str] = mapped_column(
         String(16), nullable=False, server_default=text("'human'")
     )
-    promoted_to_document_id: Mapped[uuid.UUID | None] = mapped_column(PG_UUID(as_uuid=True))
+    # SHA-256 of the uploaded bytes — the reconciliation anchor against
+    # the drive ``documents.content_sha256`` index. Computed at upload;
+    # NULL on pre-0038 rows until the backfill streams them from S3.
+    content_sha256: Mapped[str | None] = mapped_column(String(64))
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )
@@ -86,6 +95,12 @@ class ClinicalEventAttachment(Base):
             "ix_ce_attachments_patient",
             "patient_id",
             postgresql_where=text("deleted_at IS NULL"),
+        ),
+        Index(
+            "ix_ce_attachments_sha",
+            "patient_id",
+            "content_sha256",
+            postgresql_where=text("content_sha256 IS NOT NULL AND deleted_at IS NULL"),
         ),
     )
 

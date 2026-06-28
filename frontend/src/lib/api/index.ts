@@ -1269,6 +1269,17 @@ export interface DocumentReferences {
     name: string;
     is_root: boolean;
   }>;
+  /** Clinical events that reference this document (attached from the
+   *  Drive, or reconciled/promoted from a raw event upload). Non-blocking. */
+  clinical_events: Array<{
+    event_id: string;
+    link_id: string;
+    event_title: string | null;
+    event_date: string | null;
+    link_role: string;
+    source_attachment_id: string | null;
+    created_at: string;
+  }>;
 }
 
 /** Structured 409 payload returned when a delete is blocked by active
