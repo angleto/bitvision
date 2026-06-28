@@ -47,6 +47,7 @@ pathology importer never writes the slide label and bottom-crops the macro.
 |---|---|
 | `tcia` | TCIA NBIA v1 REST (`services.cancerimagingarchive.net`). One ZIP per series. |
 | `osirix_zip` | HTTP ZIP from a manifest-supplied URL, one ZIP per subject. |
+| `idc` | NCI Imaging Data Commons: `idc-index` for the collection→series map + anonymous S3 (`idc-open-data`) for the bytes, one series at a time. For collections NOT on NBIA v1 (e.g. NLST). Needs `pip install 'bvphoenix[idc]'`; configured in the **separate** `manifest-idc.yaml` + a dedicated Job. Refuses `idc-open-data-cr` (CC-BY-NC) series under a commercial entry. |
 
 ```yaml
 sources:
@@ -89,10 +90,10 @@ sources:
   CC-licensed on the TCIA *website* but ABSENT from the NBIA v1 REST API
   this adapter uses (`getPatient` returns an empty body): `NLST`,
   `Yale-Brain-Mets-Longitudinal`, `CDD-CESM`, `UCSD-VS-Longitudinal`,
-  `Breast-Lesions-USG`. They live on a different backend (Imaging Data
-  Commons / AWS Open Data / authenticated NBIA) and need a **new adapter**,
-  not `tcia`. Their verified metadata is kept so an adapter build starts
-  from real citations.
+  `Breast-Lesions-USG`. Of these, **only `NLST` is recoverable**: it is in
+  IDC as DICOM and is now ingested via the `idc` adapter + `manifest-idc.yaml`.
+  The other four are distributed by TCIA as NIfTI/JPEG/PNG (not DICOM, so not
+  in IDC) or not yet ingested by IDC, so a DICOM importer cannot take them.
 - NBIA collection names are case-sensitive and passed verbatim. Two carry a
   SPACE, not a hyphen: `NSCLC Radiogenomics` and `RIDER Lung CT`. Do not
   fabricate a DOI for a medical dataset.

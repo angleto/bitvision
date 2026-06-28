@@ -158,6 +158,15 @@ ai = [
     "sentencepiece>=0.2.0",
     "protobuf>=4.0.0",
 ]
+# NCI Imaging Data Commons client, used ONLY by the ``idc`` adapter of
+# bvphoenix-public-import to ingest collections that the TCIA NBIA v1 REST
+# API does not serve (NLST and other IDC-hosted DICOM). Kept optional and
+# lazy-imported (public_import._idc_client) so the API/worker images don't
+# carry it; the dedicated IDC import Job enables this extra. Pulls duckdb +
+# a bundled s5cmd; pandas/pyarrow already come via the ``ai`` extra.
+idc = [
+    "idc-index>=0.8.0",
+]
 dev = [
     "pytest>=8.3.0",
     "pytest-asyncio>=0.24.0",

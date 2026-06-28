@@ -23,9 +23,12 @@ WORKDIR /app/backend
 # ``--extra ai`` pulls torch + sentence-transformers so chunk_search can
 # fall through to semantic vector retrieval instead of FTS-only when a
 # query has no exact keyword match. Worth the +500 MB on the image.
+# ``--extra idc`` adds the idc-index client (lazy-imported, used only by the
+# bvphoenix-public-import `idc` adapter to ingest IDC-hosted collections such
+# as NLST that the NBIA v1 API does not serve). Small next to the ai extra.
 RUN --mount=type=cache,target=/root/.cache/uv \
-    uv sync --extra ai --no-install-project --no-dev || uv sync --extra ai --no-install-project
-RUN --mount=type=cache,target=/root/.cache/uv uv sync --extra ai --no-dev
+    uv sync --extra ai --extra idc --no-install-project --no-dev || uv sync --extra ai --extra idc --no-install-project
+RUN --mount=type=cache,target=/root/.cache/uv uv sync --extra ai --extra idc --no-dev
 
 # FlagEmbedding (BGE-M3 sparse + ColBERT query encoding) installed --no-deps:
 # real inference deps are pinned in the `ai` extra; --no-deps drops the

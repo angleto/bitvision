@@ -330,6 +330,132 @@ def _adapter_osirix_zip(
     return subject_dir
 
 
+# ---- IDC (NCI Imaging Data Commons) adapter -------------------------------
+# Some TCIA collections are NOT reachable through the NBIA v1 REST API
+# (``getPatient`` returns an empty body) because their DICOM lives only in the
+# Imaging Data Commons public buckets — NLST (National Lung Screening Trial,
+# ~26k subjects) is the prime example. IDC publishes a per-series index
+# (collection_id → PatientID → SeriesInstanceUID → object keys) plus anonymous
+# public S3 buckets (idc-open-data / -two / -cr). We use the maintained
+# ``idc-index`` package for the collection→series map and anonymous ``boto3``
+# for the bytes, ONE SERIES AT A TIME, so a disk-constrained pod never holds
+# more than a single series of a multi-TB collection. ``idc-index`` is imported
+# lazily so the API image pays nothing unless an ``idc`` manifest entry runs.
+
+_IDC_CLIENT = None
+
+
+def _idc_client():
+    """Lazily build the shared IDCClient (first call downloads the index)."""
+    global _IDC_CLIENT
+    if _IDC_CLIENT is None:
+        try:
+            from idc_index import IDCClient
+        except ImportError as exc:  # pragma: no cover - import-time guard
+            raise click.ClickException(
+                "the 'idc' adapter requires the idc-index package (pip install idc-index)"
+            ) from exc
+        _IDC_CLIENT = IDCClient.client()
+    return _IDC_CLIENT
+
+
+def _idc_s3():
+    """Anonymous (unsigned) S3 client for the public IDC buckets."""
+    import boto3
+    from botocore import UNSIGNED
+    from botocore.config import Config
+
+    return boto3.client("s3", config=Config(signature_version=UNSIGNED))
+
+
+def _idc_collection_id(collection: str) -> str:
+    """Strip the manifest namespace ("IDC/nlst" -> "nlst")."""
+    return collection.split("/", 1)[1] if "/" in collection else collection
+
+
+def _adapter_idc_list_patients(*, collection: str) -> list[str]:
+    """Return every PatientID IDC holds for ``collection`` (backs subjects: all)."""
+    client = _idc_client()
+    cid = _idc_collection_id(collection)
+    if cid not in set(client.get_collections()):
+        raise click.ClickException(f"IDC: collection {cid!r} is not in the IDC index")
+    sel = client.index[client.index["collection_id"] == cid]
+    return sorted({str(p) for p in sel["PatientID"]})
+
+
+def _adapter_idc(
+    *,
+    collection: str,
+    subject_id: str,
+    workdir: Path,
+    skip_series: set[str] | None = None,
+    keep_series: set[str] | None = None,
+    allow_noncommercial: bool = False,
+) -> Path | None:
+    """Fetch one IDC subject's DICOM via anonymous public S3, one series at a time.
+
+    Mirrors :func:`_adapter_tcia`'s contract: skips ``skip_series`` *before* the
+    download, restricts to ``keep_series`` when given, writes
+    ``workdir/<subject>/<series_uid>/<instance>.dcm``, and returns ``None`` when
+    every series the subject offers is already imported.
+
+    License safety: IDC keys commercially-restricted (CC-BY-NC) series into the
+    ``idc-open-data-cr`` bucket. A ``*-cr`` series is refused unless the manifest
+    entry is itself CC-BY-NC (``allow_noncommercial``), so non-commercial data is
+    never silently relabelled as CC-BY.
+    """
+    client = _idc_client()
+    s3 = _idc_s3()
+    skip_series = skip_series or set()
+    keep_series = keep_series or set()
+    cid = _idc_collection_id(collection)
+    idx = client.index
+    sel = idx[(idx["collection_id"] == cid) & (idx["PatientID"].astype(str) == subject_id)]
+    if sel.empty:
+        raise click.ClickException(f"IDC: no series for {cid}/{subject_id}")
+
+    subject_dir = workdir / subject_id
+    subject_dir.mkdir(parents=True, exist_ok=True)
+    fetched = 0
+    skipped = 0
+    refused_nc = 0
+    for series_uid in (str(u) for u in sel["SeriesInstanceUID"]):
+        if keep_series and series_uid not in keep_series:
+            continue
+        if series_uid in skip_series:
+            skipped += 1
+            continue
+        urls = client.get_series_file_URLs(series_uid)
+        if not urls:
+            continue
+        first_bucket = urls[0][len("s3://") :].split("/", 1)[0]
+        if first_bucket.endswith("-cr") and not allow_noncommercial:
+            # commercially-restricted (CC-BY-NC) data under a CC-BY manifest entry
+            refused_nc += 1
+            continue
+        series_dir = subject_dir / series_uid
+        series_dir.mkdir(exist_ok=True)
+        click.echo(f"    fetching idc series {series_uid[:24]}… ({len(urls)} inst)")
+        for url in urls:
+            if not url.startswith("s3://"):
+                raise click.ClickException(f"IDC: unexpected non-s3 URL {url!r}")
+            bucket, key = url[len("s3://") :].split("/", 1)
+            s3.download_file(bucket, key, str(series_dir / Path(key).name))
+        fetched += 1
+    if skipped:
+        click.echo(f"    {skipped} series already imported, {fetched} fetched")
+    if refused_nc:
+        click.echo(
+            f"    {refused_nc} CC-BY-NC series refused (idc-open-data-cr) under a "
+            f"commercial-licensed entry",
+            err=True,
+        )
+    if fetched == 0:
+        shutil.rmtree(subject_dir, ignore_errors=True)
+        return None
+    return subject_dir
+
+
 @click.command(
     name="bvphoenix-public-import",
     help="Bootstrap OpenData public dataset from a curated manifest (TCIA, OsiriX).",
@@ -412,13 +538,16 @@ def main(
         for src in sources:
             if not src.all_subjects:
                 continue
-            if src.adapter != "tcia":
+            if src.adapter not in ("tcia", "idc"):
                 raise click.ClickException(
-                    f"'subjects: all' only supported by the tcia adapter "
+                    f"'subjects: all' only supported by the tcia/idc adapters "
                     f"(collection {src.collection!r} uses {src.adapter!r})"
                 )
             try:
-                patient_ids = _adapter_tcia_list_patients(client, collection=src.collection)
+                if src.adapter == "idc":
+                    patient_ids = _adapter_idc_list_patients(collection=src.collection)
+                else:
+                    patient_ids = _adapter_tcia_list_patients(client, collection=src.collection)
             except Exception as exc:
                 click.echo(f"# {src.collection}: enumeration FAILED: {exc}", err=True)
                 failed.append((src.collection, "*", f"getPatient enumeration: {exc}"))
@@ -474,6 +603,15 @@ def main(
                             succeeded += 1
                             continue
                         subject_dir = _adapter_osirix_zip(client, subject=subj, workdir=workdir)
+                    elif src.adapter == "idc":
+                        subject_dir = _adapter_idc(
+                            collection=src.collection,
+                            subject_id=subj.identifier,
+                            workdir=workdir,
+                            skip_series=skip_series,
+                            keep_series=keep_series,
+                            allow_noncommercial="-NC-" in src.license_spdx.upper(),
+                        )
                     else:
                         raise click.ClickException(f"unknown adapter: {src.adapter!r}")
 

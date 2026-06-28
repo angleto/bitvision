@@ -1,0 +1,50 @@
+# OpenData public dataset manifest (RADIOLOGY via IDC) — see ./README.md.
+#
+# This manifest is for collections served by the NCI Imaging Data Commons
+# (IDC) public buckets but NOT by the NBIA v1 REST API (so the default
+# `tcia` adapter cannot reach them — `getPatient` returns an empty body).
+# The `idc` adapter (public_import._adapter_idc) uses the idc-index package
+# for the collection->series map and anonymous S3 (idc-open-data) for the
+# bytes, one series at a time. It needs the `idc` optional dependency
+# (pip install 'bvphoenix[idc]') and runs as a DEDICATED Job, separate from
+# the NBIA bulk import, because these collections are large and deliberate.
+#
+# `collection` is "IDC/<idc_collection_id>" (lowercase id, e.g. IDC/nlst).
+# Licensing gate is identical to manifest.yaml: CC-BY/CC0 commercial OK,
+# CC-BY-NC labelled non-commercial (and the adapter additionally refuses
+# any series that lands in the idc-open-data-cr bucket unless the entry is
+# itself CC-BY-NC). License SPDX + citation verified against TCIA/IDC.
+
+sources:
+  # ---- Lung screening CT (NLST) — CC-BY-4.0 -----------------------------
+  # The National Lung Screening Trial: ~26,254 subjects, ~73,116 low-dose
+  # chest CT studies. NOT on NBIA v1; DICOM lives only in IDC. VERY LARGE
+  # (>10 TB) — the bulk Job is resumable and pulls one series at a time, so
+  # ingest grows incrementally; stop/throttle via the Job's deadline.
+  - collection: IDC/nlst
+    adapter: idc
+    license_spdx: CC-BY-4.0
+    license_url: https://creativecommons.org/licenses/by/4.0/
+    citation_required: true
+    citation_text: >-
+      National Lung Screening Trial Research Team; Aberle DR, Adams AM, Berg
+      CD, et al. Reduced Lung-Cancer Mortality with Low-Dose Computed
+      Tomographic Screening. New England Journal of Medicine
+      2011;365(5):395-409. doi:10.1056/NEJMoa1102873. Data: The Cancer
+      Imaging Archive, doi:10.7937/TCIA.HMQ8-J677
+    subjects: all
+
+# ============================================================================
+# STAGED — other IDC-hosted DICOM collections to add here as we vet them.
+# IDC has 150+ DICOM collections; many (e.g. additional TCGA/CPTAC series,
+# Duke/ISPY mirrors) are reachable via this same `idc` adapter. Verify the
+# IDC collection_id (client.get_collections()), the per-series license
+# (idc-open-data vs -cr), and paste the canonical TCIA citation before
+# moving an entry up into `sources:`. Do not fabricate a DOI.
+#
+# NOTE: the four other "not on NBIA v1" collections (Yale-Brain-Mets-
+# Longitudinal, CDD-CESM, Breast-Lesions-USG, UCSD-VS-Longitudinal) are NOT
+# ingestable here: the first three are distributed by TCIA as NIfTI/JPEG/PNG
+# (not DICOM, so not in IDC) and UCSD-VS is not yet in IDC. They would need a
+# non-DICOM ingestion path, out of scope for this DICOM importer.
+# ============================================================================
