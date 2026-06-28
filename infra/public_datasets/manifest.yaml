@@ -1231,7 +1231,7 @@ sources:
     subjects: all
 
   # ---- Lung · CT (~47 studies, CC-BY-3.0, commercial OK) ----
-  - collection: TCIA/QIN-LUNG-CT
+  - collection: TCIA/QIN LUNG CT
     adapter: tcia
     license_spdx: CC-BY-3.0
     license_url: https://creativecommons.org/licenses/by/3.0/
