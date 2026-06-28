@@ -30,8 +30,8 @@ from bvphoenix.services.embedding_status import indexed_study_ids
 from bvphoenix.services.mmr import MMRCandidate, mmr_rerank
 from bvphoenix.services.permissions import (
     READ_METADATA,
-    apply_scope_filter,
     can,
+    narrow_to_scope,
     visible_studies_filter,
 )
 from bvphoenix.services.rate_limit import SEARCH_LIMIT, limiter
@@ -72,11 +72,13 @@ async def search(
             "recency decay), otherwise 'newest' (created_at DESC)."
         ),
     ),
-    scope: Literal["all", "public", "mine"] | None = Query(
+    scope: Literal["all", "public", "mine", "shared"] | None = Query(
         None,
         description=(
-            "Visibility scope. 'public' = OpenData library + studies marked "
-            "is_public. 'mine' = studies owned by the caller. Default 'all' "
+            "Visibility scope (UX narrowing on top of the auth boundary). "
+            "'public' = OpenData library + studies marked is_public. 'mine' = "
+            "studies owned by the caller. 'shared' = studies visible only via "
+            "a grant (shared with the caller, not owned/public). Default 'all' "
             "= everything the caller is authorised to read."
         ),
     ),
@@ -113,7 +115,7 @@ async def search(
     # UX scope narrowing — auth filter above is the ceiling, this can
     # only restrict further (e.g. user sees grants + own + public but
     # asked for 'mine' → drop grants and OpenData).
-    base = apply_scope_filter(base, scope, user)
+    base = await narrow_to_scope(db, base, scope, user)
 
     # Expand acronyms / bilingual synonyms (TC -> CT -> tomografia ...) on
     # the FTS side only; falls back to plain dual-config FTS when the
@@ -333,6 +335,7 @@ async def find_similar_studies(
     target_id: uuid.UUID,
     k: int = 10,
     modality: str | None = None,
+    scope: str | None = None,
     diversify: bool = False,
     mmr_lambda: float = 0.7,
 ) -> list[SimilarStudyOut]:
@@ -425,6 +428,10 @@ async def find_similar_studies(
     # iterative scan so the k*3 slab is filled with visible rows even
     # when the caller can see only a small fraction of the corpus.
     visible_base = await visible_studies_filter(db, user)
+    # UX scope narrowing (same semantics as /search): only restricts the
+    # auth-allowed set — never widens it, so it cannot expose a study the
+    # caller couldn't already see.
+    visible_base = await narrow_to_scope(db, visible_base, scope, user)
     visible_study_ids = visible_base.with_only_columns(ImagingStudy.id).subquery()
 
     query_vec = source_emb.vector
@@ -521,6 +528,15 @@ async def similar_to(
     user: Annotated[User | None, Depends(optional_user)],
     k: int = Query(10, ge=1, le=100),
     modality: str | None = Query(None, max_length=16),
+    scope: Literal["all", "public", "mine", "shared"] | None = Query(
+        None,
+        description=(
+            "Visibility scope (UX narrowing on top of the auth boundary, "
+            "identical to /search). 'public' = OpenData + is_public; 'mine' = "
+            "owned by the caller; 'shared' = visible only via a grant; default "
+            "'all'. Cannot widen what the caller may see."
+        ),
+    ),
     diversify: bool = Query(
         False,
         description="Re-rank with MMR so the results are visually diverse "
@@ -533,5 +549,11 @@ async def similar_to(
     series with an embedding is used as the query vector.
     """
     return await find_similar_studies(
-        db=db, user=user, target_id=target_id, k=k, modality=modality, diversify=diversify
+        db=db,
+        user=user,
+        target_id=target_id,
+        k=k,
+        modality=modality,
+        scope=scope,
+        diversify=diversify,
     )

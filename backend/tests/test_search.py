@@ -262,6 +262,109 @@ async def test_similar_to_filters_by_modality(
     app.dependency_overrides.clear()
 
 
+@pytest.mark.asyncio
+async def test_similar_to_does_not_leak_private_studies(
+    db_session, make_user, make_study, make_embedding
+) -> None:
+    """No discovery of another user's PRIVATE study via visual search.
+
+    The privacy/legal guard: user A's private study is given the vector
+    NEAREST to user B's source, so a missing visibility filter would surface
+    it first. B must not see it in the neighbours, and must not even be able
+    to anchor a search on A's private series id (404, not a usable probe)."""
+    user_a = await make_user(email="a-priv@example.com")
+    user_b = await make_user(email="b-priv@example.com")
+
+    rng = np.random.default_rng(7)
+    base = rng.standard_normal(512).astype(np.float32)
+    base = base / np.linalg.norm(base)
+    near = base + rng.standard_normal(512).astype(np.float32) * 0.01
+    near = near / np.linalg.norm(near)
+
+    # User A: a private study, embedded with ``base`` (the secret).
+    secret = f"private-ct-{uuid.uuid4()}"
+    _, a_series = await make_study(user_a, description=secret, is_public=False)
+    await make_embedding(a_series, vector=base.tolist())
+
+    # User B: their own private source, embedded almost identically to A's, so
+    # A is B's nearest vector neighbour by cosine distance.
+    _, b_source = await make_study(user_b, description="b-source", is_public=False)
+    await make_embedding(b_source, vector=near.tolist())
+
+    client_b = await _client_for(db_session, user_b)
+    # B's neighbours must NOT include A's private study despite the proximity.
+    r = await client_b.get(f"/api/similar-to/{b_source.id}", params={"k": 50})
+    assert r.status_code == 200
+    descs = [(item["study"].get("study_description") or "") for item in r.json()]
+    assert secret not in descs, "VISIBILITY LEAK: private study surfaced via /similar-to"
+    # B cannot even anchor a similarity search on A's private series.
+    r2 = await client_b.get(f"/api/similar-to/{a_series.id}")
+    assert r2.status_code == 404
+    await client_b.aclose()
+    app.dependency_overrides.clear()
+
+
+@pytest.mark.asyncio
+async def test_similar_to_scope_narrows_mine_vs_shared(
+    db_session, make_user, make_study, make_embedding
+) -> None:
+    """The visual-search scope selector narrows results: 'mine' = owned by
+    the caller, 'shared' = visible only via a grant (not owned, not public).
+    Both only restrict the already-visible set."""
+    from datetime import UTC, datetime, timedelta
+
+    from bvphoenix.db.models import Grant
+
+    user_a = await make_user(email="a-scope@example.com")
+    user_b = await make_user(email="b-scope@example.com")
+
+    rng = np.random.default_rng(11)
+
+    def _vec() -> list[float]:
+        v = rng.standard_normal(512).astype(np.float32)
+        return (v / np.linalg.norm(v)).tolist()
+
+    tag = uuid.uuid4().hex[:8]
+    _, source = await make_study(user_a, description=f"src-{tag}", is_public=False)
+    await make_embedding(source, vector=_vec())
+    _, own = await make_study(user_a, description=f"A-own-{tag}", is_public=False)
+    await make_embedding(own, vector=_vec())
+    # B's private study, shared with A via an active study grant.
+    study_shared, shared_series = await make_study(
+        user_b, description=f"B-shared-{tag}", is_public=False
+    )
+    await make_embedding(shared_series, vector=_vec())
+    db_session.add(
+        Grant(
+            id=uuid.uuid4(),
+            grantor_subject_id=user_b.subject_id,
+            grantee_subject_id=user_a.subject_id,
+            resource_kind="study",
+            resource_id=study_shared.id,
+            permissions=["read:metadata"],
+            valid_from=datetime.now(UTC) - timedelta(days=1),
+        )
+    )
+    await db_session.flush()
+
+    client = await _client_for(db_session, user_a)
+
+    async def _descs(scope: str) -> set[str]:
+        r = await client.get(f"/api/similar-to/{source.id}", params={"k": 50, "scope": scope})
+        assert r.status_code == 200, r.text
+        return {(i["study"].get("study_description") or "") for i in r.json()}
+
+    all_d = await _descs("all")
+    assert {f"A-own-{tag}", f"B-shared-{tag}"} <= all_d
+    mine_d = await _descs("mine")
+    assert f"A-own-{tag}" in mine_d and f"B-shared-{tag}" not in mine_d
+    shared_d = await _descs("shared")
+    assert f"B-shared-{tag}" in shared_d and f"A-own-{tag}" not in shared_d
+
+    await client.aclose()
+    app.dependency_overrides.clear()
+
+
 # ---- indexed flag (Visual Search picker) -----------------------------------
 
 
