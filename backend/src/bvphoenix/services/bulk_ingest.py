@@ -35,6 +35,7 @@ from bvphoenix.db.models import (
 from bvphoenix.services.consent_auto import ensure_tier_consents
 from bvphoenix.services.dicom_ingest import DicomIngestor, has_dicm_preamble
 from bvphoenix.services.folders import get_or_create_root_folder, link_resource_to_folder
+from bvphoenix.services.storage_staging import stage_upload
 from bvphoenix.storage import get_s3_storage
 
 log = logging.getLogger(__name__)
@@ -487,11 +488,15 @@ async def process_bulk_ingest(
         doc_id = uuid.uuid4()
         ext = vf.filename.rsplit(".", 1)[-1] if "." in vf.filename else "bin"
         s3_key = f"patient-docs/{patient.id}/{doc_id}.{ext}"
-        await asyncio.to_thread(
-            storage.upload_bytes,
-            vf.data,
+        # Tie the object to this transaction: the doc rows are committed
+        # only at Stage 5, so a failing commit (or the document_orphan
+        # trigger) must not leave the just-uploaded key behind.
+        await stage_upload(
+            db,
             bucket=settings.s3_bucket_raw,
             key=s3_key,
+            data=vf.data,
+            storage=storage,
         )
         content_type = {
             "pdf": "application/pdf",
