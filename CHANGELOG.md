@@ -5,6 +5,17 @@ project follows semantic versioning; pre-release suffixes (`alpha`,
 `beta`) gate Kubernetes deployments via the GHCR image tag (without
 the leading `v`, see deployment guide).
 
+## 4.4.82 (2026-06-28)
+
+### Visual Search: scope + tier on the search step
+
+* The scope selector and tier badges (4.4.80) were on Step 2 (similar
+  cases, shown only after picking a reference); the actual search happens
+  in Step 1 (the reference picker), so the search looked unchanged. The
+  scope selector (All visible / Mine / Shared with me / Public) and the
+  tier badge now sit on the Step 1 picker — where you type the query and
+  see the results — wired to `/api/search`'s `scope`. Step 2 keeps them too.
+
 ## 4.4.81 (2026-06-28)
 
 ### Visual Search: full i18n (en/it)
