@@ -561,6 +561,7 @@ EXPECTED_TOOL_NAMES = {
     "help",
     # --- Sprint 1 / 2 — discovery + study/series reads ---
     "get_study",
+    "get_deidentification_provenance",
     "get_series",
     "describe_series",
     "embed_series",
@@ -984,6 +985,11 @@ async def test_missing_token_omits_authorization_header(monkeypatch: pytest.Monk
     "name,args,expected_path",
     [
         ("get_study", {"study_id": "u"}, "/api/studies/u"),
+        (
+            "get_deidentification_provenance",
+            {"study_id": "u"},
+            "/api/studies/u/deidentification-provenance",
+        ),
         ("get_series", {"series_id": "u"}, "/api/series/u"),
         ("describe_series", {"series_id": "u"}, "/api/series/u/llm/describe"),
         ("embed_series", {"series_id": "u"}, "/api/series/u/embed"),

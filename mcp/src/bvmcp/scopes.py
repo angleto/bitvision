@@ -349,6 +349,7 @@ TOOL_SCOPE: dict[str, str] = {
     "get_patient_timeline": "patients:read",
     "list_patient_documents": "documents:read",
     "get_study": "imaging:read",
+    "get_deidentification_provenance": "imaging:read",
     "get_series": "imaging:read",
     "get_series_dicom_meta": "imaging:read",
     "get_series_thumbnail": "imaging:read",

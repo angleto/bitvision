@@ -23,6 +23,27 @@ TOOLS = [
         },
     ),
     Tool(
+        name="get_deidentification_provenance",
+        description=(
+            "Return the per-study TEXT de-identification record for an OpenData "
+            "study: counts per redaction category (Italian tax code, phone, "
+            "email, precise dates, addresses, LLM scrub) with the LLM model / "
+            "provider when an LLM scrub ran, plus the contribution tier. "
+            "Aggregate + storage-isolated — category counts only, never an "
+            "excerpt / prompt hash, actor, note id, or storage location. Records "
+            "TEXT de-identification only; it does NOT cover DICOM PS3.15 header / "
+            "pixel handling (see the returned 'scope'). The auditable "
+            "counterpart to an irreversible black-box."
+        ),
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "study_id": {"type": "string", "description": "UUID of the study"},
+            },
+            "required": ["study_id"],
+        },
+    ),
+    Tool(
         name="get_series",
         description=(
             "Get detailed information about a single DICOM series. "
@@ -79,6 +100,10 @@ async def handle(name: str, arguments: dict) -> str:
 
     if name == "get_study":
         result = await api_get(f"/api/studies/{arguments['study_id']}")
+        return json.dumps(result, indent=2)
+
+    if name == "get_deidentification_provenance":
+        result = await api_get(f"/api/studies/{arguments['study_id']}/deidentification-provenance")
         return json.dumps(result, indent=2)
 
     if name == "get_series":
