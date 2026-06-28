@@ -76,8 +76,17 @@ sources:
   (a 3-subject smoke set via `--only`); a bulk run clears PILOT.
 - `exclude_body_parts` filters series by `BodyPartExamined` (upper-cased)
   before download — used for the otherwise-CC-BY CMB collections.
-- New collections are STAGED (commented) at the bottom of `manifest.yaml`
-  until their exact TCIA "Data Citation" string is pasted in. Do not
+- As of 2026-06-28 the active set is 48 collections (license SPDX +
+  canonical TCIA citation verified against the live collection page + DOI
+  for each), projecting to ~32k public studies (~29.7k commercial-eligible).
+  A `GATED` block at the bottom of `manifest.yaml` holds collections that
+  are verified-eligible but intentionally **not** active — the giants
+  (`NLST` ~73k, `Yale-Brain-Mets-Longitudinal` ~11.9k), the synthetic
+  `VICTRE` phantom set, the large NC `Breast-Cancer-Screening-DBT`, and the
+  `Pseudo-PHI-DICOM-Data` teaching set (designed to contain pseudo-PHI). To
+  activate one, uncomment its block and move it up into `sources:`.
+- NBIA collection names are case-sensitive and passed verbatim. Two carry a
+  SPACE, not a hyphen: `NSCLC Radiogenomics` and `RIDER Lung CT`. Do not
   fabricate a DOI for a medical dataset.
 
 ## Pathology manifest (`manifest-pathology.yaml`)

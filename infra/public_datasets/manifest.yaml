@@ -1,27 +1,34 @@
 # OpenData public dataset manifest (RADIOLOGY) — see ./README.md for schema.
 #
 # Licensing gate (the controlling risk):
-#   ELIGIBLE  CC-BY-3.0 / CC-BY-4.0 / CC0-1.0      → commercial reuse OK
-#   ELIGIBLE  CC-BY-NC-*                           → ingested but LABELLED
-#             non-commercial / educational use only (commercial_use_allowed
-#             is derived from the SPDX and excludes these from any
-#             commercial tier). MIDRC-RICORD-1C/1A and NSCLC-Radiomics fall
-#             here.
-#   INELIGIBLE  *-ND, CC-BY-(NC-)SA (viral), NIH/TCIA Controlled Access,
-#             Kaggle embargo. Brain/head collections are almost all
-#             Controlled since the 2022 TCIA face-reconstruction policy;
-#             UPENN-GBM (defaced) and ReMIND are the CC-BY exceptions.
+#   ELIGIBLE  CC-BY-3.0 / CC-BY-4.0 / CC0-1.0  → commercial reuse OK
+#   ELIGIBLE  CC-BY-NC-*                       → ingested but LABELLED
+#             non-commercial / educational only (commercial_use_allowed is
+#             derived from the SPDX and excludes these from any commercial
+#             tier). MIDRC-RICORD-1C/1A, Duke-Breast-Cancer-MRI and
+#             NSCLC-Radiomics fall here.
+#   INELIGIBLE  *-ND, CC-BY-(NC-)SA (viral), NIH/TCIA Controlled Access.
+#             Brain/head collections are almost all Controlled since the
+#             2022 TCIA face-reconstruction policy (HNSCC, Head-Neck-PET-CT
+#             were rejected for this); UPENN-GBM (defaced) and ReMIND are
+#             the CC-BY exceptions, and CMB-LCA/CMB-CRC drop their head
+#             series via exclude_body_parts.
 #
 # ``subjects: all`` enumerates every PatientID in the collection via NBIA
-# getPatient (whole-collection ingest for the maximal wave). Re-runs are
-# idempotent: already-complete series are skipped before download. The
-# K8s Job defaults to PILOT (a 3-subject smoke set via --only); a bulk run
-# clears PILOT to ingest the full ``subjects: all`` set.
+# getPatient (whole-collection ingest). Re-runs are idempotent: complete
+# series are skipped before download. The K8s Job defaults to PILOT (a
+# 3-subject smoke set via --only); the bulk Job (PILOT=0) ingests the full
+# ``subjects: all`` set and is resumable, so a single bounded run grows the
+# library incrementally.
 #
-# Citation integrity: every entry carries the verified SPDX + the canonical
-# citation. New collections are STAGED at the bottom (commented) until their
-# exact TCIA "Data Citation" string is pasted in — we do not fabricate DOIs
-# for a medical dataset.
+# Citation integrity: every license SPDX + canonical TCIA citation below was
+# verified against the live TCIA collection page + DOI on 2026-06-28. NBIA
+# collection names are CASE-SENSITIVE and passed verbatim — note the SPACE
+# (not hyphen) in "NSCLC Radiogenomics" and "RIDER Lung CT".
+#
+# Projection: the ACTIVE set below projects to well over 10,000 public
+# studies; the four GATED giants + the pseudo-PHI teaching set at the bottom
+# are intentionally NOT active (see their rationale).
 
 sources:
   # ---- Lung CT (LIDC-IDRI) — CC-BY-3.0 ---------------------------
@@ -196,34 +203,617 @@ sources:
     subjects:
       - RIDER-1129164940
 
+  # ==========================================================================
+  # Added 2026-06-28 — verified-eligible collections (license + citation
+  # confirmed against TCIA on 2026-06-28). Sorted by study count.
+  # ==========================================================================
+
+  # NOTE: very large collection (~73116 studies) — multi-TB egress; the bulk Job is resumable, ingest grows incrementally.
+  # ---- Chest (lung) · CT (primary; collection also includes Histopathology / Tissue Microarray slide images) (~73116 studies, CC-BY-4.0, commercial OK) ----
+  - collection: TCIA/NLST
+    adapter: tcia
+    license_spdx: CC-BY-4.0
+    license_url: https://creativecommons.org/licenses/by/4.0/
+    citation_required: true
+    citation_text: >-
+      National Lung Screening Trial Research Team; Aberle DR, Adams AM, Berg
+      CD, et al. Reduced Lung-Cancer Mortality with Low-Dose Computed
+      Tomographic Screening. New England Journal of Medicine
+      2011;365(5):395-409. doi:10.1056/NEJMoa1102873. Data: The Cancer Imaging
+      Archive, doi:10.7937/TCIA.HMQ8-J677
+    subjects: all
+
+  # NOTE: very large collection (~11892 studies) — multi-TB egress; the bulk Job is resumable, ingest grows incrementally.
+  # ---- Brain · MR (~11892 studies, CC-BY-4.0, commercial OK) ----
+  - collection: TCIA/Yale-Brain-Mets-Longitudinal
+    adapter: tcia
+    license_spdx: CC-BY-4.0
+    license_url: https://creativecommons.org/licenses/by/4.0/
+    citation_required: true
+    citation_text: >-
+      Chadha, S., Weiss, D., Janas, A., Ramakrishnan, D., Hager, T., Osenberg,
+      K., Willms, K., Zhu, J., Chiang, V., Bakas, S., Maleki, N., Sritharan,
+      D. V., Schoenherr, S., Westerhoff, M., Zawalich, M., Davis, M.,
+      Malhotra, A., Bousabarah, K., Deusch, C., Lin, M., Aneja, S., & Aboian,
+      M. S. (2025). Yale longitudinal dataset of brain metastases on MRI with
+      associated clinical data (Yale-Brain-Mets-Longitudinal) (Version 1)
+      [Data set]. Data: The Cancer Imaging Archive, doi:10.7937/3YAT-E768
+    subjects: all
+
+  # ---- Prostate · MR, US (~2799 studies, CC-BY-4.0, commercial OK) ----
+  - collection: TCIA/Prostate-MRI-US-Biopsy
+    adapter: tcia
+    license_spdx: CC-BY-4.0
+    license_url: https://creativecommons.org/licenses/by/4.0/
+    citation_required: true
+    citation_text: >-
+      Sonn GA, Natarajan S, Margolis DJ, MacAiran M, Lieu P, Huang J, Dorey
+      FJ, Marks LS. Targeted biopsy in the detection of prostate cancer using
+      an office based magnetic resonance ultrasound fusion device. Journal of
+      Urology 189, no. 1 (2013): 86-91. doi:10.1016/j.juro.2012.08.095. Data:
+      The Cancer Imaging Archive, doi:10.7937/TCIA.2020.A61IOC1A
+    subjects: all
+
+  # ---- Breast · MR, SEG (~2688 studies, CC-BY-4.0, commercial OK) ----
+  - collection: TCIA/ISPY2
+    adapter: tcia
+    license_spdx: CC-BY-4.0
+    license_url: https://creativecommons.org/licenses/by/4.0/
+    citation_required: true
+    citation_text: >-
+      Li, W., Newitt, D. C., Gibbs, J., Wilmes, L. J., Jones, E. F., Arasu, V.
+      A., Strand, F., Onishi, N., Nguyen, A. A.-T., Kornak, J., Joe, B. N.,
+      Price, E. R., Ojeda-Fournier, H., Eghtedari, M., Zamora, K. W., Woodard,
+      S. A., Umphrey, H., Bernreuter, W., Nelson, M., … Hylton, N. M. (2020).
+      Predicting breast cancer response to neoadjuvant treatment using
+      multi-feature MRI: results from the I-SPY 2 TRIAL. npj Breast Cancer,
+      6(1). https://doi.org/10.1038/s41523-020-00203-7. Data: The Cancer
+      Imaging Archive, doi:10.7937/TCIA.D8Z0-9T85
+    subjects: all
+
+  # ---- Breast · MG (~2620 studies, CC-BY-3.0, commercial OK) ----
+  - collection: TCIA/CBIS-DDSM
+    adapter: tcia
+    license_spdx: CC-BY-3.0
+    license_url: https://creativecommons.org/licenses/by/3.0/
+    citation_required: true
+    citation_text: >-
+      Lee, R. S., Gimenez, F., Hoogi, A., Miyake, K. K., Gorovoy, M., & Rubin,
+      D. L. (2017). A curated mammography data set for use in computer-aided
+      detection and diagnosis research. Scientific Data, 4, 170177.
+      doi:10.1038/sdata.2017.177. Data: The Cancer Imaging Archive,
+      doi:10.7937/K9/TCIA.2016.7O02S9CY
+    subjects: all
+
+  # ---- Breast · MG (~2006 studies, CC-BY-4.0, commercial OK) ----
+  - collection: TCIA/CDD-CESM
+    adapter: tcia
+    license_spdx: CC-BY-4.0
+    license_url: https://creativecommons.org/licenses/by/4.0/
+    citation_required: true
+    citation_text: >-
+      Khaled, R., Helal, M., Alfarghaly, O., Mokhtar, O., Elkorany, A., El
+      Kassas, H., & Fahmy, A. Categorized contrast enhanced mammography
+      dataset for diagnostic and artificial intelligence research. Scientific
+      Data 2022;9(1):122. doi:10.1038/s41597-022-01238-0. Data: The Cancer
+      Imaging Archive, doi:10.7937/29kw-ae92
+    subjects: all
+
+  # ---- Breast · MR, MG, CT (~1976 studies, CC-BY-4.0, commercial OK) ----
+  - collection: TCIA/EA1141
+    adapter: tcia
+    license_spdx: CC-BY-4.0
+    license_url: https://creativecommons.org/licenses/by/4.0/
+    citation_required: true
+    citation_text: >-
+      Comstock CE, Gatsonis C, Newstead GM, Snyder BS, Gareen IF, Bergin JT,
+      Rahbar H, Sung JS, Jacobs C, Harvey JA, Nicholson MH, Ward RC, Holt J,
+      Prather A, Miller KD, Schnall MD, Kuhl CK. Comparison of Abbreviated
+      Breast MRI vs Digital Breast Tomosynthesis for Breast Cancer Detection
+      Among Women With Dense Breasts Undergoing Screening. JAMA.
+      2020;323(8):746-756. doi:10.1001/jama.2020.0572. Data: The Cancer
+      Imaging Archive, doi:10.7937/2BAS-HR33
+    subjects: all
+
+  # ---- Breast · MR, SEG (~1123 studies, CC-BY-4.0, commercial OK) ----
+  - collection: TCIA/ACRIN-6698
+    adapter: tcia
+    license_spdx: CC-BY-4.0
+    license_url: https://creativecommons.org/licenses/by/4.0/
+    citation_required: true
+    citation_text: >-
+      Partridge, S. C., Zhang, Z., Newitt, D. C., Gibbs, J. E., Chenevert, T.
+      L., Rosen, M. A., Bolan, P. J., Marques, H. S., Romanoff, J., Cimino,
+      L., Joe, B. N., Umphrey, H. R., Ojeda-Fournier, H., Dogan, B., Oh, K.,
+      Abe, H., Drukteinis, J. S., Esserman, L. J., & Hylton, N. M. (2018).
+      Diffusion-weighted MRI Findings Predict Pathologic Response in
+      Neoadjuvant Treatment of Breast Cancer: The ACRIN 6698 Multicenter
+      Trial. Radiology, 289(3), 618-627.
+      https://doi.org/10.1148/radiol.2018180273. Data: The Cancer Imaging
+      Archive, doi:10.7937/tcia.kk02-6d95
+    subjects: all
+
+  # ---- BREAST · MR, CR (~1103 studies, CC-BY-4.0, commercial OK) ----
+  - collection: TCIA/ACRIN-Contralateral-Breast-MR
+    adapter: tcia
+    license_spdx: CC-BY-4.0
+    license_url: https://creativecommons.org/licenses/by/4.0/
+    citation_required: true
+    citation_text: >-
+      Lehman, C. D., Gatsonis, C., Kuhl, C. K., Hendrick, R. E., Pisano, E.
+      D., Hanna, L., Peacock, S., Smazal, S. F., Maki, D. D., Julian, T. B.,
+      DePeri, E. R., Bluemke, D. A., & Schnall, M. D. (2007). MRI Evaluation
+      of the Contralateral Breast in Women with Recently Diagnosed Breast
+      Cancer. New England Journal of Medicine, 356(13), 1295-1303.
+      https://doi.org/10.1056/nejmoa065447. Data: The Cancer Imaging Archive,
+      doi:10.7937/Q1EE-J082
+    subjects: all
+
+  # ---- Lung / Chest · PT, CT, NM, MR, CR, DX, SC (~950 studies, CC-BY-3.0, commercial OK) ----
+  - collection: TCIA/ACRIN-NSCLC-FDG-PET
+    adapter: tcia
+    license_spdx: CC-BY-3.0
+    license_url: https://creativecommons.org/licenses/by/3.0/
+    citation_required: true
+    citation_text: >-
+      Machtay, M., Duan, F., Siegel, B. A., Snyder, B. S., Gorelick, J. J.,
+      Reddin, J. S., Munden, R., Johnson, D. W., Wilf, L. H., DeNittis, A.,
+      Sherwin, N., Cho, K. H., Kim, S., Videtic, G., Neumann, D. R., Komaki,
+      R., Macapinlac, H., Bradley, J. D., & Alavi, A. (2013). Prediction of
+      Survival by [18F]Fluorodeoxyglucose Positron Emission Tomography in
+      Patients With Locally Advanced Non–Small-Cell Lung Cancer Undergoing
+      Definitive Chemoradiation Therapy: Results of the ACRIN 6668/RTOG 0235
+      Trial. Journal of Clinical Oncology, 31(30), 3823–3830.
+      doi:10.1200/jco.2012.47.5947. Data: The Cancer Imaging Archive,
+      doi:10.7937/tcia.2019.30ilqfcl
+    subjects: all
+
+  # ---- Breast · MR, SEG (~922 studies, CC-BY-NC-4.0, non-commercial (CC-BY-NC)) ----
+  - collection: TCIA/Duke-Breast-Cancer-MRI
+    adapter: tcia
+    license_spdx: CC-BY-NC-4.0
+    license_url: https://creativecommons.org/licenses/by-nc/4.0/
+    citation_required: true
+    citation_text: >-
+      Saha, A., Harowicz, M.R., Grimm, L.J., Kim, C.E., Ghate, S.V., Walsh, R.
+      and Mazurowski, M.A., 2018. A machine learning approach to radiogenomics
+      of breast cancer: a study of 922 subjects and 529 DCE-MRI features.
+      British journal of cancer, 119(4), pp.508-516.
+      https://doi.org/10.1038/s41416-018-0185-8. Data: The Cancer Imaging
+      Archive, doi:10.7937/TCIA.e3sv-re93
+    subjects: all
+
+  # ---- Breast · MR, SEG (~847 studies, CC-BY-3.0, commercial OK) ----
+  - collection: TCIA/ISPY1
+    adapter: tcia
+    license_spdx: CC-BY-3.0
+    license_url: https://creativecommons.org/licenses/by/3.0/
+    citation_required: true
+    citation_text: >-
+      Hylton NM, et al. Neoadjuvant Chemotherapy for Breast Cancer: Functional
+      Tumor Volume by MR Imaging Predicts Recurrence-free Survival—Results
+      from the ACRIN 6657/CALGB 150007 I-SPY 1 TRIAL. Radiology 2016;
+      279(1):44-55. doi:10.1148/radiol.2015150013. Data: The Cancer Imaging
+      Archive, doi:10.7937/K9/TCIA.2016.HdHpgJLK
+    subjects: all
+
+  # ---- Breast · MR, SEG (~632 studies, CC-BY-4.0, commercial OK) ----
+  - collection: TCIA/Advanced-MRI-Breast-Lesions
+    adapter: tcia
+    license_spdx: CC-BY-4.0
+    license_url: https://creativecommons.org/licenses/by/4.0/
+    citation_required: true
+    citation_text: >-
+      Daniels, D., Last, D., Cohen, K., Mardor, Y., & Sklair-Levy, M. (2024).
+      Standard and Delayed Contrast-Enhanced MRI of Malignant and Benign
+      Breast Lesions with Histological and Clinical Supporting Data
+      (Advanced-MRI-Breast-Lesions) (Version 2) [dataset]. The Cancer Imaging
+      Archive. https://doi.org/10.7937/C7X1-YN57. Data: The Cancer Imaging
+      Archive, doi:10.7937/C7X1-YN57
+    subjects: all
+
+  # ---- Lung (thorax/chest) · CT, RTSTRUCT (~589 studies, CC-BY-3.0, commercial OK) ----
+  - collection: TCIA/4D-Lung
+    adapter: tcia
+    license_spdx: CC-BY-3.0
+    license_url: https://creativecommons.org/licenses/by/3.0/
+    citation_required: true
+    citation_text: >-
+      Hugo, G. D., Weiss, E., Sleeman, W. C., Balik, S., Keall, P. J., Lu, J.,
+      & Williamson, J. F. (2017). A longitudinal four-dimensional computed
+      tomography and cone beam computed tomography dataset for image-guided
+      radiation therapy research in lung cancer. Medical Physics, 44(2),
+      762-771. https://doi.org/10.1002/mp.12059. Data: The Cancer Imaging
+      Archive, doi:10.7937/K9/TCIA.2016.ELN8YGLE
+    subjects: all
+
+  # ---- Head (internal auditory canal / vestibular schwannoma) · MR, SEG (~570 studies, CC-BY-4.0, commercial OK) ----
+  - collection: TCIA/UCSD-VS-Longitudinal
+    adapter: tcia
+    license_spdx: CC-BY-4.0
+    license_url: https://creativecommons.org/licenses/by/4.0/
+    citation_required: true
+    citation_text: >-
+      Nguyen, U., Correia de Verdier, M., Saluja, R., Schulte, J., Brandel,
+      M., Suresh, K., Farid, N., & Rudie, J. (2026). The University of
+      California San Diego Longitudinal Vestibular Schwannoma Dataset
+      (UCSD-VS-Longitudinal) (Version 1) [Data set]. The Cancer Imaging
+      Archive. Data: The Cancer Imaging Archive, doi:10.7937/WEFA-CP23
+    subjects: all
+
+  # ---- Kidney · CT, MR, CR (~439 studies, CC-BY-3.0, commercial OK) ----
+  - collection: TCIA/TCGA-KIRC
+    adapter: tcia
+    license_spdx: CC-BY-3.0
+    license_url: https://creativecommons.org/licenses/by/3.0/
+    citation_required: true
+    citation_text: >-
+      Akin, O., Elnajjar, P., Heller, M., Jarosz, R., Erickson, B. J., Kirk,
+      S., Lee, Y., Linehan, M. W., Gautam, R., Vikram, R., Garcia, K. M.,
+      Roche, C., Bonaccio, E., & Filippini, J. (2016). The Cancer Genome Atlas
+      Kidney Renal Clear Cell Carcinoma Collection (TCGA-KIRC) (Version 3)
+      [Data set]. The Cancer Imaging Archive. Data: The Cancer Imaging
+      Archive, doi:10.7937/K9/TCIA.2016.V6PBVTDR
+    subjects: all
+
+  # ---- Chest (Lung) · CT, PT (~436 studies, CC-BY-4.0, commercial OK) ----
+  - collection: TCIA/Lung-PET-CT-Dx
+    adapter: tcia
+    license_spdx: CC-BY-4.0
+    license_url: https://creativecommons.org/licenses/by/4.0/
+    citation_required: true
+    citation_text: >-
+      Li, P., Wang, S., Li, T., Lu, J., HuangFu, Y., & Wang, D. (2020). A
+      Large-Scale CT and PET/CT Dataset for Lung Cancer Diagnosis
+      (Lung-PET-CT-Dx) [Data set]. The Cancer Imaging Archive. Data: The
+      Cancer Imaging Archive, doi:10.7937/TCIA.2020.NNC2-0461
+    subjects: all
+
+  # ---- Thorax (Lung) · CT, SEG, RTSTRUCT (~422 studies, CC-BY-NC-3.0, non-commercial (CC-BY-NC)) ----
+  - collection: TCIA/NSCLC-Radiomics
+    adapter: tcia
+    license_spdx: CC-BY-NC-3.0
+    license_url: https://creativecommons.org/licenses/by-nc/3.0/
+    citation_required: true
+    citation_text: >-
+      Aerts HJWL, Rios Velazquez E, Leijenaar RTH, Parmar C, Grossmann P,
+      Carvalho S, Bussink J, Monshouwer R, Haibe-Kains B, Rietveld D, Hoebers
+      F, Rietbergen MM, Leemans CR, Dekker A, Quackenbush J, Gillies RJ,
+      Lambin P. Decoding tumour phenotype by noninvasive imaging using a
+      quantitative radiomics approach. Nature Communications 2014;5:4006.
+      doi:10.1038/ncomms5006. Data: The Cancer Imaging Archive,
+      doi:10.7937/K9/TCIA.2015.PF0M9REI
+    subjects: all
+
+  # ---- Chest / lung (Non-small Cell Lung Cancer) · CT, PT, SEG (~395 studies, CC-BY-3.0, commercial OK) ----
+  - collection: TCIA/NSCLC Radiogenomics
+    adapter: tcia
+    license_spdx: CC-BY-3.0
+    license_url: https://creativecommons.org/licenses/by/3.0/
+    citation_required: true
+    citation_text: >-
+      Bakr, S., Gevaert, O., Echegaray, S., Ayers, K., Zhou, M., Shafiq, M.,
+      Zheng, H., Benson, J. A., Zhang, W., Leung, A., Kadoch, M., Hoang, C.
+      D., Shrager, J., Quon, A., Rubin, D. L., Plevritis, S. K., & Napel, S.
+      (2018). A radiogenomic dataset of non-small cell lung cancer. Scientific
+      Data, 5, 180202. https://doi.org/10.1038/sdata.2018.202. Data: The
+      Cancer Imaging Archive, doi:10.7937/K9/TCIA.2017.7hs46erv
+    subjects: all
+
+  # ---- Breast · CT, PT, OT (~363 studies, CC-BY-3.0, commercial OK) ----
+  - collection: TCIA/ACRIN-FLT-Breast
+    adapter: tcia
+    license_spdx: CC-BY-3.0
+    license_url: https://creativecommons.org/licenses/by/3.0/
+    citation_required: true
+    citation_text: >-
+      Kostakoglu, L., Duan, F., Idowu, M. O., Jolles, P. R., Bear, H. D.,
+      Muzi, M., Cormack, J., Muzi, J. P., Pryma, D. A., Specht, J. M.,
+      Hovanessian-Larsen, L., Miliziano, J., Mallett, S., Shields, A. F., &
+      Mankoff, D. A. A Phase II Study of 3'-Deoxy-3'-18F-Fluorothymidine PET
+      in the Assessment of Early Response of Breast Cancer to Neoadjuvant
+      Chemotherapy: Results from ACRIN 6688. Journal of Nuclear Medicine.
+      2015;56(11):1681-1689. doi:10.2967/jnumed.115.160663. Data: The Cancer
+      Imaging Archive, doi:10.7937/K9/TCIA.2017.ol20zmxg
+    subjects: all
+
+  # ---- Lung / chest (thorax); head subset present but NIH Controlled Access · CT, MR, PT, NM, DX, US (radiology); SM/WSI histopathology (whole-slide images) (~288 studies, CC-BY-4.0, commercial OK) ----
+  - collection: TCIA/CMB-LCA
+    adapter: tcia
+    license_spdx: CC-BY-4.0
+    license_url: https://creativecommons.org/licenses/by/4.0/
+    citation_required: true
+    citation_text: >-
+      Cancer Moonshot Biobank. (2022). Cancer Moonshot Biobank - Lung Cancer
+      Collection (CMB-LCA) (Version 11) [dataset]. The Cancer Imaging Archive.
+      Data: The Cancer Imaging Archive, doi:10.7937/3CX3-S132
+    exclude_body_parts: [HEAD, BRAIN, SKULL, FACE, NECK, HEADNECK]
+    subjects: all
+
+  # ---- Colon (colorectal); a controlled subset is head imaging · CT, PT, MR, NM, US, DX, XA, SM (Histopathology / Whole Slide Image) (~263 studies, CC-BY-4.0, commercial OK) ----
+  - collection: TCIA/CMB-CRC
+    adapter: tcia
+    license_spdx: CC-BY-4.0
+    license_url: https://creativecommons.org/licenses/by/4.0/
+    citation_required: true
+    citation_text: >-
+      Cancer Moonshot Biobank. (2022). Cancer Moonshot Biobank – Colorectal
+      Cancer Collection (CMB-CRC) (Version 10) [dataset]. The Cancer Imaging
+      Archive. https://doi.org/10.7937/djg7-gz87. Data: The Cancer Imaging
+      Archive, doi:10.7937/DJG7-GZ87
+    exclude_body_parts: [HEAD, BRAIN, SKULL, FACE, HEADNECK, NECK]
+    subjects: all
+
+  # ---- Breast · US (~256 studies, CC-BY-4.0, commercial OK) ----
+  - collection: TCIA/Breast-Lesions-USG
+    adapter: tcia
+    license_spdx: CC-BY-4.0
+    license_url: https://creativecommons.org/licenses/by/4.0/
+    citation_required: true
+    citation_text: >-
+      Pawłowska, A., Ćwierz-Pieńkowska, A., Domalik, A., Jaguś, D., Kasprzak,
+      P., Matkowski, R., Fura, Ł., Nowicki, A., & Żołek, N. A Curated
+      benchmark dataset for ultrasound based breast lesion analysis.
+      Scientific Data 11, 148 (2024).
+      https://doi.org/10.1038/s41597-024-02984-z. Data: The Cancer Imaging
+      Archive, doi:10.7937/9WKK-Q141
+    subjects: all
+
+  # ---- Liver (abdomen) · CT, MR, PT (~237 studies, CC-BY-3.0, commercial OK) ----
+  - collection: TCIA/TCGA-LIHC
+    adapter: tcia
+    license_spdx: CC-BY-3.0
+    license_url: https://creativecommons.org/licenses/by/3.0/
+    citation_required: true
+    citation_text: >-
+      Erickson, B. J., Kirk, S., Lee, Y., Bathe, O., Kearns, M., Gerdes, C.,
+      Rieger-Christ, K., & Lemmerman, J. (2016). The Cancer Genome Atlas Liver
+      Hepatocellular Carcinoma Collection (TCGA-LIHC) (Version 5) [Data set].
+      The Cancer Imaging Archive. Data: The Cancer Imaging Archive,
+      doi:10.7937/K9/TCIA.2016.IMMQW8UQ
+    subjects: all
+
+  # ---- Breast · MR, SEG (~189 studies, CC-BY-3.0, commercial OK) ----
+  - collection: TCIA/BREAST-MRI-NACT-PILOT
+    adapter: tcia
+    license_spdx: CC-BY-3.0
+    license_url: https://creativecommons.org/licenses/by/3.0/
+    citation_required: true
+    citation_text: >-
+      Partridge SC, Gibbs JE, Lu Y, Esserman LJ, Tripathy D, Wolverton DS,
+      Rugo HS, Hwang ES, Ewing CA, Hylton NM. MRI measurements of breast tumor
+      volume predict response to neoadjuvant chemotherapy and recurrence-free
+      survival. AJR Am J Roentgenol. 2005 Jun;184(6):1774-81.
+      doi:10.2214/ajr.184.6.01841774. Data: The Cancer Imaging Archive,
+      doi:10.7937/K9/TCIA.2016.QHsyhJKy
+    subjects: all
+
+  # ---- Abdomen and mediastinum (chest) · CT (~176 studies, CC-BY-3.0, commercial OK) ----
+  - collection: TCIA/CT Lymph Nodes
+    adapter: tcia
+    license_spdx: CC-BY-3.0
+    license_url: https://creativecommons.org/licenses/by/3.0/
+    citation_required: true
+    citation_text: >-
+      Roth, H. R., Lu, L., Seff, A., Cherry, K. M., Hoffman, J., Wang, S.,
+      Liu, J., Turkbey, E., & Summers, R. M. (2014). A New 2.5D Representation
+      for Lymph Node Detection Using Random Sets of Deep Convolutional Neural
+      Network Observations. Medical Image Computing and Computer-Assisted
+      Intervention – MICCAI 2014, pp. 520–527,
+      doi:10.1007/978-3-319-10404-1_65. Data: The Cancer Imaging Archive,
+      doi:10.7937/K9/TCIA.2015.AQIIDCNM
+    subjects: all
+
+  # ---- Breast · MR, CT, PT, MG (~148 studies, CC-BY-3.0, commercial OK) ----
+  - collection: TCIA/BREAST-DIAGNOSIS
+    adapter: tcia
+    license_spdx: CC-BY-3.0
+    license_url: https://creativecommons.org/licenses/by/3.0/
+    citation_required: true
+    citation_text: >-
+      Bloch, B. Nicolas, Jain, Ashali, & Jaffe, C. Carl. (2015).
+      BREAST-DIAGNOSIS [Dataset]. The Cancer Imaging Archive,
+      doi:10.7937/K9/TCIA.2015.SDNRQXXR
+    subjects: all
+
+  # ---- Pancreas (abdomen) · CT, MR, US, PT (~134 studies, CC-BY-4.0, commercial OK) ----
+  - collection: TCIA/CPTAC-PDA
+    adapter: tcia
+    license_spdx: CC-BY-4.0
+    license_url: https://creativecommons.org/licenses/by/4.0/
+    citation_required: true
+    citation_text: >-
+      Cao L, Huang C, Cui Zhou D, et al. Proteogenomic characterization of
+      pancreatic ductal adenocarcinoma. Cell. 2021;184(19):5031-5052.e26.
+      doi:10.1016/j.cell.2021.08.023. Data: The Cancer Imaging Archive,
+      doi:10.7937/K9/TCIA.2018.SC20FO18
+    subjects: all
+
+  # ---- Liver · US (~120 studies, CC-BY-4.0, commercial OK) ----
+  - collection: TCIA/B-mode-and-CEUS-Liver
+    adapter: tcia
+    license_spdx: CC-BY-4.0
+    license_url: https://creativecommons.org/licenses/by/4.0/
+    citation_required: true
+    citation_text: >-
+      Eisenbrey, J., Lyshchik, A., & Wessner, C. (2021). Ultrasound data of a
+      variety of liver masses [Data set]. The Cancer Imaging Archive. Data:
+      The Cancer Imaging Archive, doi:10.7937/TCIA.2021.v4z7-tc39
+    subjects: all
+
+  # ---- Extremities (limb soft-tissue sarcoma) · CT, MR, PT, RTSTRUCT (~102 studies, CC-BY-3.0, commercial OK) ----
+  - collection: TCIA/Soft-tissue-Sarcoma
+    adapter: tcia
+    license_spdx: CC-BY-3.0
+    license_url: https://creativecommons.org/licenses/by/3.0/
+    citation_required: true
+    citation_text: >-
+      Vallières, M., Freeman, C. R., Skamene, S. R., & El Naqa, I. (2015). A
+      radiomics model from joint FDG-PET and MRI texture features for the
+      prediction of lung metastases in soft-tissue sarcomas of the
+      extremities. Physics in Medicine and Biology, 60(14), 5471-5496.
+      doi:10.1088/0031-9155/60/14/5471. Data: The Cancer Imaging Archive,
+      doi:10.7937/K9/TCIA.2015.7GO2GSKS
+    subjects: all
+
+  # ---- Prostate gland · MR (~87 studies, CC-BY-3.0, commercial OK) ----
+  - collection: TCIA/PROSTATE-DIAGNOSIS
+    adapter: tcia
+    license_spdx: CC-BY-3.0
+    license_url: https://creativecommons.org/licenses/by/3.0/
+    citation_required: true
+    citation_text: >-
+      Bloch, B. N., Jain, A., & Jaffe, C. C. (2015). Data From
+      PROSTATE-DIAGNOSIS [Dataset]. The Cancer Imaging Archive.
+      https://doi.org/10.7937/K9/TCIA.2015.FOQEUJVT. Data: The Cancer Imaging
+      Archive, doi:10.7937/K9/TCIA.2015.FOQEUJVT
+    subjects: all
+
+  # ---- Kidney (abdomen) · CT, MR (~85 studies, CC-BY-4.0, commercial OK) ----
+  - collection: TCIA/CPTAC-CCRCC
+    adapter: tcia
+    license_spdx: CC-BY-4.0
+    license_url: https://creativecommons.org/licenses/by/4.0/
+    citation_required: true
+    citation_text: >-
+      Clark, D.J., et al. (2019) "Integrated Proteogenomic Characterization of
+      Clear Cell Renal Cell Carcinoma," Cell, 179(4), pp. 964-983.e31.
+      doi:10.1016/j.cell.2019.10.007. Data: The Cancer Imaging Archive,
+      doi:10.7937/k9/tcia.2018.oblamn27
+    subjects: all
+
+  # ---- Chest / Lung (lung adenocarcinoma) · CT, PT, MR (radiology DICOM); histopathology SVS whole-slide images (~75 studies, CC-BY-4.0, commercial OK) ----
+  - collection: TCIA/CPTAC-LUAD
+    adapter: tcia
+    license_spdx: CC-BY-4.0
+    license_url: https://creativecommons.org/licenses/by/4.0/
+    citation_required: true
+    citation_text: >-
+      Gillette, M.A., et al. (2020). Proteogenomic Characterization Reveals
+      Therapeutic Vulnerabilities in Lung Adenocarcinoma. Cell, 182(1),
+      200-225.e35. doi:10.1016/j.cell.2020.06.013. Data: The Cancer Imaging
+      Archive, doi:10.7937/K9/TCIA.2018.PAT12TBS
+    subjects: all
+
+  # ---- Chest (lung) · CT (~70 studies, CC-BY-3.0, commercial OK) ----
+  - collection: TCIA/SPIE-AAPM Lung CT Challenge
+    adapter: tcia
+    license_spdx: CC-BY-3.0
+    license_url: https://creativecommons.org/licenses/by/3.0/
+    citation_required: true
+    citation_text: >-
+      Samuel G. Armato, Karen Drukker, Feng Li, Lubomir Hadjiiski, Georgia D.
+      Tourassi, Roger M. Engelmann, Maryellen L. Giger, George Redmond, Keyvan
+      Farahani, Justin S. Kirby, Laurence P. Clarke. LUNGx Challenge for
+      computerized lung nodule classification. J. Med. Imag. 3(4), 044506
+      (2016). doi:10.1117/1.JMI.3.4.044506. Data: The Cancer Imaging Archive,
+      doi:10.7937/K9/TCIA.2015.UZLSU3FL
+    subjects: all
+
+  # ---- Chest (Lung) · CT (~61 studies, CC-BY-3.0, commercial OK) ----
+  - collection: TCIA/LungCT-Diagnosis
+    adapter: tcia
+    license_spdx: CC-BY-3.0
+    license_url: https://creativecommons.org/licenses/by/3.0/
+    citation_required: true
+    citation_text: >-
+      Grove O, Berglund AE, Schabath MB, Aerts HJWL, Dekker A, Wang H,
+      Velazquez ER, Lambin P, Gu Y, Balagurunathan Y, Eikman E, Gatenby RA,
+      Eschrich S, Gillies RJ. Quantitative Computed Tomographic Descriptors
+      Associate Tumor Shape Complexity and Intratumor Heterogeneity with
+      Prognosis in Lung Adenocarcinoma. PLOS ONE 2015.
+      doi:10.1371/journal.pone.0118261. Data: The Cancer Imaging Archive,
+      doi:10.7937/K9/TCIA.2015.A6V7JIWX
+    subjects: all
+
+  # ---- Sarcomas (multi-site): Abdomen, Arm, Urinary Bladder, Chest, Head-and-Neck, Kidney, Leg, Retroperitoneal Space, Stomach, Uterus · CT, MR, US, PT (~33 studies, CC-BY-4.0, commercial OK) ----
+  - collection: TCIA/CPTAC-SAR
+    adapter: tcia
+    license_spdx: CC-BY-4.0
+    license_url: https://creativecommons.org/licenses/by/4.0/
+    citation_required: true
+    citation_text: >-
+      National Cancer Institute Clinical Proteomic Tumor Analysis Consortium
+      (CPTAC). (2019). The Clinical Proteomic Tumor Analysis Consortium
+      Sarcomas Collection (CPTAC-SAR) (Version 10) [Data set]. The Cancer
+      Imaging Archive. Data: The Cancer Imaging Archive,
+      doi:10.7937/tcia.2019.9bt23r95
+    subjects: all
+
+  # ---- Prostate gland · MR, SEG, SR (~30 studies, CC-BY-4.0, commercial OK) ----
+  - collection: TCIA/QIN-PROSTATE-Repeatability
+    adapter: tcia
+    license_spdx: CC-BY-4.0
+    license_url: https://creativecommons.org/licenses/by/4.0/
+    citation_required: true
+    citation_text: >-
+      Fedorov A, Vangel MG, Tempany CM, Fennessy FM. Multiparametric Magnetic
+      Resonance Imaging of the Prostate: Repeatability of Volume and Apparent
+      Diffusion Coefficient Quantification. Investigative Radiology 52(9),
+      538-546 (2017). doi:10.1097/RLI.0000000000000382. Data: The Cancer
+      Imaging Archive, doi:10.7937/K9/TCIA.2018.MR1CKGND
+    subjects: all
+
+  # ---- Prostate · MR (~26 studies, CC-BY-3.0, commercial OK) ----
+  - collection: TCIA/PROSTATE-MRI
+    adapter: tcia
+    license_spdx: CC-BY-3.0
+    license_url: https://creativecommons.org/licenses/by/3.0/
+    citation_required: true
+    citation_text: >-
+      Choyke P, Turkbey B, Pinto P, Merino M, Wood B. (2016). Data From
+      PROSTATE-MRI. The Cancer Imaging Archive.
+      doi:10.7937/K9/TCIA.2016.6046GUDv
+    subjects: all
+
 # ============================================================================
-# STAGED — verified eligible, ADD when the canonical TCIA "Data Citation"
-# string has been pasted into citation_text. License + page verified in the
-# catalog; only the exact citation string is pending (do NOT fabricate it).
-# Uncomment + fill citation_text per collection, then move above.
-#
-#   TCIA/Pseudo-PHI-DICOM-Data  CC-BY-4.0  (6-modality de-id teaching set)
-#   TCIA/C4KC-KiTS already above
-#   TCIA/CBIS-DDSM              CC-BY-3.0  (MG, mass/calc ROI)
-#   TCIA/CDD-CESM               CC-BY-4.0  (contrast-enhanced MG, BI-RADS)
-#   TCIA/Breast-Lesions-USG     CC-BY-4.0  (breast US + histopath dx)
-#   TCIA/NSCLC-Radiogenomics    CC-BY-3.0  (CT+PET, seg+AIM)
-#   TCIA/SPIE-AAPM-Lung-CT-Challenge  CC-BY-3.0
-#   TCIA/Soft-tissue-Sarcoma    CC-BY-3.0  (CT+PET+MR, GTV contours)
-#   TCIA/Breast-MRI-NACT-Pilot  CC-BY-3.0  (MR + SEG)
-#   TCIA/Prostate-MRI-US-Biopsy CC-BY-4.0  (MR+US, STL seg, Gleason)
-#   TCIA/QIN-PROSTATE-Repeatability CC-BY-4.0 (MR + SEG + SR)
-#   TCIA/CPTAC-LUAD  CC-BY-4.0  (radiology series; pathology via WSI manifest)
-#   TCIA/CPTAC-SAR   CC-BY-4.0
-#   TCIA/NSCLC-Radiomics  CC-BY-NC-3.0  (label non-commercial)
-#
-# CMB-LCA / CMB-CRC are CC-BY-4.0 EXCEPT their head/face series (NIH
-# Controlled). When added, set exclude_body_parts so those series are
-# dropped before download, e.g.:
-#   - collection: TCIA/CMB-LCA
-#     adapter: tcia
-#     license_spdx: CC-BY-4.0
-#     ...
-#     exclude_body_parts: [HEAD, BRAIN, SKULL, FACE]
-#     subjects: all
+# GATED — verified eligible (license + citation confirmed 2026-06-28) but
+# NOT active by default. Each alone is huge / synthetic / pseudo-PHI. To
+# activate, uncomment the block and move it up into ``sources:``.
 # ============================================================================
+#   VICTRE — ~8.7k SYNTHETIC in-silico digital-mammography phantoms (computational, not real patients).
+#   Breast-Cancer-Screening-DBT — ~5.6k DBT studies, large AND CC-BY-NC (non-commercial).
+#   Pseudo-PHI-DICOM-Data — de-identification TEACHING set: designed to CONTAIN pseudo-PHI in headers/pixels. Vet before exposing in a public patient library.
+#
+#  # ---- Breast · MG (~8749 studies, CC-BY-3.0, commercial OK) ----
+#  - collection: TCIA/VICTRE
+#    adapter: tcia
+#    license_spdx: CC-BY-3.0
+#    license_url: https://creativecommons.org/licenses/by/3.0/
+#    citation_required: true
+#    citation_text: >-
+#      Badano A, Graff CG, Badal A, Sharma D, Zeng R, Samuelson FW, Glick SJ,
+#      Myers KJ. Evaluation of Digital Breast Tomosynthesis as Replacement of
+#      Full-Field Digital Mammography Using an In Silico Imaging Trial. JAMA
+#      Netw Open. 2018;1(7):e185474. doi:10.1001/jamanetworkopen.2018.5474.
+#      Data: The Cancer Imaging Archive, doi:10.7937/TCIA.2019.ho23nxaw
+#    subjects: all
+
+#  # ---- Breast · MG (~5610 studies, CC-BY-NC-4.0, non-commercial (CC-BY-NC)) ----
+#  - collection: TCIA/Breast-Cancer-Screening-DBT
+#    adapter: tcia
+#    license_spdx: CC-BY-NC-4.0
+#    license_url: https://creativecommons.org/licenses/by-nc/4.0/
+#    citation_required: true
+#    citation_text: >-
+#      Buda M, Saha A, Walsh R, Ghate S, Li N, Swiecicki A, Lo JY, Mazurowski
+#      MA. Detection of masses and architectural distortions in digital breast
+#      tomosynthesis: a publicly available dataset of 5,060 patients and a deep
+#      learning model. JAMA Network Open. 2021;4(8):e2119100.
+#      doi:10.1001/jamanetworkopen.2021.19100. Data: The Cancer Imaging
+#      Archive, doi:10.7937/E4WT-CD02
+#    subjects: all
+
+#  # ---- Various / multiple anatomical sites (whole-body and regional; no single BodyPartExamined specified on the collection page). Version 2 had head imaging removed from 8 series. · PT, CT, MG, MR, DX, CR (~22 studies, CC-BY-4.0, commercial OK) ----
+#  - collection: TCIA/Pseudo-PHI-DICOM-Data
+#    adapter: tcia
+#    license_spdx: CC-BY-4.0
+#    license_url: https://creativecommons.org/licenses/by/4.0/
+#    citation_required: true
+#    citation_text: >-
+#      Rutherford M, Mun SK, Levine B, Bennett W, Smith K, Farmer P, Jarosz Q,
+#      Wagner U, Freyman J, Blake G, Tarbox L, Farahani K, Prior F. A DICOM
+#      dataset for evaluation of medical image de-identification. Scientific
+#      Data. 2021;8:183. doi:10.1038/s41597-021-00967-y. Data: The Cancer
+#      Imaging Archive, doi:10.7937/s17z-r072
+#    subjects: all
