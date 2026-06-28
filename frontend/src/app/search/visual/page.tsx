@@ -140,6 +140,7 @@ function ReferencePicker({ onPick }: { onPick: (r: Reference) => void }) {
   const [q, setQ] = useState("");
   const [modality, setModality] = useState<ModalityFilter>("");
   const [bodyPart, setBodyPart] = useState("");
+  const [scope, setScope] = useState<VisualScope>("all");
   const [data, setData] = useState<Paginated<Study> | null>(null);
   const [err, setErr] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
@@ -156,6 +157,7 @@ function ReferencePicker({ onPick }: { onPick: (r: Reference) => void }) {
           q: q.trim() || undefined,
           modality: modality || undefined,
           body_part: bodyPart.trim() || undefined,
+          scope: scope === "all" ? undefined : scope,
           // Ask the backend to flag which studies actually carry an image
           // vector, so the row can mark/disable dead-end exemplars instead
           // of letting the user discover "not indexed" only after picking.
@@ -176,7 +178,7 @@ function ReferencePicker({ onPick }: { onPick: (r: Reference) => void }) {
       cancelled = true;
       clearTimeout(id);
     };
-  }, [q, modality, bodyPart]);
+  }, [q, modality, bodyPart, scope]);
 
   return (
     <>
@@ -221,6 +223,24 @@ function ReferencePicker({ onPick }: { onPick: (r: Reference) => void }) {
           onChange={(e) => setBodyPart(e.target.value)}
           style={{ width: 160 }}
         />
+        <select
+          value={scope}
+          onChange={(e) => setScope(e.target.value as VisualScope)}
+          title={t("scopeTitle")}
+          aria-label={t("scope")}
+          style={{
+            font: "inherit",
+            padding: "0.4rem 0.6rem",
+            border: "1px solid #d0d5dd",
+            borderRadius: 6,
+            background: "#fff",
+          }}
+        >
+          <option value="all">{t("scopeAllVisible")}</option>
+          <option value="mine">{t("scopeMine")}</option>
+          <option value="shared">{t("scopeShared")}</option>
+          <option value="public">{t("scopePublic")}</option>
+        </select>
       </div>
 
       {err && <p className="error">{err}</p>}
@@ -314,6 +334,10 @@ function ReferenceRow({
                   {m}
                 </span>
               ))}
+              {study.is_public && <span className="badge badge--public">{t("publicBadge")}</span>}
+              <span className="badge" title={t("contributionTier")}>
+                {t("tier", { tier: study.contribution_tier })}
+              </span>
             </span>
           </h3>
           <div className="meta" style={{ fontSize: "0.82rem", marginTop: "0.2rem" }}>
