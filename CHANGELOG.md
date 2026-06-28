@@ -5,6 +5,19 @@ project follows semantic versioning; pre-release suffixes (`alpha`,
 `beta`) gate Kubernetes deployments via the GHCR image tag (without
 the leading `v`, see deployment guide).
 
+## 4.4.80 (2026-06-28)
+
+### Visual Search: scope selector + tier badges
+
+* The `/search/visual` neighbours view gains a scope selector — All visible
+  / Mine / Shared with me / Public — wired to the `/similar-to` `scope`
+  param shipped in 4.4.79. It only narrows what you can already see (the
+  backend auth filter is the ceiling); 'shared' = studies visible only via
+  a grant.
+* Each neighbour result card now shows the study's contribution tier (and a
+  'public' badge for OpenData), so the tier of every visual-search result
+  is visible at a glance.
+
 ## 4.4.79 (2026-06-28)
 
 ### Search: scope filter + visual-search privacy regression test
