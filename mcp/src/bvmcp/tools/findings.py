@@ -359,6 +359,72 @@ TOOLS: list[Tool] = [
             "required": ["finding_id", "role"],
         },
     ),
+    Tool(
+        name="promote_finding_measurement",
+        annotations=ToolAnnotations(
+            title="Promote a live PET-VOI measurement onto a finding",
+            readOnlyHint=False,
+            destructiveHint=False,
+            idempotentHint=True,
+            openWorldHint=False,
+        ),
+        description=(
+            f"{_APPROVAL_NOTE}\n\n"
+            "Recompute a PET Volume-of-Interest SERVER-SIDE and materialise "
+            "its radiomic numbers (SUVmax / SUVpeak / SUVmean, and MTV as "
+            "volume_ml) onto the finding's typed measurement columns, so the "
+            "corpus is quantitatively queryable. The number is measured from "
+            "the pixels, not taken from you. ``source='voi_spherical'`` needs "
+            "``center_mm`` + ``radius_mm``; ``source='voi_threshold'`` needs "
+            "``seed_mm`` + ``threshold`` (coords in mm, origin at voxel 0,0,0 "
+            "— same frame as the VOI tools). The series must belong to the "
+            "finding's study. SUV columns are filled only when the series "
+            "carries a decay-corrected dose; otherwise just volume_ml. The "
+            "finding's ``status`` is left unchanged (a human confirms it). "
+            "Optionally pass ``geometry_marker_id`` to link the placed VOI "
+            "marker as the measurement geometry. Idempotent on "
+            "``idempotency_key``; pass ``if_match`` (the finding's etag) for "
+            "optimistic concurrency."
+        ),
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "finding_id": {"type": "string"},
+                "series_id": {"type": "string"},
+                "source": {"type": "string", "enum": ["voi_spherical", "voi_threshold"]},
+                "center_mm": {
+                    "type": "object",
+                    "properties": {
+                        "x": {"type": "number"},
+                        "y": {"type": "number"},
+                        "z": {"type": "number"},
+                    },
+                    "required": ["x", "y", "z"],
+                    "description": "VOI sphere center (voi_spherical).",
+                },
+                "radius_mm": {
+                    "type": "number",
+                    "description": "VOI sphere radius (voi_spherical).",
+                },
+                "seed_mm": {
+                    "type": "object",
+                    "properties": {
+                        "x": {"type": "number"},
+                        "y": {"type": "number"},
+                        "z": {"type": "number"},
+                    },
+                    "required": ["x", "y", "z"],
+                    "description": "Seed point (voi_threshold).",
+                },
+                "threshold": {"type": "number", "description": "Cutoff (voi_threshold)."},
+                "threshold_units": {"type": "string", "enum": ["SUV", "raw"]},
+                "geometry_marker_id": {"type": "string"},
+                "idempotency_key": {"type": "string"},
+                "if_match": {"type": "string"},
+            },
+            "required": ["finding_id", "series_id", "source"],
+        },
+    ),
 ]
 
 
@@ -533,6 +599,31 @@ async def _add_finding_geometry(args: dict[str, Any]) -> str:
     return json.dumps(payload, indent=2, ensure_ascii=False)
 
 
+async def _promote_finding_measurement(args: dict[str, Any]) -> str:
+    finding_id = args["finding_id"]
+    body: dict[str, Any] = {"series_id": args["series_id"], "source": args["source"]}
+    for k in (
+        "center_mm",
+        "radius_mm",
+        "seed_mm",
+        "threshold",
+        "threshold_units",
+        "geometry_marker_id",
+    ):
+        if args.get(k) is not None:
+            body[k] = args[k]
+    try:
+        payload, _headers = await api_post_with_headers(
+            f"/api/findings/{finding_id}/promote-measurement",
+            json=body,
+            idempotency_key=args.get("idempotency_key"),
+            if_match=args.get("if_match"),
+        )
+    except httpx.HTTPStatusError as exc:
+        return format_http_error(exc)
+    return json.dumps(payload, indent=2, ensure_ascii=False)
+
+
 _DISPATCH = {
     "get_finding_vocab": _get_finding_vocab,
     "search_findings": _search_findings,
@@ -543,6 +634,7 @@ _DISPATCH = {
     "delete_finding": _delete_finding,
     "restore_finding": _restore_finding,
     "add_finding_geometry": _add_finding_geometry,
+    "promote_finding_measurement": _promote_finding_measurement,
 }
 
 

@@ -53,6 +53,7 @@ from bvphoenix.api.markers import (
     _patient_for_write,
     _study_or_404,
 )
+from bvphoenix.api.pet_voi import load_pet_volume
 from bvphoenix.auth import require_user
 from bvphoenix.db.models import (
     AnatomySite,
@@ -71,6 +72,12 @@ from bvphoenix.middleware.audit_dependency import AuditDep
 from bvphoenix.middleware.idempotency import IdempotencyContext, idempotent
 from bvphoenix.services.etag import enforce_optional_if_match, format_etag
 from bvphoenix.services.permissions import apply_scope_filter, visible_studies_filter
+from bvphoenix.services.pet_voi import (
+    VoiMetrics,
+    compute_voi_spherical,
+    compute_voi_threshold,
+    parse_volume_blob,
+)
 from bvphoenix.services.text_embedding import enqueue_text_embed
 
 router = APIRouter(tags=["findings"])
@@ -177,6 +184,50 @@ class FindingUpdateIn(_MeasurementsMixin):
     status: Literal["candidate", "confirmed", "retracted"] | None = None
     confidence: float | None = Field(default=None, ge=0.0, le=1.0)
     description: str | None = None
+
+
+class _CenterMm(BaseModel):
+    """A point in mm, column/row/slice axes, origin at voxel (0,0,0) — the
+    same patient frame the packed-volume spacing implies (mirrors the VOI
+    endpoints)."""
+
+    x: float
+    y: float
+    z: float
+
+
+class PromoteMeasurementIn(BaseModel):
+    """Recompute a live PET-VOI measurement and materialise it onto the
+    finding's typed columns.
+
+    The server re-runs the named computer against the packed volume so the
+    number on a clinical finding is measured from pixels, never asserted by
+    the caller. The geometry is given explicitly (same inputs the VOI
+    endpoints take); ``geometry_marker_id`` optionally links an existing
+    marker the caller placed for this VOI as the measurement geometry.
+    """
+
+    series_id: uuid.UUID
+    source: Literal["voi_spherical", "voi_threshold"]
+    # voi_spherical
+    center_mm: _CenterMm | None = None
+    radius_mm: float | None = Field(default=None, gt=0, le=200)
+    # voi_threshold
+    seed_mm: _CenterMm | None = None
+    threshold: float | None = Field(default=None, gt=0)
+    threshold_units: Literal["SUV", "raw"] = "SUV"
+    # Optional: link an existing marker (the placed VOI) as role='measurement'.
+    geometry_marker_id: uuid.UUID | None = None
+
+    @model_validator(mode="after")
+    def _require_geometry(self) -> PromoteMeasurementIn:
+        if self.source == "voi_spherical":
+            if self.center_mm is None or self.radius_mm is None:
+                raise ValueError("voi_spherical requires center_mm and radius_mm")
+        else:  # voi_threshold
+            if self.seed_mm is None or self.threshold is None:
+                raise ValueError("voi_threshold requires seed_mm and threshold")
+        return self
 
 
 class FindingOut(BaseModel):
@@ -497,6 +548,83 @@ async def _link_geometry(
                 role=ref.role,
             )
         )
+
+
+def _voi_metrics_to_measurements(metrics: VoiMetrics) -> dict[str, float | None]:
+    """Map a VOI computation onto the finding's typed measurement columns.
+
+    MTV (mL of voxels in the VOI) is geometric and always valid, so it
+    populates ``volume_ml`` regardless of units. The SUV columns are filled
+    ONLY when the series carried a decay-corrected dose (``units == 'SUV'``):
+    writing raw PET counts into ``suv_*`` would be a clinically misleading
+    number, so a raw-units VOI yields the volume alone."""
+    measurements: dict[str, float | None] = {"volume_ml": metrics.mtv_ml}
+    if metrics.units == "SUV":
+        measurements["suv_max"] = metrics.suv_max
+        measurements["suv_peak"] = metrics.suv_peak
+        measurements["suv_mean"] = metrics.suv_mean
+    return measurements
+
+
+async def _apply_promoted_measurements(
+    db: AsyncSession,
+    *,
+    finding: Finding,
+    source: str,
+    series_id: uuid.UUID,
+    measurements: dict[str, float | None],
+    geometry_marker_id: uuid.UUID | None,
+    actor_subject_id: uuid.UUID | None,
+    author_kind: str,
+) -> list[str]:
+    """Write recomputed measurements onto a finding + record provenance.
+
+    Materialises the (verified, server-computed) ``measurements`` onto the
+    typed columns, optionally links the placed VOI marker as the
+    ``measurement`` geometry (idempotently — a re-promote of the same marker
+    does not duplicate the link), bumps the etag, and appends a revision so
+    the promotion is an auditable point in the finding's history. Status is
+    deliberately untouched: a promoted measurement stays whatever it was
+    (``candidate`` by default) until a human confirms it. Returns the list of
+    changed measurement columns."""
+    changed: list[str] = []
+    for col in _MEASUREMENT_FIELDS:
+        if col in measurements:
+            setattr(finding, col, measurements[col])
+            changed.append(col)
+    # Anchor the finding to the measured series when it had none.
+    if finding.series_id is None:
+        finding.series_id = series_id
+
+    if geometry_marker_id is not None:
+        existing = (
+            await db.execute(
+                select(FindingGeometry).where(
+                    FindingGeometry.finding_id == finding.id,
+                    FindingGeometry.marker_id == geometry_marker_id,
+                    FindingGeometry.role == "measurement",
+                )
+            )
+        ).scalar_one_or_none()
+        if existing is None:
+            await _link_geometry(
+                db,
+                finding=finding,
+                refs=[GeometryRefIn(marker_id=geometry_marker_id, role="measurement")],
+            )
+
+    finding.updated_at = datetime.now(UTC)
+    finding.etag = uuid.uuid4()
+    await db.flush()
+    await _append_finding_revision(
+        db,
+        finding=finding,
+        change_kind="update",
+        actor_id=actor_subject_id,
+        author_kind=author_kind,
+        diff_summary=f"promote_measurement:{source} " + ",".join(sorted(set(changed))),
+    )
+    return changed
 
 
 def _finding_embed_text(
@@ -941,6 +1069,104 @@ async def update_finding(
         await _enqueue_finding_embed(db, f)
     response.headers["ETag"] = format_etag(str(f.etag))
     return await _serialize_one(db, f)
+
+
+@router.post("/findings/{finding_id}/promote-measurement", response_model=FindingOut)
+async def promote_finding_measurement(
+    request: Request,
+    finding_id: uuid.UUID,
+    body: PromoteMeasurementIn,
+    db: Annotated[AsyncSession, Depends(get_db)],
+    user: Annotated[User, Depends(require_user)],
+    audit: AuditDep,
+    response: Response,
+    idem: Annotated[IdempotencyContext, Depends(idempotent)],
+    if_match: Annotated[str | None, Header(alias="If-Match")] = None,
+) -> FindingOut | JSONResponse:
+    """Recompute a live PET-VOI measurement and materialise it onto the finding.
+
+    The radiomic numbers (SUVmax/peak/mean, MTV) that make the corpus
+    quantitatively queryable ("confirmed nodules with SUVmax > 4") are
+    computed SERVER-SIDE from the packed volume — never asserted by the
+    caller — and written onto the finding's typed columns with an audit
+    revision. Same write gate as PATCH (an agent token cannot promote onto a
+    human-authored finding); ``status`` is left untouched (a promoted
+    measurement stays ``candidate`` until a human confirms it). Idempotent on
+    ``Idempotency-Key``; optional ``If-Match`` for optimistic concurrency.
+    """
+    f = await _finding_for_write(db, request, user, finding_id)
+    enforce_optional_if_match(if_match, str(f.etag), what="finding")
+    if idem.replay is not None:
+        return idem.replay
+
+    # Server-side recompute against the named live computer.
+    series, _study, payload, factors = await load_pet_volume(db, body.series_id, user)
+    # Defense in depth: the measured series must belong to the finding's own
+    # study (``load_pet_volume`` already gates READ on the series' study; this
+    # blocks attaching another study's number to this finding).
+    if series.study_id != f.study_id:
+        raise HTTPException(
+            status_code=422,
+            detail="series does not belong to the finding's study",
+        )
+
+    blob = parse_volume_blob(payload)
+    if body.source == "voi_spherical":
+        assert body.center_mm is not None and body.radius_mm is not None
+        metrics = compute_voi_spherical(
+            blob,
+            center_mm=(body.center_mm.x, body.center_mm.y, body.center_mm.z),
+            radius_mm=body.radius_mm,
+            suv_factor_bw=factors.get("factor_bw"),
+        )
+    else:  # voi_threshold
+        assert body.seed_mm is not None and body.threshold is not None
+        metrics = compute_voi_threshold(
+            blob,
+            seed_mm=(body.seed_mm.x, body.seed_mm.y, body.seed_mm.z),
+            threshold_value=body.threshold,
+            threshold_units=body.threshold_units,
+            suv_factor_bw=factors.get("factor_bw"),
+        )
+    if metrics.voxel_count == 0:
+        raise HTTPException(
+            status_code=422,
+            detail={"code": "empty_voi", "notes": metrics.notes},
+        )
+
+    measurements = _voi_metrics_to_measurements(metrics)
+    author_kind, _m, _p, _t = _agent_provenance(request)
+    changed = await _apply_promoted_measurements(
+        db,
+        finding=f,
+        source=body.source,
+        series_id=series.id,
+        measurements=measurements,
+        geometry_marker_id=body.geometry_marker_id,
+        actor_subject_id=user.subject_id,
+        author_kind=author_kind,
+    )
+    await db.commit()
+    await db.refresh(f)
+    await audit.log(
+        action="finding_promote_measurement",
+        actor_subject_id=user.subject_id,
+        resource_kind="finding",
+        resource_id=f.id,
+        metadata={
+            "source": body.source,
+            "series_id": str(series.id),
+            "changed": changed,
+            "units": metrics.units,
+        },
+    )
+    out = await _serialize_one(db, f)
+    response.headers["ETag"] = format_etag(str(f.etag))
+    return idem.capture(
+        out.model_dump(),
+        status_code=status.HTTP_200_OK,
+        extra_headers={"ETag": format_etag(str(f.etag))},
+    )
 
 
 @router.delete("/findings/{finding_id}", status_code=status.HTTP_204_NO_CONTENT)

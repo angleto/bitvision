@@ -223,6 +223,43 @@ async def test_add_finding_geometry_posts_link() -> None:
     assert json.loads(result)["geometry"][0]["role"] == "bbox"
 
 
+async def test_promote_finding_measurement_posts_voi_with_headers() -> None:
+    fid = "f-9"
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.method == "POST"
+        assert request.url.path == f"/api/findings/{fid}/promote-measurement"
+        body = json.loads(request.content)
+        assert body == {
+            "series_id": "s-1",
+            "source": "voi_spherical",
+            "center_mm": {"x": 1.0, "y": 2.0, "z": 3.0},
+            "radius_mm": 10.0,
+        }
+        # idempotency + optimistic-concurrency headers are forwarded.
+        assert request.headers["idempotency-key"] == "idem-1"
+        assert request.headers["if-match"] == '"etag-7"'
+        _assert_auth(request)
+        return _json_response({"id": fid, "suv_max": 5.2, "volume_ml": 12.0, "status": "candidate"})
+
+    with mock_backend(handler):
+        result = await findings_tools.handle(
+            "promote_finding_measurement",
+            {
+                "finding_id": fid,
+                "series_id": "s-1",
+                "source": "voi_spherical",
+                "center_mm": {"x": 1.0, "y": 2.0, "z": 3.0},
+                "radius_mm": 10.0,
+                "idempotency_key": "idem-1",
+                "if_match": '"etag-7"',
+            },
+        )
+    out = json.loads(result)
+    assert out["suv_max"] == 5.2
+    assert out["status"] == "candidate"
+
+
 async def test_export_training_manifest_posts_query() -> None:
     """P5: the training-manifest tool POSTs the structured query and
     returns the de-identified manifest the backend builds."""
