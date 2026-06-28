@@ -325,8 +325,9 @@ export interface SearchParams extends StudyListParams {
   tag?: string[];
   // 'public' = OpenData library + studies marked is_public.
   // 'mine'   = studies owned by the caller.
+  // 'shared' = studies visible only via a grant (shared with the caller).
   // 'all' or undefined = everything the caller can read.
-  scope?: "all" | "public" | "mine";
+  scope?: "all" | "public" | "mine" | "shared";
   // When true the response includes facets (counts per
   // modality / body_part / year / top_tags). Used to populate
   // the SearchSidebar chip palette.
