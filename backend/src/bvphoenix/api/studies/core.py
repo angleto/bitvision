@@ -5,12 +5,27 @@
 from __future__ import annotations
 
 from fastapi import APIRouter
+from pydantic import BaseModel
 
 from bvphoenix.api.studies import _shared
 from bvphoenix.api.studies._shared import *  # noqa: F403
+from bvphoenix.db.session import SERVICE_SUBJECT, get_session
 from bvphoenix.services.embedding_status import embedded_series_ids
 
 router = APIRouter()
+
+# Honest scope of the de-identification provenance ledger: it records the
+# TEXT redactions applied to a study's clinical notes at OpenData publish
+# (services/publish.py). DICOM header/pixel de-identification (PS3.15) is
+# applied separately at ingest and is NOT persisted as redaction_events
+# rows, so this view never claims it.
+_DEID_PROVENANCE_SCOPE = (
+    "Text de-identification applied to this study's clinical notes at OpenData "
+    "publication: regex passes (Italian tax code, phone, email, precise dates, "
+    "addresses) plus an optional LLM scrub. This ledger does NOT cover DICOM "
+    "header/pixel de-identification (PS3.15), which is applied separately at "
+    "ingest and not recorded here."
+)
 
 
 @router.get("/studies", response_model=PaginatedStudies)
@@ -302,6 +317,122 @@ async def get_study(
     study_out = StudyOut.model_validate(study)
     study_out.indexed = bool(embedded)
     return StudyDetailOut(**study_out.model_dump(), series=series_out)
+
+
+class RedactionCategoryOut(BaseModel):
+    category: str  # the redaction_kind (regex_* / llm_scrub_via_mcp / manual)
+    count: int
+    model_id: str | None = None  # set for llm_scrub_via_mcp
+    provider: str | None = None
+    last_applied_at: str
+
+
+class DeidentificationProvenanceOut(BaseModel):
+    study_id: str
+    is_public: bool
+    contribution_tier: str | None
+    text_redactions: list[RedactionCategoryOut]
+    total_text_redactions: int
+    notes_redacted: int
+    scope: str
+
+
+@router.get(
+    "/studies/{study_id}/deidentification-provenance",
+    response_model=DeidentificationProvenanceOut,
+)
+async def get_study_deidentification_provenance(
+    study_id: uuid.UUID,
+    db: Annotated[AsyncSession, Depends(get_db)],
+    user: Annotated[User | None, Depends(optional_user)],
+    audit: AuditDep,
+) -> DeidentificationProvenanceOut:
+    """The per-study text de-identification record — the auditable counterpart
+    to an irreversible black-box.
+
+    For an OpenData study, return what was redacted from its clinical notes at
+    publication: counts per category, the LLM model / provider when an LLM
+    scrub ran, and the contribution tier. Aggregate + storage-isolated: no
+    note / instance id, no excerpt or prompt hash, no actor, no S3 location —
+    only category counts. Same read gate as the study detail (so a public
+    OpenData study's provenance is public). It records TEXT de-identification
+    only; see ``scope``.
+    """
+    study = (
+        await db.execute(select(ImagingStudy).where(ImagingStudy.id == study_id))
+    ).scalar_one_or_none()
+    if study is None:
+        raise HTTPException(status_code=404, detail="study not found")
+    if not await can(db, user=user, action=READ_METADATA, study=study):
+        # Same 404 as get_study — don't reveal a resource the caller can't see.
+        raise HTTPException(status_code=404, detail="study not found")
+
+    # redaction_events are written ONLY for clinical notes
+    # (target_kind='clinical_note'); join back to the study through the note's
+    # own polymorphic target. Aggregated to category counts in SQL so no
+    # per-event row (hash / actor / note id) ever leaves the backend.
+    #
+    # The read runs in a SERVICE-context session: access was already
+    # authorised at the study boundary above (a public OpenData study is
+    # readable by anyone, the whole point of an auditable record), but the
+    # ``redaction_events`` RLS policy requires an authenticated subject, which
+    # would silently zero the counts for the anonymous public reader. The
+    # boundary check is the authorisation; this privileged sub-read only ever
+    # surfaces non-sensitive category aggregates.
+    async with get_session(subject_id=SERVICE_SUBJECT) as sdb:
+        grouped = (
+            await sdb.execute(
+                text(
+                    "SELECT re.redaction_kind AS category, re.model_id, re.provider, "
+                    "       COUNT(*) AS cnt, MAX(re.applied_at) AS last_applied "
+                    "FROM redaction_events re "
+                    "JOIN clinical_notes cn ON cn.id = re.target_id "
+                    "WHERE re.target_kind = 'clinical_note' "
+                    "  AND cn.target_kind = 'study' AND cn.target_id = :sid "
+                    "GROUP BY re.redaction_kind, re.model_id, re.provider "
+                    "ORDER BY re.redaction_kind"
+                ),
+                {"sid": str(study.id)},
+            )
+        ).all()
+        totals = (
+            await sdb.execute(
+                text(
+                    "SELECT COUNT(*) AS total, COUNT(DISTINCT re.target_id) AS notes "
+                    "FROM redaction_events re "
+                    "JOIN clinical_notes cn ON cn.id = re.target_id "
+                    "WHERE re.target_kind = 'clinical_note' "
+                    "  AND cn.target_kind = 'study' AND cn.target_id = :sid"
+                ),
+                {"sid": str(study.id)},
+            )
+        ).one()
+
+    categories = [
+        RedactionCategoryOut(
+            category=r.category,
+            model_id=r.model_id,
+            provider=r.provider,
+            count=int(r.cnt),
+            last_applied_at=r.last_applied.isoformat(),
+        )
+        for r in grouped
+    ]
+    await audit.log(
+        action="study_deid_provenance_view",
+        actor_subject_id=user.subject_id if user else None,
+        resource_kind="study",
+        resource_id=study.id,
+    )
+    return DeidentificationProvenanceOut(
+        study_id=str(study.id),
+        is_public=study.is_public,
+        contribution_tier=study.contribution_tier,
+        text_redactions=categories,
+        total_text_redactions=int(totals.total),
+        notes_redacted=int(totals.notes),
+        scope=_DEID_PROVENANCE_SCOPE,
+    )
 
 
 @router.get("/studies/{study_id}/fusion-candidates", response_model=list[SeriesOut])
