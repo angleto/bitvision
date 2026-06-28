@@ -316,7 +316,7 @@ export default function EventDrawer({ eventId, isOwner, onClose, onChanged }: Pr
             )}
             <section style={{ marginTop: "0.8rem" }}>
               <h4 style={sectionHeading}>{t("attachmentsLabel")}</h4>
-              <AttachmentsManager eventId={event.id} />
+              <AttachmentsManager eventId={event.id} patientId={event.patient_id} />
             </section>
             {isOwner && (
               <div

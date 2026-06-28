@@ -7,21 +7,30 @@ read-blind on this sub-resource until now: agents could create and
 mutate events, but couldn't add the referral letter, the prior report,
 or the lab printout that physically motivated the event.
 
-Five tools, mirroring the backend 1:1:
+Eight tools, mirroring the backend 1:1:
 
 * ``upload_clinical_event_attachment`` — multipart upload, single file,
   25 MiB cap. Bytes go in via base64 to fit the JSON-only MCP
-  transport.
+  transport. The backend auto-reconciles by content hash, so the
+  response carries ``document_id`` when the bytes are already curated
+  in the Drive.
 * ``list_clinical_event_attachments`` — non-deleted only.
 * ``download_clinical_event_attachment`` — base64 + size + mime so the
   agent can quote / OCR / hand off the binary; clinicians normally
   open the file from the viewer instead.
 * ``delete_clinical_event_attachment`` — soft delete (the binary stays
   around for a future Restore endpoint; cleanup is a separate sweep).
-* ``promote_clinical_event_attachment`` — move an attachment into the
-  patient Documents drive when it deserves to outlive the event. The
-  endpoint is idempotent: re-promoting returns the existing
-  ``promoted_to_document_id`` without raising 409.
+* ``promote_clinical_event_attachment`` — reconcile-or-ingest a raw
+  upload into the patient Documents drive; idempotent.
+
+And, for pointing an event at an *already curated* drive document
+without re-uploading bytes:
+
+* ``link_event_document`` — link an existing Document to the event.
+* ``list_event_documents`` — list the curated documents linked to the
+  event.
+* ``unlink_event_document`` — drop a curated-document link (soft; the
+  document stays in the Drive).
 
 Scopes follow the existing pattern: writes ride ``events:write`` (the
 attachment is a sub-resource of the ClinicalEvent), reads ride
@@ -56,9 +65,10 @@ from bvmcp.tools.client import (
 
 _HINT = (
     "Attachments are sub-resources of a ClinicalEvent and inherit "
-    "its patient. Use list_clinical_event_attachments to discover "
-    "existing files before re-uploading the same artefact; the "
-    "endpoint is not deduplicated by hash."
+    "its patient. Uploads are auto-reconciled by content hash: the "
+    "response carries ``document_id`` when the bytes are already "
+    "curated in the patient's Drive. To point an event at a document "
+    "you already curated, prefer link_event_document over re-uploading."
 )
 
 # Mirror the backend cap (MAX_ATTACHMENT_BYTES) so the tool rejects
@@ -115,10 +125,10 @@ TOOLS: list[Tool] = [
             "List active (non-deleted) attachments on a ClinicalEvent, "
             "newest first. Each row carries ``filename``, ``mime``, "
             "``size_bytes``, ``uploaded_by_kind`` "
-            "(human / agent / system), and "
-            "``promoted_to_document_id`` (non-null when the attachment "
-            "has been promoted to a Document). The binary is fetched "
-            "via ``download_clinical_event_attachment``."
+            "(human / agent / system), and ``document_id`` (the curated "
+            "drive Document this upload is linked to — non-null once the "
+            "bytes are reconciled or promoted into the Drive). The "
+            "binary is fetched via ``download_clinical_event_attachment``."
         ),
         inputSchema={
             "type": "object",
@@ -171,13 +181,15 @@ TOOLS: list[Tool] = [
     Tool(
         name="promote_clinical_event_attachment",
         description=(
-            "Mark an attachment for promotion into the patient "
-            "Documents drive so it survives beyond the event "
-            "lifecycle. Idempotent: re-promoting returns the existing "
-            "``promoted_to_document_id`` without a 409. The full "
-            "Documents materialisation (OCR, classifier, authority "
-            "tagging) is queued by the backend as a follow-up; the "
-            "agent only signals intent here."
+            "Promote a raw attachment into the patient Documents drive. "
+            "Reconcile-or-ingest: if a byte-identical document already "
+            "exists in the patient's Drive it is linked (no second "
+            "copy); otherwise the bytes are ingested into a new "
+            "Document via the canonical pipeline. Idempotent. The "
+            "returned attachment carries ``document_id`` (the linked "
+            "drive document) and ``document_reconciled`` (true when it "
+            "matched an existing document rather than ingesting a new "
+            "one)."
         ),
         inputSchema={
             "type": "object",
@@ -186,6 +198,63 @@ TOOLS: list[Tool] = [
                 "attachment_id": {"type": "string"},
             },
             "required": ["event_id", "attachment_id"],
+        },
+    ),
+    Tool(
+        name="link_event_document",
+        description=(
+            "Point a ClinicalEvent at an already-curated patient "
+            "Document ('attach from Drive') without re-uploading bytes "
+            "— the right move when the referto is already in the Drive. "
+            "Idempotent on (event, document). The document must belong "
+            "to the event's patient and be live, else 404 "
+            "(cross-patient links are unrepresentable). Returns the "
+            "link row (id, document title/kind/date)."
+        ),
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "event_id": {"type": "string"},
+                "document_id": {
+                    "type": "string",
+                    "description": "UUID of the curated drive Document to link.",
+                },
+            },
+            "required": ["event_id", "document_id"],
+        },
+    ),
+    Tool(
+        name="list_event_documents",
+        description=(
+            "List curated drive Documents linked to a ClinicalEvent "
+            "(live links to live documents), newest first. Each row "
+            "carries the link id, the document id / title / kind / "
+            "date, ``link_role`` and ``source_attachment_id`` (set when "
+            "the link came from reconciling a raw event upload)."
+        ),
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "event_id": {"type": "string"},
+            },
+            "required": ["event_id"],
+        },
+    ),
+    Tool(
+        name="unlink_event_document",
+        description=(
+            "Remove a curated-document link from a ClinicalEvent (soft; "
+            "the document stays in the Drive). Pass the ``link_id`` from "
+            "list_event_documents. 204 on success, 404 when the link "
+            "does not exist."
+        ),
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "event_id": {"type": "string"},
+                "link_id": {"type": "string"},
+            },
+            "required": ["event_id", "link_id"],
         },
     ),
 ]
@@ -287,12 +356,44 @@ async def _promote(args: dict[str, Any]) -> str:
     return json.dumps(payload, indent=2, ensure_ascii=False)
 
 
+async def _link_document(args: dict[str, Any]) -> str:
+    event_id = args["event_id"]
+    payload, _headers = await api_post_with_headers(
+        f"/api/clinical-events/{event_id}/documents",
+        json={"document_id": args["document_id"]},
+    )
+    return json.dumps(payload, indent=2, ensure_ascii=False)
+
+
+async def _list_documents(args: dict[str, Any]) -> str:
+    event_id = args["event_id"]
+    payload = await api_get(f"/api/clinical-events/{event_id}/documents")
+    return json.dumps(payload, indent=2, ensure_ascii=False)
+
+
+async def _unlink_document(args: dict[str, Any]) -> str:
+    event_id = args["event_id"]
+    link_id = args["link_id"]
+    code = await api_delete(f"/api/clinical-events/{event_id}/documents/{link_id}")
+    return json.dumps(
+        {
+            "status": "unlinked",
+            "event_id": event_id,
+            "link_id": link_id,
+            "http_status": code,
+        }
+    )
+
+
 _DISPATCH = {
     "upload_clinical_event_attachment": _upload,
     "list_clinical_event_attachments": _list,
     "download_clinical_event_attachment": _download,
     "delete_clinical_event_attachment": _delete,
     "promote_clinical_event_attachment": _promote,
+    "link_event_document": _link_document,
+    "list_event_documents": _list_documents,
+    "unlink_event_document": _unlink_document,
 }
 
 

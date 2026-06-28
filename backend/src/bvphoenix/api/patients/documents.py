@@ -1647,12 +1647,93 @@ async def get_document_references(
         for f in folder_rows
     ]
 
+    from bvphoenix.db.models import ClinicalEvent, ClinicalEventDocument
+
+    event_rows = (
+        await db.execute(
+            select(ClinicalEventDocument, ClinicalEvent)
+            .join(ClinicalEvent, ClinicalEvent.id == ClinicalEventDocument.event_id)
+            .where(
+                ClinicalEventDocument.document_id == doc_id,
+                ClinicalEventDocument.deleted_at.is_(None),
+            )
+            .order_by(ClinicalEventDocument.created_at.desc())
+        )
+    ).all()
+    clinical_events = [
+        EventRefOut(
+            event_id=str(link.event_id),
+            link_id=str(link.id),
+            event_title=ev.title,
+            event_date=ev.event_date.isoformat() if ev.event_date else None,
+            link_role=link.link_role,
+            source_attachment_id=str(link.source_attachment_id)
+            if link.source_attachment_id
+            else None,
+            created_at=link.created_at.isoformat(),
+        )
+        for link, ev in event_rows
+    ]
+
     return DocumentReferencesOut(
         studies=studies,
         report_contents=report_contents,
         citations=citations,
         folders=folders,
+        clinical_events=clinical_events,
     )
+
+
+@router.get(
+    "/patients/{patient_id}/documents-by-hash",
+    response_model=list[DocumentHashMatchOut],
+)
+async def find_documents_by_hash(
+    request: Request,
+    patient_id: uuid.UUID,
+    sha256: str,
+    db: Annotated[AsyncSession, Depends(get_db)],
+    user: Annotated[User | None, Depends(optional_user)],
+) -> list[DocumentHashMatchOut]:
+    """Live patient documents whose stored content (or originating
+    artefact) hashes to ``sha256``. The reconciliation lookup exposed
+    read-only: a caller can check whether a file is already curated in
+    the Drive before uploading it to an event. Empty when nothing
+    matches. Same-patient scoped by the URL segment + the FK."""
+    patient = await _get_patient_or_404(db, patient_id, user, request)
+    sha = sha256.strip().lower()
+    if len(sha) != 64 or any(c not in "0123456789abcdef" for c in sha):
+        raise problem(422, "invalid_hash", "sha256 must be a 64-char lowercase hex digest")
+    rows = (
+        (
+            await db.execute(
+                select(Document)
+                .where(
+                    Document.patient_id == patient.id,
+                    Document.deleted_at.is_(None),
+                    or_(
+                        Document.content_sha256 == sha,
+                        Document.original_blob_hash == sha,
+                    ),
+                )
+                .order_by(Document.created_at.asc())
+            )
+        )
+        .scalars()
+        .all()
+    )
+    return [
+        DocumentHashMatchOut(
+            document_id=str(d.id),
+            title=d.title,
+            kind_id=d.kind_id,
+            document_date=d.document_date.isoformat() if d.document_date else None,
+            content_sha256=d.content_sha256,
+            original_blob_hash=d.original_blob_hash,
+            matched_on="content" if d.content_sha256 == sha else "original",
+        )
+        for d in rows
+    ]
 
 
 @router.get("/patients/{patient_id}/documents/{doc_id}/content")

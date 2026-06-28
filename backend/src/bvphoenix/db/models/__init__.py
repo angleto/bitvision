@@ -26,6 +26,9 @@ from bvphoenix.db.models.care_phases import (
 from bvphoenix.db.models.clinical_event_attachments import (
     ClinicalEventAttachment,
 )
+from bvphoenix.db.models.clinical_event_documents import (
+    ClinicalEventDocument,
+)
 from bvphoenix.db.models.clinical_event_transitions import (
     TRANSITION_ACTIONS,
     ClinicalEventTransition,
@@ -247,6 +250,7 @@ __all__ = [
     "CarePhaseRevision",
     "ClinicalEvent",
     "ClinicalEventAttachment",
+    "ClinicalEventDocument",
     "ClinicalEventTransition",
     "ClinicalNote",
     "Commit",

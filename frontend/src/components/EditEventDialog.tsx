@@ -329,7 +329,7 @@ export default function EditEventDialog({ event, onClose, onSaved }: Props) {
           </div>
           <div>
             <span style={fieldLabel}>{t("attachmentsLabel")}</span>
-            <AttachmentsManager eventId={event.id} />
+            <AttachmentsManager eventId={event.id} patientId={event.patient_id} />
           </div>
           <div>
             <span style={fieldLabel}>{t("noteLabel")}</span>

@@ -8,6 +8,7 @@ import type {
   CalendarFeed,
   ClinicalEvent,
   ClinicalEventAttachment,
+  EventDocument,
   EventStatus,
 } from "@/lib/api_records";
 
@@ -280,6 +281,32 @@ export const calendarApi = {
 
   attachmentDownloadUrl(eventId: string, attId: string): string {
     return `${API_BASE_URL}/api/clinical-events/${eventId}/attachments/${attId}/download`;
+  },
+
+  // ---- Curated drive Document links ("attach from Drive") --------------
+
+  async listEventDocuments(eventId: string): Promise<EventDocument[]> {
+    return request<EventDocument[]>(`/api/clinical-events/${eventId}/documents`);
+  },
+
+  async linkEventDocument(eventId: string, documentId: string): Promise<EventDocument> {
+    return request<EventDocument>(`/api/clinical-events/${eventId}/documents`, {
+      method: "POST",
+      json: { document_id: documentId },
+    });
+  },
+
+  async unlinkEventDocument(eventId: string, linkId: string): Promise<void> {
+    const token = getStoredToken();
+    const resp = await fetch(`${API_BASE_URL}/api/clinical-events/${eventId}/documents/${linkId}`, {
+      credentials: "include",
+      method: "DELETE",
+      headers: token ? { authorization: `Bearer ${token}` } : undefined,
+      cache: "no-store",
+    });
+    if (!resp.ok) {
+      throw new ApiError(resp.status, await resp.text());
+    }
   },
 };
 

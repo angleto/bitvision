@@ -978,6 +978,34 @@ class FolderMembershipOut(BaseModel):
     is_root: bool
 
 
+class EventRefOut(BaseModel):
+    """A ClinicalEvent that references this document (attached from the
+    Drive, or reconciled/promoted from a raw event upload). Non-blocking:
+    surfaced for navigation, never blocks a document soft-delete."""
+
+    event_id: str
+    link_id: str
+    event_title: str | None = None
+    event_date: str | None = None
+    link_role: str
+    source_attachment_id: str | None = None
+    created_at: str
+
+
+class DocumentHashMatchOut(BaseModel):
+    """A live patient document whose stored bytes (``matched_on='content'``)
+    or originating artefact (``matched_on='original'``) hash to a given
+    SHA-256. Backs the "is this file already in the Drive?" check."""
+
+    document_id: str
+    title: str
+    kind_id: str
+    document_date: str | None = None
+    content_sha256: str | None = None
+    original_blob_hash: str | None = None
+    matched_on: str
+
+
 class DocumentReferencesOut(BaseModel):
     """Reverse-direction inventory of everything that references a
     document. Powers the "Riferito da" panel on the document detail
@@ -991,6 +1019,7 @@ class DocumentReferencesOut(BaseModel):
     report_contents: list[ContentRefOut]
     citations: list[CitationRefOut]
     folders: list[FolderMembershipOut]
+    clinical_events: list[EventRefOut] = []
 
 
 _INLINE_TEXT_MAX_BYTES = 100 * 1024
@@ -1336,6 +1365,7 @@ __all__ = [
     "DocumentEntitiesOut",
     "DocumentEntitiesRunIn",
     "DocumentFile",
+    "DocumentHashMatchOut",
     "DocumentMergeIn",
     "DocumentMergeOut",
     "DocumentReferencesOut",
@@ -1346,6 +1376,7 @@ __all__ = [
     "DocumentTextRunIn",
     "DocumentVersionOut",
     "DocumentVersionsOut",
+    "EventRefOut",
     "FascicoloIndex",
     "FascicoloSection",
     "Field",
