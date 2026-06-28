@@ -4,31 +4,30 @@
 #   ELIGIBLE  CC-BY-3.0 / CC-BY-4.0 / CC0-1.0  → commercial reuse OK
 #   ELIGIBLE  CC-BY-NC-*                       → ingested but LABELLED
 #             non-commercial / educational only (commercial_use_allowed is
-#             derived from the SPDX and excludes these from any commercial
-#             tier). MIDRC-RICORD-1C/1A, Duke-Breast-Cancer-MRI and
-#             NSCLC-Radiomics fall here.
-#   INELIGIBLE  *-ND, CC-BY-(NC-)SA (viral), NIH/TCIA Controlled Access.
-#             Brain/head collections are almost all Controlled since the
-#             2022 TCIA face-reconstruction policy (HNSCC, Head-Neck-PET-CT
-#             were rejected for this); UPENN-GBM (defaced) and ReMIND are
-#             the CC-BY exceptions, and CMB-LCA/CMB-CRC drop their head
-#             series via exclude_body_parts.
+#             derived from the SPDX). MIDRC-RICORD-1C/1A, Duke-Breast-Cancer-MRI
+#             and NSCLC-Radiomics fall here.
+#   INELIGIBLE  *-ND, CC-BY-(NC-)SA (viral), NIH/TCIA Controlled Access
+#             (HNSCC, Head-Neck-PET-CT rejected for this). UPENN-GBM (defaced)
+#             and ReMIND are the CC-BY brain exceptions; CMB-LCA/CMB-CRC drop
+#             their head series via exclude_body_parts.
 #
-# ``subjects: all`` enumerates every PatientID in the collection via NBIA
-# getPatient (whole-collection ingest). Re-runs are idempotent: complete
-# series are skipped before download. The K8s Job defaults to PILOT (a
-# 3-subject smoke set via --only); the bulk Job (PILOT=0) ingests the full
-# ``subjects: all`` set and is resumable, so a single bounded run grows the
-# library incrementally.
+# ``subjects: all`` enumerates every PatientID via NBIA getPatient. Re-runs
+# are idempotent (complete series skipped before download). The K8s Job
+# defaults to PILOT (3-subject smoke set); the bulk Job (PILOT=0) ingests the
+# full set and is resumable.
 #
-# Citation integrity: every license SPDX + canonical TCIA citation below was
-# verified against the live TCIA collection page + DOI on 2026-06-28. NBIA
-# collection names are CASE-SENSITIVE and passed verbatim — note the SPACE
-# (not hyphen) in "NSCLC Radiogenomics" and "RIDER Lung CT".
+# Reachability: the ``tcia`` adapter speaks the NBIA v1 public REST API
+# (services.cancerimagingarchive.net/nbia-api/services/v1). Every ACTIVE
+# collection below was confirmed present in that API's getCollectionValues on
+# 2026-06-28; this projects to ~29k public studies (>2.5x the 10k target).
+# Five verified-eligible collections (incl. NLST, Yale-Brain-Mets) are NOT on
+# NBIA v1 — see the "NOT ON NBIA v1" block at the bottom; they need a separate
+# adapter (IDC / AWS / authenticated NBIA), not this one.
 #
-# Projection: the ACTIVE set below projects to well over 10,000 public
-# studies; the four GATED giants + the pseudo-PHI teaching set at the bottom
-# are intentionally NOT active (see their rationale).
+# Citation integrity: each license SPDX + canonical TCIA citation was verified
+# against the live collection page + DOI on 2026-06-28. NBIA names are
+# CASE-SENSITIVE and passed verbatim — note the SPACE (not hyphen) in
+# "NSCLC Radiogenomics" and "RIDER Lung CT".
 
 sources:
   # ---- Lung CT (LIDC-IDRI) — CC-BY-3.0 ---------------------------
@@ -204,41 +203,9 @@ sources:
       - RIDER-1129164940
 
   # ==========================================================================
-  # Added 2026-06-28 — verified-eligible collections (license + citation
-  # confirmed against TCIA on 2026-06-28). Sorted by study count.
+  # Added 2026-06-28 — verified-eligible, confirmed reachable via NBIA v1.
+  # Sorted by study count.
   # ==========================================================================
-
-  # NOTE: very large collection (~73116 studies) — multi-TB egress; the bulk Job is resumable, ingest grows incrementally.
-  # ---- Chest (lung) · CT (primary; collection also includes Histopathology / Tissue Microarray slide images) (~73116 studies, CC-BY-4.0, commercial OK) ----
-  - collection: TCIA/NLST
-    adapter: tcia
-    license_spdx: CC-BY-4.0
-    license_url: https://creativecommons.org/licenses/by/4.0/
-    citation_required: true
-    citation_text: >-
-      National Lung Screening Trial Research Team; Aberle DR, Adams AM, Berg
-      CD, et al. Reduced Lung-Cancer Mortality with Low-Dose Computed
-      Tomographic Screening. New England Journal of Medicine
-      2011;365(5):395-409. doi:10.1056/NEJMoa1102873. Data: The Cancer Imaging
-      Archive, doi:10.7937/TCIA.HMQ8-J677
-    subjects: all
-
-  # NOTE: very large collection (~11892 studies) — multi-TB egress; the bulk Job is resumable, ingest grows incrementally.
-  # ---- Brain · MR (~11892 studies, CC-BY-4.0, commercial OK) ----
-  - collection: TCIA/Yale-Brain-Mets-Longitudinal
-    adapter: tcia
-    license_spdx: CC-BY-4.0
-    license_url: https://creativecommons.org/licenses/by/4.0/
-    citation_required: true
-    citation_text: >-
-      Chadha, S., Weiss, D., Janas, A., Ramakrishnan, D., Hager, T., Osenberg,
-      K., Willms, K., Zhu, J., Chiang, V., Bakas, S., Maleki, N., Sritharan,
-      D. V., Schoenherr, S., Westerhoff, M., Zawalich, M., Davis, M.,
-      Malhotra, A., Bousabarah, K., Deusch, C., Lin, M., Aneja, S., & Aboian,
-      M. S. (2025). Yale longitudinal dataset of brain metastases on MRI with
-      associated clinical data (Yale-Brain-Mets-Longitudinal) (Version 1)
-      [Data set]. Data: The Cancer Imaging Archive, doi:10.7937/3YAT-E768
-    subjects: all
 
   # ---- Prostate · MR, US (~2799 studies, CC-BY-4.0, commercial OK) ----
   - collection: TCIA/Prostate-MRI-US-Biopsy
@@ -283,20 +250,6 @@ sources:
       detection and diagnosis research. Scientific Data, 4, 170177.
       doi:10.1038/sdata.2017.177. Data: The Cancer Imaging Archive,
       doi:10.7937/K9/TCIA.2016.7O02S9CY
-    subjects: all
-
-  # ---- Breast · MG (~2006 studies, CC-BY-4.0, commercial OK) ----
-  - collection: TCIA/CDD-CESM
-    adapter: tcia
-    license_spdx: CC-BY-4.0
-    license_url: https://creativecommons.org/licenses/by/4.0/
-    citation_required: true
-    citation_text: >-
-      Khaled, R., Helal, M., Alfarghaly, O., Mokhtar, O., Elkorany, A., El
-      Kassas, H., & Fahmy, A. Categorized contrast enhanced mammography
-      dataset for diagnostic and artificial intelligence research. Scientific
-      Data 2022;9(1):122. doi:10.1038/s41597-022-01238-0. Data: The Cancer
-      Imaging Archive, doi:10.7937/29kw-ae92
     subjects: all
 
   # ---- Breast · MR, MG, CT (~1976 studies, CC-BY-4.0, commercial OK) ----
@@ -427,20 +380,6 @@ sources:
       Archive, doi:10.7937/K9/TCIA.2016.ELN8YGLE
     subjects: all
 
-  # ---- Head (internal auditory canal / vestibular schwannoma) · MR, SEG (~570 studies, CC-BY-4.0, commercial OK) ----
-  - collection: TCIA/UCSD-VS-Longitudinal
-    adapter: tcia
-    license_spdx: CC-BY-4.0
-    license_url: https://creativecommons.org/licenses/by/4.0/
-    citation_required: true
-    citation_text: >-
-      Nguyen, U., Correia de Verdier, M., Saluja, R., Schulte, J., Brandel,
-      M., Suresh, K., Farid, N., & Rudie, J. (2026). The University of
-      California San Diego Longitudinal Vestibular Schwannoma Dataset
-      (UCSD-VS-Longitudinal) (Version 1) [Data set]. The Cancer Imaging
-      Archive. Data: The Cancer Imaging Archive, doi:10.7937/WEFA-CP23
-    subjects: all
-
   # ---- Kidney · CT, MR, CR (~439 studies, CC-BY-3.0, commercial OK) ----
   - collection: TCIA/TCGA-KIRC
     adapter: tcia
@@ -542,21 +481,6 @@ sources:
       Archive. https://doi.org/10.7937/djg7-gz87. Data: The Cancer Imaging
       Archive, doi:10.7937/DJG7-GZ87
     exclude_body_parts: [HEAD, BRAIN, SKULL, FACE, HEADNECK, NECK]
-    subjects: all
-
-  # ---- Breast · US (~256 studies, CC-BY-4.0, commercial OK) ----
-  - collection: TCIA/Breast-Lesions-USG
-    adapter: tcia
-    license_spdx: CC-BY-4.0
-    license_url: https://creativecommons.org/licenses/by/4.0/
-    citation_required: true
-    citation_text: >-
-      Pawłowska, A., Ćwierz-Pieńkowska, A., Domalik, A., Jaguś, D., Kasprzak,
-      P., Matkowski, R., Fura, Ł., Nowicki, A., & Żołek, N. A Curated
-      benchmark dataset for ultrasound based breast lesion analysis.
-      Scientific Data 11, 148 (2024).
-      https://doi.org/10.1038/s41597-024-02984-z. Data: The Cancer Imaging
-      Archive, doi:10.7937/9WKK-Q141
     subjects: all
 
   # ---- Liver (abdomen) · CT, MR, PT (~237 studies, CC-BY-3.0, commercial OK) ----
@@ -768,8 +692,8 @@ sources:
 
 # ============================================================================
 # GATED — verified eligible (license + citation confirmed 2026-06-28) but
-# NOT active by default. Each alone is huge / synthetic / pseudo-PHI. To
-# activate, uncomment the block and move it up into ``sources:``.
+# NOT active by default: synthetic or pseudo-PHI. Uncomment + move into
+# ``sources:`` to activate.
 # ============================================================================
 #   VICTRE — ~8.7k SYNTHETIC in-silico digital-mammography phantoms (computational, not real patients).
 #   Breast-Cancer-Screening-DBT — ~5.6k DBT studies, large AND CC-BY-NC (non-commercial).
@@ -816,4 +740,91 @@ sources:
 #      dataset for evaluation of medical image de-identification. Scientific
 #      Data. 2021;8:183. doi:10.1038/s41597-021-00967-y. Data: The Cancer
 #      Imaging Archive, doi:10.7937/s17z-r072
+#    subjects: all
+
+# ============================================================================
+# NOT ON NBIA v1 — verified to exist + be CC-licensed on the TCIA website, but
+# ABSENT from the NBIA v1 REST API this adapter uses (getCollectionValues;
+# getPatient returns an empty body). Confirmed against the live API 2026-06-28.
+# These need a DIFFERENT ingestion path (Imaging Data Commons / AWS Open Data /
+# authenticated NBIA), i.e. a new adapter — they will NOT import via ``tcia``.
+# Metadata kept verified so an adapter build starts from real citations.
+# ============================================================================
+#   NLST — ~73k CT studies — NOT in NBIA v1 getCollectionValues; getPatient empty. (TCIA hosts NLST via IDC / a dedicated backend.)
+#   Yale-Brain-Mets-Longitudinal — ~11.9k MR — absent from NBIA v1 (2025 collection on the newer backend).
+#   CDD-CESM — ~2k contrast mammography — absent from NBIA v1.
+#   UCSD-VS-Longitudinal — ~570 MR — absent from NBIA v1.
+#   Breast-Lesions-USG — ~256 breast US — absent from NBIA v1.
+#
+#  # ---- Chest (lung) · CT (primary; collection also includes Histopathology / Tissue Microarray slide images) (~73116 studies, CC-BY-4.0, commercial OK) ----
+#  - collection: TCIA/NLST
+#    adapter: tcia
+#    license_spdx: CC-BY-4.0
+#    license_url: https://creativecommons.org/licenses/by/4.0/
+#    citation_required: true
+#    citation_text: >-
+#      National Lung Screening Trial Research Team; Aberle DR, Adams AM, Berg
+#      CD, et al. Reduced Lung-Cancer Mortality with Low-Dose Computed
+#      Tomographic Screening. New England Journal of Medicine
+#      2011;365(5):395-409. doi:10.1056/NEJMoa1102873. Data: The Cancer Imaging
+#      Archive, doi:10.7937/TCIA.HMQ8-J677
+#    subjects: all
+
+#  # ---- Brain · MR (~11892 studies, CC-BY-4.0, commercial OK) ----
+#  - collection: TCIA/Yale-Brain-Mets-Longitudinal
+#    adapter: tcia
+#    license_spdx: CC-BY-4.0
+#    license_url: https://creativecommons.org/licenses/by/4.0/
+#    citation_required: true
+#    citation_text: >-
+#      Chadha, S., Weiss, D., Janas, A., Ramakrishnan, D., Hager, T., Osenberg,
+#      K., Willms, K., Zhu, J., Chiang, V., Bakas, S., Maleki, N., Sritharan,
+#      D. V., Schoenherr, S., Westerhoff, M., Zawalich, M., Davis, M.,
+#      Malhotra, A., Bousabarah, K., Deusch, C., Lin, M., Aneja, S., & Aboian,
+#      M. S. (2025). Yale longitudinal dataset of brain metastases on MRI with
+#      associated clinical data (Yale-Brain-Mets-Longitudinal) (Version 1)
+#      [Data set]. Data: The Cancer Imaging Archive, doi:10.7937/3YAT-E768
+#    subjects: all
+
+#  # ---- Breast · MG (~2006 studies, CC-BY-4.0, commercial OK) ----
+#  - collection: TCIA/CDD-CESM
+#    adapter: tcia
+#    license_spdx: CC-BY-4.0
+#    license_url: https://creativecommons.org/licenses/by/4.0/
+#    citation_required: true
+#    citation_text: >-
+#      Khaled, R., Helal, M., Alfarghaly, O., Mokhtar, O., Elkorany, A., El
+#      Kassas, H., & Fahmy, A. Categorized contrast enhanced mammography
+#      dataset for diagnostic and artificial intelligence research. Scientific
+#      Data 2022;9(1):122. doi:10.1038/s41597-022-01238-0. Data: The Cancer
+#      Imaging Archive, doi:10.7937/29kw-ae92
+#    subjects: all
+
+#  # ---- Head (internal auditory canal / vestibular schwannoma) · MR, SEG (~570 studies, CC-BY-4.0, commercial OK) ----
+#  - collection: TCIA/UCSD-VS-Longitudinal
+#    adapter: tcia
+#    license_spdx: CC-BY-4.0
+#    license_url: https://creativecommons.org/licenses/by/4.0/
+#    citation_required: true
+#    citation_text: >-
+#      Nguyen, U., Correia de Verdier, M., Saluja, R., Schulte, J., Brandel,
+#      M., Suresh, K., Farid, N., & Rudie, J. (2026). The University of
+#      California San Diego Longitudinal Vestibular Schwannoma Dataset
+#      (UCSD-VS-Longitudinal) (Version 1) [Data set]. The Cancer Imaging
+#      Archive. Data: The Cancer Imaging Archive, doi:10.7937/WEFA-CP23
+#    subjects: all
+
+#  # ---- Breast · US (~256 studies, CC-BY-4.0, commercial OK) ----
+#  - collection: TCIA/Breast-Lesions-USG
+#    adapter: tcia
+#    license_spdx: CC-BY-4.0
+#    license_url: https://creativecommons.org/licenses/by/4.0/
+#    citation_required: true
+#    citation_text: >-
+#      Pawłowska, A., Ćwierz-Pieńkowska, A., Domalik, A., Jaguś, D., Kasprzak,
+#      P., Matkowski, R., Fura, Ł., Nowicki, A., & Żołek, N. A Curated
+#      benchmark dataset for ultrasound based breast lesion analysis.
+#      Scientific Data 11, 148 (2024).
+#      https://doi.org/10.1038/s41597-024-02984-z. Data: The Cancer Imaging
+#      Archive, doi:10.7937/9WKK-Q141
 #    subjects: all

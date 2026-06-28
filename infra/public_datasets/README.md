@@ -76,15 +76,23 @@ sources:
   (a 3-subject smoke set via `--only`); a bulk run clears PILOT.
 - `exclude_body_parts` filters series by `BodyPartExamined` (upper-cased)
   before download — used for the otherwise-CC-BY CMB collections.
-- As of 2026-06-28 the active set is 48 collections (license SPDX +
-  canonical TCIA citation verified against the live collection page + DOI
-  for each), projecting to ~32k public studies (~29.7k commercial-eligible).
-  A `GATED` block at the bottom of `manifest.yaml` holds collections that
-  are verified-eligible but intentionally **not** active — the giants
-  (`NLST` ~73k, `Yale-Brain-Mets-Longitudinal` ~11.9k), the synthetic
-  `VICTRE` phantom set, the large NC `Breast-Cancer-Screening-DBT`, and the
-  `Pseudo-PHI-DICOM-Data` teaching set (designed to contain pseudo-PHI). To
-  activate one, uncomment its block and move it up into `sources:`.
+- As of 2026-06-28 the active set is 45 collections (license SPDX +
+  canonical TCIA citation verified against the live collection page + DOI,
+  and each confirmed present in the NBIA v1 `getCollectionValues`),
+  projecting to ~29k public studies (~26.9k commercial-eligible).
+- A `GATED` block holds verified-eligible collections kept **off** by
+  choice: the synthetic `VICTRE` phantom set, the large NC
+  `Breast-Cancer-Screening-DBT`, and the `Pseudo-PHI-DICOM-Data` teaching
+  set (designed to contain pseudo-PHI). Uncomment + move into `sources:` to
+  activate.
+- A `NOT ON NBIA v1` block holds collections verified to exist + be
+  CC-licensed on the TCIA *website* but ABSENT from the NBIA v1 REST API
+  this adapter uses (`getPatient` returns an empty body): `NLST`,
+  `Yale-Brain-Mets-Longitudinal`, `CDD-CESM`, `UCSD-VS-Longitudinal`,
+  `Breast-Lesions-USG`. They live on a different backend (Imaging Data
+  Commons / AWS Open Data / authenticated NBIA) and need a **new adapter**,
+  not `tcia`. Their verified metadata is kept so an adapter build starts
+  from real citations.
 - NBIA collection names are case-sensitive and passed verbatim. Two carry a
   SPACE, not a hyphen: `NSCLC Radiogenomics` and `RIDER Lung CT`. Do not
   fabricate a DOI for a medical dataset.
