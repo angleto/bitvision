@@ -408,3 +408,147 @@ def test_adapter_tcia_only_series_allowlist(tmp_path: Path, monkeypatch) -> None
     assert subject_dir is not None
     assert sorted(p.name for p in subject_dir.iterdir()) == ["uid-B"]
     assert len(fetched) == 1 and "uid-B" in fetched[0]
+
+
+def _fake_idc_index(rows):
+    pd = pytest.importorskip("pandas")
+    return pd.DataFrame(rows)
+
+
+def test_adapter_idc_lists_patients_sorted(monkeypatch) -> None:
+    """``subjects: all`` over IDC enumerates the collection's PatientIDs."""
+    from bvphoenix.cli import public_import as pi
+
+    index = _fake_idc_index(
+        [
+            {"collection_id": "nlst", "PatientID": "100002", "SeriesInstanceUID": "s-Z"},
+            {"collection_id": "nlst", "PatientID": "100001", "SeriesInstanceUID": "s-A"},
+            {"collection_id": "tcga_luad", "PatientID": "999", "SeriesInstanceUID": "s-Q"},
+        ]
+    )
+
+    class FakeClient:
+        def __init__(self):
+            self.index = index
+
+        def get_collections(self):
+            return ["nlst", "tcga_luad"]
+
+    monkeypatch.setattr(pi, "_idc_client", lambda: FakeClient())
+    assert pi._adapter_idc_list_patients(collection="IDC/nlst") == ["100001", "100002"]
+
+
+def test_adapter_idc_downloads_skips_and_refuses_nc(tmp_path: Path, monkeypatch) -> None:
+    """IDC adapter: fetch new series, skip already-imported, refuse CC-BY-NC.
+
+    Pure adapter test (no network): the idc-index client and the anonymous S3
+    client are mocked. ``s-B`` is already imported (skip_series) so it is never
+    requested; ``s-CR`` lives in the ``idc-open-data-cr`` (non-commercial)
+    bucket and must be refused under a commercial-licensed entry; only ``s-A``
+    is downloaded, with both of its instances.
+    """
+    from bvphoenix.cli import public_import as pi
+
+    index = _fake_idc_index(
+        [
+            {"collection_id": "nlst", "PatientID": "100001", "SeriesInstanceUID": "s-A"},
+            {"collection_id": "nlst", "PatientID": "100001", "SeriesInstanceUID": "s-B"},
+            {"collection_id": "nlst", "PatientID": "100001", "SeriesInstanceUID": "s-CR"},
+            {"collection_id": "nlst", "PatientID": "100002", "SeriesInstanceUID": "s-Z"},
+        ]
+    )
+    series_urls = {
+        "s-A": ["s3://idc-open-data/uuidA/0.dcm", "s3://idc-open-data/uuidA/1.dcm"],
+        "s-CR": ["s3://idc-open-data-cr/uuidCR/0.dcm"],
+    }
+
+    class FakeClient:
+        def __init__(self):
+            self.index = index
+
+        def get_collections(self):
+            return ["nlst"]
+
+        def get_series_file_URLs(self, uid, **kw):  # noqa: N802 (matches idc-index API)
+            return series_urls[uid]
+
+    downloaded: list[tuple[str, str]] = []
+
+    class FakeS3:
+        def download_file(self, bucket, key, dest):
+            downloaded.append((bucket, key))
+            Path(dest).write_bytes(b"DCM")
+
+    monkeypatch.setattr(pi, "_idc_client", lambda: FakeClient())
+    monkeypatch.setattr(pi, "_idc_s3", lambda: FakeS3())
+
+    subject_dir = pi._adapter_idc(
+        collection="IDC/nlst",
+        subject_id="100001",
+        workdir=tmp_path,
+        skip_series={"s-B"},
+        allow_noncommercial=False,
+    )
+
+    assert subject_dir is not None
+    assert sorted(p.name for p in subject_dir.iterdir()) == ["s-A"]
+    assert downloaded == [("idc-open-data", "uuidA/0.dcm"), ("idc-open-data", "uuidA/1.dcm")]
+
+
+def test_adapter_idc_returns_none_when_all_imported(tmp_path: Path, monkeypatch) -> None:
+    """Every series already imported -> None (no download), like the tcia adapter."""
+    from bvphoenix.cli import public_import as pi
+
+    index = _fake_idc_index(
+        [{"collection_id": "nlst", "PatientID": "X", "SeriesInstanceUID": "s1"}]
+    )
+
+    class FakeClient:
+        def __init__(self):
+            self.index = index
+
+        def get_collections(self):
+            return ["nlst"]
+
+        def get_series_file_URLs(self, uid, **kw):  # noqa: N802 (matches idc-index API)
+            return ["s3://idc-open-data/u/0.dcm"]
+
+    monkeypatch.setattr(pi, "_idc_client", lambda: FakeClient())
+    monkeypatch.setattr(pi, "_idc_s3", lambda: object())
+
+    out = pi._adapter_idc(
+        collection="IDC/nlst", subject_id="X", workdir=tmp_path, skip_series={"s1"}
+    )
+    assert out is None
+
+
+def test_adapter_idc_allows_nc_bucket_when_entry_is_nc(tmp_path: Path, monkeypatch) -> None:
+    """A CC-BY-NC manifest entry may pull the idc-open-data-cr bucket."""
+    from bvphoenix.cli import public_import as pi
+
+    index = _fake_idc_index([{"collection_id": "c", "PatientID": "X", "SeriesInstanceUID": "s-CR"}])
+
+    class FakeClient:
+        def __init__(self):
+            self.index = index
+
+        def get_collections(self):
+            return ["c"]
+
+        def get_series_file_URLs(self, uid, **kw):  # noqa: N802 (matches idc-index API)
+            return ["s3://idc-open-data-cr/u/0.dcm"]
+
+    got: list[str] = []
+
+    class FakeS3:
+        def download_file(self, bucket, key, dest):
+            got.append(bucket)
+            Path(dest).write_bytes(b"x")
+
+    monkeypatch.setattr(pi, "_idc_client", lambda: FakeClient())
+    monkeypatch.setattr(pi, "_idc_s3", lambda: FakeS3())
+
+    out = pi._adapter_idc(
+        collection="IDC/c", subject_id="X", workdir=tmp_path, allow_noncommercial=True
+    )
+    assert out is not None and got == ["idc-open-data-cr"]
