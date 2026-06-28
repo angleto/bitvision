@@ -14,10 +14,13 @@ from unittest.mock import MagicMock
 
 import pytest
 from fastapi import HTTPException
+from sqlalchemy import func, select
 
 from bvphoenix.db.models import UploadSession, UploadSessionFile
+from bvphoenix.db.models.principals import Subject
 from bvphoenix.services import upload_sessions as svc
 from bvphoenix.storage.s3 import S3Storage
+from tests.conftest import skip_if_no_db
 
 CHUNK = svc.CHUNK_SIZE
 
@@ -283,3 +286,96 @@ async def test_chunk_overflowing_declared_size_is_rejected() -> None:
         )
     assert ei.value.status_code == 400
     assert ei.value.detail["code"] == "chunk_overflows_declared_size"
+
+
+# ---------------------------------------------------------------------------
+# create_session — idempotent "start upload" (DB-backed)
+# ---------------------------------------------------------------------------
+
+
+async def _active_count(db, owner_id: uuid.UUID) -> int:
+    return int(
+        (
+            await db.execute(
+                select(func.count())
+                .select_from(UploadSession)
+                .where(
+                    UploadSession.owner_subject_id == owner_id,
+                    UploadSession.status.in_(tuple(svc.UPLOAD_SESSION_ACTIVE_STATUSES)),
+                )
+            )
+        ).scalar_one()
+    )
+
+
+@skip_if_no_db
+@pytest.mark.asyncio
+async def test_create_session_dedups_identical_start_upload(db_session, make_user) -> None:
+    """Two identical 'start upload' calls map to ONE active session, so the
+    same staging prefix → one ingest job at commit. Regression for ac9731ed:
+    create_session never set idempotency_key, so the partial-unique index was
+    dead and every retry spawned a new session + a duplicate ingest job."""
+    user = await make_user()
+    owner = await db_session.get(Subject, user.subject_id)
+    files = [
+        svc.FileDecl(filename="a.dcm", relative_path="CD/a.dcm", size=1024, sha256="a" * 64),
+        svc.FileDecl(filename="b.dcm", relative_path="CD/b.dcm", size=2048, sha256="b" * 64),
+    ]
+
+    s1 = await svc.create_session(
+        db_session, owner=owner, patient=None, folder=None, tier="t1", files=list(files)
+    )
+    # Same selection, different order — still the same upload (manifest is
+    # sorted before hashing), so it must dedup onto s1.
+    s2 = await svc.create_session(
+        db_session,
+        owner=owner,
+        patient=None,
+        folder=None,
+        tier="t1",
+        files=list(reversed(files)),
+    )
+
+    assert s1.idempotency_key is not None
+    assert s2.id == s1.id
+    assert await _active_count(db_session, owner.id) == 1
+
+    # A genuinely different manifest is NOT deduped — a second session opens.
+    other = await svc.create_session(
+        db_session,
+        owner=owner,
+        patient=None,
+        folder=None,
+        tier="t1",
+        files=[
+            svc.FileDecl(filename="c.dcm", relative_path="CD/c.dcm", size=4096, sha256="c" * 64)
+        ],
+    )
+    assert other.id != s1.id
+    assert other.idempotency_key != s1.idempotency_key
+    assert await _active_count(db_session, owner.id) == 2
+
+
+@skip_if_no_db
+@pytest.mark.asyncio
+async def test_create_session_reopens_after_terminal_state(db_session, make_user) -> None:
+    """The dedup is scoped to ACTIVE sessions (the partial index's WHERE): once
+    a session is committed/aborted the same manifest is free to open a fresh
+    one — re-uploading the same files later must not be blocked."""
+    user = await make_user()
+    owner = await db_session.get(Subject, user.subject_id)
+    files = [svc.FileDecl(filename="a.dcm", relative_path=None, size=512, sha256="a" * 64)]
+
+    s1 = await svc.create_session(
+        db_session, owner=owner, patient=None, folder=None, tier="t1", files=list(files)
+    )
+    # Retire it (as commit/abort would).
+    s1.status = "aborted"
+    await db_session.commit()
+
+    s2 = await svc.create_session(
+        db_session, owner=owner, patient=None, folder=None, tier="t1", files=list(files)
+    )
+    assert s2.id != s1.id
+    assert s2.idempotency_key == s1.idempotency_key  # same key, now free to reuse
+    assert await _active_count(db_session, owner.id) == 1
