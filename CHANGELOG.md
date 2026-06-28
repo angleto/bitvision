@@ -5,6 +5,28 @@ project follows semantic versioning; pre-release suffixes (`alpha`,
 `beta`) gate Kubernetes deployments via the GHCR image tag (without
 the leading `v`, see deployment guide).
 
+## 4.4.79 (2026-06-28)
+
+### Search: scope filter + visual-search privacy regression test
+
+* Confirmed and regression-locked that the visual / similarity search
+  cannot be used to discover another patient's PRIVATE study. Every
+  search surface (`/search`, `/search/hybrid`, `/search/semantic`,
+  `/similar-to`) already filters the embedding KNN through
+  `visible_studies_filter` (anonymous → only `is_public`; authenticated →
+  own + public + OpenData + grants). A new test gives user A's private
+  study the vector NEAREST to user B's source and asserts B still does not
+  receive it, and cannot even anchor a search on A's private series id
+  (404). The owner seeing his own managed patient's exam is correct.
+* `scope = all | public | mine | shared` on `/search`, `/search/hybrid`
+  and `/similar-to` (and the MCP `similar_to` tool). New `shared` scope =
+  studies visible only via a grant (not owned, not public), built from the
+  same grant subqueries as the auth filter so the two never drift. Scope
+  can only narrow the auth-allowed set, never widen it. No migration.
+  (The tier badges + scope selector on the Visual Search page are a
+  tracked frontend follow-up; `contribution_tier` is already in every
+  result.)
+
 ## 4.4.78 (2026-06-28)
 
 ### De-identification provenance for OpenData studies
