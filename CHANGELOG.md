@@ -5,6 +5,29 @@ project follows semantic versioning; pre-release suffixes (`alpha`,
 `beta`) gate Kubernetes deployments via the GHCR image tag (without
 the leading `v`, see deployment guide).
 
+## 4.4.77 (2026-06-28)
+
+### Promote live PET-VOI measurements onto a finding
+
+* `POST /findings/{id}/promote-measurement` (and the MCP
+  `promote_finding_measurement` tool) recompute a PET Volume-of-Interest
+  server-side and materialise its radiomic numbers — SUVmax / SUVpeak /
+  SUVmean and MTV (as `volume_ml`) — onto the finding's typed measurement
+  columns, so the corpus becomes quantitatively queryable ("confirmed
+  nodules with SUVmax > 4"). The number is measured from the pixels, never
+  asserted by the caller.
+* SUV columns are filled only when the series carries a decay-corrected
+  dose; a raw-units VOI yields the volume alone (raw PET counts must not
+  masquerade as SUV). The finding's `status` is left untouched (a
+  promoted measurement stays `candidate` until a human confirms it); an
+  agent token cannot promote onto a human-authored finding; the measured
+  series must belong to the finding's study; the placed VOI marker can be
+  linked as the `measurement` geometry (idempotently). Audited via a
+  finding revision; `Idempotency-Key` + optional `If-Match`. No migration.
+* Scope: the VOI sources (the SUVmax / MTV headline) land here; ROI-stats
+  (HU) and a hot-spots → multi-finding creation flow are a tracked
+  follow-up. (Flow 2e09b6d9)
+
 ## 4.4.76 (2026-06-28)
 
 ### Ingest reliability
