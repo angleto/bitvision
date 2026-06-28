@@ -31,12 +31,15 @@ tracked follow-up (the legacy endpoint stays for ZIP-heavy uploads meanwhile).
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import json
 import uuid
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from fastapi import HTTPException
 from sqlalchemy import delete, func, or_, select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from bvphoenix.db.models import Folder, Job, Patient, Subject, UploadSession, UploadSessionFile
@@ -98,6 +101,73 @@ async def _active_session_count(db: AsyncSession, owner_subject_id: uuid.UUID) -
     )
 
 
+def _compute_idempotency_key(
+    *,
+    owner_id: uuid.UUID,
+    patient_id: uuid.UUID | None,
+    folder_id: uuid.UUID | None,
+    tier: str,
+    files: list[FileDecl],
+    keep_iso_archive: bool,
+    wrap_iso_in_folder: bool,
+    extract_iso_contents: bool,
+) -> str:
+    """Stable hash of everything that defines this upload request.
+
+    A retried ``POST /upload/sessions`` carrying the same owner, target
+    (patient/folder), tier, ISO flags and file manifest produces the
+    same key, so the partial-unique index ``ix_upload_sessions_idem_active_uniq``
+    maps the retry back to the still-active session instead of spawning a
+    second one (and, at commit, a duplicate ingest job). Keyed on the full
+    request shape rather than the task's bare owner+patient+manifest on
+    purpose: under-keying would dedup two genuinely-distinct uploads (same
+    files, different folder) onto one session — a correctness bug — whereas
+    over-keying only ever misses a dedup, degrading to today's behaviour.
+    The manifest is order-independent (sorted) so the same selection in a
+    different order is still one upload.
+    """
+    manifest = sorted(
+        (f.relative_path or "", f.filename, int(f.size), f.sha256 or "") for f in files
+    )
+    payload = json.dumps(
+        {
+            "owner": str(owner_id),
+            "patient": str(patient_id) if patient_id else None,
+            "folder": str(folder_id) if folder_id else None,
+            "tier": tier,
+            "keep_iso_archive": keep_iso_archive,
+            "wrap_iso_in_folder": wrap_iso_in_folder,
+            "extract_iso_contents": extract_iso_contents,
+            "files": manifest,
+        },
+        separators=(",", ":"),
+        sort_keys=True,
+    )
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+async def _active_session_by_idem(
+    db: AsyncSession, *, owner_subject_id: uuid.UUID, idempotency_key: str
+) -> UploadSession | None:
+    """The owner's still-active session for this idempotency key, if any.
+
+    Mirrors the WHERE of the partial-unique index (active statuses only),
+    so a key whose session has committed/aborted is free to open a fresh
+    one — re-uploading the same files later is allowed, a retry of an
+    in-flight upload is not."""
+    return (
+        await db.execute(
+            select(UploadSession)
+            .where(
+                UploadSession.owner_subject_id == owner_subject_id,
+                UploadSession.idempotency_key == idempotency_key,
+                UploadSession.status.in_(tuple(UPLOAD_SESSION_ACTIVE_STATUSES)),
+            )
+            .limit(1)
+        )
+    ).scalar_one_or_none()
+
+
 async def create_session(
     db: AsyncSession,
     *,
@@ -131,6 +201,26 @@ async def create_session(
                 },
             )
 
+    # Create-dedup: a retried "start upload" with the same request shape
+    # maps back to the still-active session. Checked BEFORE the per-owner
+    # cap so a retry never spuriously trips the 429 (it is not a new
+    # session), and the SELECT mirrors the partial-unique index's WHERE.
+    idem_key = _compute_idempotency_key(
+        owner_id=owner.id,
+        patient_id=patient.id if patient else None,
+        folder_id=folder.id if folder else None,
+        tier=tier,
+        files=files,
+        keep_iso_archive=keep_iso_archive,
+        wrap_iso_in_folder=wrap_iso_in_folder,
+        extract_iso_contents=extract_iso_contents,
+    )
+    existing = await _active_session_by_idem(
+        db, owner_subject_id=owner.id, idempotency_key=idem_key
+    )
+    if existing is not None:
+        return existing
+
     if await _active_session_count(db, owner.id) >= MAX_ACTIVE_SESSIONS_PER_OWNER:
         raise HTTPException(
             status_code=429,
@@ -154,10 +244,23 @@ async def create_session(
         declared_total_bytes=declared_total,
         received_total_bytes=0,
         scope_ids=[patient.id] if patient else None,
+        idempotency_key=idem_key,
         expires_at=datetime.now(UTC) + timedelta(hours=SESSION_TTL_HOURS),
     )
     db.add(session)
-    await db.flush()  # assign session.id for the file keys
+    try:
+        await db.flush()  # assign session.id + surface an idem-key collision
+    except IntegrityError:
+        # A concurrent identical create won the race between our SELECT
+        # above and this INSERT; the unique index rejected the second row.
+        # Return the winner instead of a duplicate.
+        await db.rollback()
+        winner = await _active_session_by_idem(
+            db, owner_subject_id=owner.id, idempotency_key=idem_key
+        )
+        if winner is not None:
+            return winner
+        raise
 
     for idx, f in enumerate(files):
         db.add(
