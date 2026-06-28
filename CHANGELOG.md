@@ -5,6 +5,28 @@ project follows semantic versioning; pre-release suffixes (`alpha`,
 `beta`) gate Kubernetes deployments via the GHCR image tag (without
 the leading `v`, see deployment guide).
 
+## 4.4.75 (2026-06-28)
+
+### Event ↔ Document reconciliation
+
+* From a clinical event you can now point at the curated documents in
+  the Drive instead of keeping isolated copies. Two ways to attach a
+  file: upload from the PC (auto-reconciled against the Drive by
+  content hash — identical bytes already curated are linked, not
+  duplicated) or "attach from Drive" (reference an existing document,
+  no re-upload).
+* The old promote-to-document stub (which minted a dangling UUID and
+  never created a Document) is replaced by a real reconcile-or-ingest
+  flow. New `clinical_event_documents` n:m link table (migration 0038)
+  replaces the 1:1 `promoted_to_document_id` column; cross-patient
+  links stay unrepresentable via the composite FK.
+* MCP gains `link_event_document` / `list_event_documents` /
+  `unlink_event_document` / `find_documents_by_content_hash`; the
+  document references payload gains the back-reference to events.
+* `scripts/backfill_event_attachment_hashes.py` hashes + auto-links the
+  pre-0038 attachments. New DB-backed CI gate runs the reconciliation
+  tests against a real Postgres before a release builds images.
+
 ## 3.10.0 (2026-05-22)
 
 ### MCP token efficiency + scope-aligned tool listing

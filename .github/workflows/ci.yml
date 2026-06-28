@@ -41,6 +41,42 @@ jobs:
           uv run python ../scripts/lint_phi_safe.py
           uv run pytest
 
+  backend-db-test:
+    name: Backend DB-backed tests
+    runs-on: ubuntu-latest
+    # ``backend-test`` runs without a database, so its ``pytest`` skips
+    # everything guarded by ``skip_if_no_db``. This job stands up a real
+    # pgvector DB, applies the full migration chain (``alembic upgrade
+    # head`` — which also loads the seeded catalog via 0001) and runs the
+    # DB-backed feature tests so a tagged release is gated on them.
+    # Mirrors the ``search-eval`` service block.
+    services:
+      postgres:
+        image: pgvector/pgvector:pg16
+        env:
+          POSTGRES_USER: bvphoenix
+          POSTGRES_PASSWORD: bvphoenix
+          POSTGRES_DB: bvphoenix
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U bvphoenix"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+    env:
+      BVP_DATABASE_URL: postgresql+asyncpg://bvphoenix:bvphoenix@localhost:5432/bvphoenix
+      BVP_DATABASE_URL_SYNC: postgresql+psycopg://bvphoenix:bvphoenix@localhost:5432/bvphoenix
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+      - name: Migrate + run DB-backed feature tests
+        working-directory: backend
+        run: |
+          uv sync --extra dev
+          uv run alembic upgrade head
+          uv run pytest tests/test_clinical_event_documents.py -q
+
   search-eval:
     name: Search relevance gate
     runs-on: ubuntu-latest
@@ -151,7 +187,7 @@ jobs:
     # multi-arch fan-out is ever needed — would have to re-add
     # ``docker/setup-qemu-action`` in that case.
     runs-on: ubuntu-24.04-arm
-    needs: [backend-test, search-eval, frontend-build]
+    needs: [backend-test, backend-db-test, search-eval, frontend-build]
     if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
     env:
       # Push credential for rg.fr-par.scw.cloud (IAM application
