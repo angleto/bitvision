@@ -5,6 +5,27 @@ project follows semantic versioning; pre-release suffixes (`alpha`,
 `beta`) gate Kubernetes deployments via the GHCR image tag (without
 the leading `v`, see deployment guide).
 
+## 4.4.76 (2026-06-28)
+
+### Ingest reliability
+
+* Resumable uploads are now idempotent on retry. A repeated "start
+  upload" with the same owner, target and file manifest maps back to
+  the still-active session instead of opening a second one — and, since
+  each session has its own staging prefix, a duplicate ingest job at
+  commit. The partial-unique index that guards this already existed but
+  was never fed: `create_session` now derives the key from the full
+  request shape and resolves a retry (race-safe, before the per-owner
+  session cap) to the live session. No migration. (Flow ac9731ed)
+* A blob uploaded to object storage before its database row is committed
+  is no longer orphaned when the ingest transaction rolls back. The
+  non-DICOM document upload paths (`bulk_ingest`, `ingest_document_blob`)
+  now stage the object against the transaction via a shared helper: a
+  rollback best-effort deletes the key, a commit keeps it. The cleanup
+  is anchored to the session's transaction outcome, so it covers both
+  the caller that owns its commit and the one whose caller commits
+  later. Keys never leave the backend. (Flow 4c4c6a7a)
+
 ## 4.4.75 (2026-06-28)
 
 ### Event ↔ Document reconciliation
