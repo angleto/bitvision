@@ -77,15 +77,21 @@ sources:
   (a 3-subject smoke set via `--only`); a bulk run clears PILOT.
 - `exclude_body_parts` filters series by `BodyPartExamined` (upper-cased)
   before download — used for the otherwise-CC-BY CMB collections.
-- As of 2026-06-28 the active set is 45 collections (license SPDX +
+- As of 2026-06-28 the active set is 109 collections (license SPDX +
   canonical TCIA citation verified against the live collection page + DOI,
   and each confirmed present in the NBIA v1 `getCollectionValues`),
-  projecting to ~29k public studies (~26.9k commercial-eligible).
+  projecting to ~47.5k public studies. Two multi-agent classification waves
+  swept the whole 154-collection NBIA v1 catalog. Rejected as NIH/TCIA
+  Controlled: the pediatric NCTN trials (ACNS0332, AHEP0731, AHOD0831,
+  ARAR0331, AREN053x, A091105, CALGB50303, S0819), ACRIN-HNSCC-FDG-PET-CT,
+  and mixed-license LDCT-and-Projection-data.
 - A `GATED` block holds verified-eligible collections kept **off** by
   choice: the synthetic `VICTRE` phantom set, the large NC
   `Breast-Cancer-Screening-DBT`, and the `Pseudo-PHI-DICOM-Data` teaching
   set (designed to contain pseudo-PHI). Uncomment + move into `sources:` to
-  activate.
+  activate. Separate documented blocks list **non-patient** data (phantoms,
+  animal models) and **pseudo-PHI** teaching sets that are verified-CC but
+  not real patient cases, so deliberately not active.
 - A `NOT ON NBIA v1` block holds collections verified to exist + be
   CC-licensed on the TCIA *website* but ABSENT from the NBIA v1 REST API
   this adapter uses (`getPatient` returns an empty body): `NLST`,
