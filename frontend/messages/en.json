@@ -1581,6 +1581,22 @@
     "searchWholeStudy": "Search the whole study",
     "pickDifferentReference": "Pick a different reference"
   },
+  "deidentificationProvenance": {
+    "title": "Text de-identification record",
+    "loading": "Loading…",
+    "loadError": "Could not load the de-identification record.",
+    "noneRedacted": "No text redactions were recorded for this study.",
+    "summary": "{total} redactions across {notes} clinical note(s).",
+    "colCategory": "Category",
+    "colCount": "Count",
+    "catCodiceFiscale": "Italian tax code",
+    "catEmail": "Email",
+    "catPhone": "Phone",
+    "catDatePrecise": "Precise date",
+    "catAddress": "Address",
+    "catLlmScrub": "LLM scrub",
+    "catManual": "Manual"
+  },
   "studyLicense": {
     "publicDataset": "Public Dataset",
     "cite": "cite",
