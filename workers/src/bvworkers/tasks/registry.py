@@ -27,6 +27,7 @@ from bvworkers.tasks.embed_text_multilingual import embed_text_ml
 from bvworkers.tasks.entity_extraction import extract_document_entities
 from bvworkers.tasks.export_gdpr import export_gdpr_zip
 from bvworkers.tasks.export_patient import export_patient_zip
+from bvworkers.tasks.export_segmentation_seg import export_segmentation_seg_dicom
 from bvworkers.tasks.export_study import export_study_zip
 from bvworkers.tasks.generate_summary import generate_summary
 from bvworkers.tasks.inbox import (
@@ -73,6 +74,7 @@ FUNCTIONS = [
     export_gdpr_zip,
     export_patient_zip,
     export_study_zip,
+    export_segmentation_seg_dicom,
     prefetch_series,
     reconcile_missing_embeddings,
     reindex_batch,

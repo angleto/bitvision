@@ -20,6 +20,7 @@ from .conftest import TEST_TOKEN, mock_backend
 EXPORTS_TOOL_NAMES = {
     "export_fascicolo",
     "export_study",
+    "export_segmentation_dicom_seg",
     "export_folder",
     "bulk_download",
     "export_health_record_bundle",

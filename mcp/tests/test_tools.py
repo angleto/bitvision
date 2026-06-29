@@ -798,6 +798,7 @@ EXPECTED_TOOL_NAMES = {
     # api/auth.py (download-token). The OTP->curl flow.
     "export_fascicolo",
     "export_study",
+    "export_segmentation_dicom_seg",
     "export_folder",
     "bulk_download",
     "export_health_record_bundle",

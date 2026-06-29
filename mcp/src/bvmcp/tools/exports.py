@@ -132,6 +132,35 @@ TOOLS: list[Tool] = [
         },
     ),
     Tool(
+        name="export_segmentation_dicom_seg",
+        annotations=ToolAnnotations(
+            title="Export a segmentation as DICOM SEG (job)",
+            readOnlyHint=False,
+            destructiveHint=False,
+            idempotentHint=True,
+            openWorldHint=False,
+        ),
+        description=(
+            "Enqueue a Job that renders a stored segmentation mask as a "
+            "conformant, geo-referenced DICOM SEG object (references the source "
+            "series; openable in 3D Slicer / OHIF / MONAI — unlike the raw mask). "
+            "Returns a Job descriptor — poll get_job, then issue_download_token to "
+            "fetch the .dcm off-platform. Identify the mask by its series_id + "
+            "label (see get_segmentations)."
+        ),
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "series_id": {"type": "string", "description": "UUID of the series."},
+                "label": {
+                    "type": "string",
+                    "description": "Segmentation label within the series (from get_segmentations).",
+                },
+            },
+            "required": ["series_id", "label"],
+        },
+    ),
+    Tool(
         name="export_folder",
         annotations=ToolAnnotations(
             title="Export the contents of a folder (job)",
@@ -352,6 +381,12 @@ async def _export_study(args: dict[str, Any]) -> str:
     return await _enqueue(f"/api/studies/{args['study_id']}/export", body)
 
 
+async def _export_segmentation_dicom_seg(args: dict[str, Any]) -> str:
+    return await _enqueue(
+        f"/api/series/{args['series_id']}/segmentations/{args['label']}/dicom-seg/export", {}
+    )
+
+
 async def _export_folder(args: dict[str, Any]) -> str:
     body = _export_body(args)
     if args.get("include_study_ids") is not None:
@@ -437,6 +472,7 @@ async def _issue_download_token(args: dict[str, Any]) -> str:
 _DISPATCH = {
     "export_fascicolo": _export_fascicolo,
     "export_study": _export_study,
+    "export_segmentation_dicom_seg": _export_segmentation_dicom_seg,
     "export_folder": _export_folder,
     "bulk_download": _bulk_download,
     "export_health_record_bundle": _export_health_record_bundle,
