@@ -626,6 +626,7 @@ EXPECTED_TOOL_NAMES = {
     "restore_finding",
     "add_finding_geometry",
     "promote_finding_measurement",
+    "create_findings_from_hot_spots",
     # --- Lesion tracks — longitudinal lesion follow-up ---
     "list_lesion_tracks",
     "get_lesion_track",

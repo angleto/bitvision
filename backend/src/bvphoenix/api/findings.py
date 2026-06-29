@@ -55,11 +55,14 @@ from bvphoenix.api.markers import (
 )
 from bvphoenix.api.pet_voi import load_pet_volume
 from bvphoenix.api.studies._shared import (
+    HotSpot,
+    HotSpotsIn,
     MeasureVolumeIn,
     ROIStatsIn,
     ROIStatsOut,
     _meta_for_series,
 )
+from bvphoenix.api.studies.bulk import compute_hot_spots_core
 from bvphoenix.api.studies.roi_stats import compute_roi_stats_core
 from bvphoenix.auth import require_user
 from bvphoenix.db.models import (
@@ -72,6 +75,7 @@ from bvphoenix.db.models import (
     Marker,
     MorphologyTerm,
     Segmentation,
+    Series,
     User,
 )
 from bvphoenix.db.session import get_db
@@ -628,6 +632,24 @@ def _volume_to_measurements(vol: dict[str, Any]) -> dict[str, float | None]:
         "short_axis_mm": extents[1],
         "volume_ml": float(vol["volume_ml"]),
     }
+
+
+def _hot_spot_signature(spot: HotSpot) -> str:
+    """Stable identity of a detected spot within a series — used to make
+    finding creation idempotent across re-runs (same threshold ⇒ same
+    component bbox/centroid ⇒ same signature ⇒ no duplicate finding)."""
+    return f"{spot.centroid_ijk}|{spot.bbox_min_ijk}|{spot.bbox_max_ijk}"
+
+
+def _hot_spot_to_measurements(spot: HotSpot) -> dict[str, float | None]:
+    """Connected-component volume always; SUV columns only when the series
+    carried a decay-corrected dose (raw PET counts must not pose as SUV)."""
+    measurements: dict[str, float | None] = {"volume_ml": spot.volume_ml}
+    if spot.suv_max is not None:
+        measurements["suv_max"] = spot.suv_max
+        measurements["suv_peak"] = spot.suv_peak
+        measurements["suv_mean"] = spot.suv_mean
+    return measurements
 
 
 async def _apply_promoted_measurements(
@@ -1265,6 +1287,160 @@ async def promote_finding_measurement(
         status_code=status.HTTP_200_OK,
         extra_headers={"ETag": format_etag(str(f.etag))},
     )
+
+
+class FindingsFromHotSpotsIn(BaseModel):
+    """Run the hot-spot lesion finder on a series and create one candidate
+    finding per detected spot."""
+
+    hot_spots: HotSpotsIn
+    type: str = Field(min_length=1, max_length=64, description="finding type vocab key")
+    confidence: float | None = Field(default=None, ge=0.0, le=1.0)
+
+
+class FindingsFromHotSpotsOut(BaseModel):
+    created: list[FindingOut]
+    skipped_existing: int
+    total_spots: int
+
+
+@router.post("/series/{series_id}/findings-from-hot-spots", response_model=FindingsFromHotSpotsOut)
+async def create_findings_from_hot_spots(
+    request: Request,
+    series_id: uuid.UUID,
+    body: FindingsFromHotSpotsIn,
+    db: Annotated[AsyncSession, Depends(get_db)],
+    user: Annotated[User, Depends(require_user)],
+    audit: AuditDep,
+    idem: Annotated[IdempotencyContext, Depends(idempotent)],
+) -> FindingsFromHotSpotsOut | JSONResponse:
+    """Detect high-uptake spots (``find_hot_spots``) and materialise one
+    ``candidate`` finding per spot — a CREATION flow, distinct from
+    promote-measurement (which writes onto ONE existing finding).
+
+    Each finding gets the spot's volume_ml (+ SUV columns when the series is
+    a dosed PET), ``author_kind='agent'`` (the lesion finder authored it), and
+    a ``bbox.lesion`` marker carrying the box + metrics, linked as the
+    finding's ``bbox`` geometry. Idempotent on the spot signature: re-running
+    detection on a series does not duplicate findings for spots already
+    materialised (same threshold ⇒ same components ⇒ same signatures). Write
+    gate is patient-level (same as create_finding). Findings stay
+    ``candidate`` for a human to confirm or retract.
+    """
+    row = (
+        await db.execute(
+            select(Series, ImagingStudy)
+            .join(ImagingStudy, ImagingStudy.id == Series.study_id)
+            .where(Series.id == series_id)
+        )
+    ).first()
+    if row is None:
+        raise HTTPException(status_code=404, detail="series not found")
+    series, study = row
+    patient = await _patient_for_write(db, request, user, study.patient_id)
+    if idem.replay is not None:
+        return idem.replay
+
+    ftype = await _resolve_type(db, body.type)
+    detected = await compute_hot_spots_core(db, series, body.hot_spots)
+    total = len(detected.spots)
+    by_sig = {_hot_spot_signature(s): s for s in detected.spots}
+
+    existing_sigs: set[str] = set()
+    if by_sig:
+        existing_sigs = set(
+            (
+                await db.execute(
+                    select(Marker.computed["signature"].astext).where(
+                        Marker.target_kind == "series",
+                        Marker.target_id == series.id,
+                        Marker.kind == "bbox.lesion",
+                        Marker.computed["signature"].astext.in_(list(by_sig.keys())),
+                    )
+                )
+            )
+            .scalars()
+            .all()
+        )
+
+    created: list[Finding] = []
+    for sig, spot in by_sig.items():
+        if sig in existing_sigs:
+            continue
+        marker = Marker(
+            patient_id=patient.id,
+            target_kind="series",
+            target_id=series.id,
+            kind="bbox.lesion",
+            author_kind="agent",
+            author_subject_id=user.subject_id,
+            model_id="hot_spots",
+            geometry={"min_ijk": spot.bbox_min_ijk, "max_ijk": spot.bbox_max_ijk},
+            computed={
+                "signature": sig,
+                "rank": spot.rank,
+                "source": "hot_spots",
+                "centroid_ijk": spot.centroid_ijk,
+                "volume_ml": spot.volume_ml,
+                "raw_max": spot.raw_max,
+                "suv_max": spot.suv_max,
+                "suv_peak": spot.suv_peak,
+                "suv_mean": spot.suv_mean,
+            },
+            etag=uuid.uuid4(),
+        )
+        db.add(marker)
+        await db.flush()
+        f = Finding(
+            patient_id=patient.id,
+            study_id=study.id,
+            series_id=series.id,
+            finding_type_id=ftype.id,
+            status="candidate",
+            author_subject_id=user.subject_id,
+            author_kind="agent",
+            model_id="hot_spots",
+            provider="bvphoenix",
+            confidence=body.confidence,
+            description=f"Auto-detected hot spot (rank {spot.rank}) from find_hot_spots.",
+            etag=uuid.uuid4(),
+            **_hot_spot_to_measurements(spot),
+        )
+        db.add(f)
+        await db.flush()
+        await _link_geometry(db, finding=f, refs=[GeometryRefIn(marker_id=marker.id, role="bbox")])
+        await _append_finding_revision(
+            db,
+            finding=f,
+            change_kind="create",
+            actor_id=user.subject_id,
+            author_kind="agent",
+            diff_summary=f"hot_spots rank {spot.rank}",
+        )
+        created.append(f)
+
+    await db.commit()
+    serialized: list[FindingOut] = []
+    for f in created:
+        await db.refresh(f)
+        await _enqueue_finding_embed(db, f)
+        serialized.append(await _serialize_one(db, f))
+
+    await audit.log(
+        action="findings_from_hot_spots",
+        actor_subject_id=user.subject_id,
+        resource_kind="series",
+        resource_id=series.id,
+        metadata={
+            "created": len(serialized),
+            "skipped": total - len(serialized),
+            "type": ftype.key,
+        },
+    )
+    result = FindingsFromHotSpotsOut(
+        created=serialized, skipped_existing=total - len(serialized), total_spots=total
+    )
+    return idem.capture(result.model_dump(), status_code=status.HTTP_201_CREATED)
 
 
 @router.delete("/findings/{finding_id}", status_code=status.HTTP_204_NO_CONTENT)

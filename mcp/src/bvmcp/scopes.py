@@ -422,6 +422,7 @@ TOOL_SCOPE: dict[str, str] = {
     "restore_finding": "findings:write",
     "add_finding_geometry": "findings:write",
     "promote_finding_measurement": "findings:write",
+    "create_findings_from_hot_spots": "findings:write",
     # Lesion tracks — longitudinal follow-up over findings; reads/writes
     # ride the findings scopes (a track is a view over the diagnosis layer).
     "list_lesion_tracks": "findings:read",
