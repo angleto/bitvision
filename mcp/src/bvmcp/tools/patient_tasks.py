@@ -203,9 +203,7 @@ TOOLS = [
                 "labels": {
                     "type": "array",
                     "items": {"type": "string"},
-                    "description": (
-                        "Free-form chip tags (e.g. ['urgente', 'CUP'])."
-                    ),
+                    "description": ("Free-form chip tags (e.g. ['urgente', 'CUP'])."),
                 },
                 "links": {
                     "type": "array",
