@@ -5,6 +5,30 @@ project follows semantic versioning; pre-release suffixes (`alpha`,
 `beta`) gate Kubernetes deployments via the GHCR image tag (without
 the leading `v`, see deployment guide).
 
+## 4.4.94 (2026-06-29)
+
+### Search: reach studies by structured fields + clinical IT/EN thesaurus
+
+* `/api/search` free-text now also matches the **structured fields** — the
+  body part and the DICOM modality code — not just study/series descriptions.
+  A study whose clinical meaning lives in its modality (e.g. a mammography with
+  a null `StudyDescription`) or body part is now reachable from the search bar.
+* Migration `0039` enriches the synonym thesaurus with a curated bilingual
+  IT↔EN + code core (anatomy, oncology, the cholangio/mammography families), so
+  an Italian query OR-expands to its English/coded equivalents:
+  `fegato`→liver, `mammografia`→{mammography, MG, breast}, `colangio`→{cholangiography, MRCP},
+  `cancro`→{cancer, carcinoma, …}. Idempotent — union-merges the existing rows.
+* Follow-ups tracked: route study/report discovery through the multilingual
+  vector arm (Phase 2); re-enable BiomedCLIP image search in prod (Phase 3).
+
+### De-identification: wire the face-risk review signal into egress gates (M6d)
+
+* When de-facing is enabled (`face_deid_enabled`), a face-risk instance
+  (head/face CT/MR/PT) is no longer auto-passed: `PixelPhiCheck` routes it to
+  human review and records the de-facer outcome, and the training-cohort export
+  excludes it alongside high-risk burned-in-pixel instances. With de-facing off
+  (default) behaviour is unchanged — no regression.
+
 ## 4.4.93 (2026-06-29)
 
 ### Findings: create candidate findings from hot spots
