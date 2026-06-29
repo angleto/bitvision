@@ -5,6 +5,21 @@ project follows semantic versioning; pre-release suffixes (`alpha`,
 `beta`) gate Kubernetes deployments via the GHCR image tag (without
 the leading `v`, see deployment guide).
 
+## 4.4.84 (2026-06-29)
+
+### OpenData: de-identification provenance panel on the study page
+
+* The per-study text de-identification record (`GET
+  /studies/{id}/deidentification-provenance`, live since 4.4.78) now has a
+  frontend: a collapsible, read-only panel on the study page (rendered
+  only when the study is public) showing the redaction counts per category
+  (Italian tax code / email / phone / precise date / address / LLM scrub),
+  the LLM model + provider when an LLM scrub ran, the totals, and the
+  load-bearing scope disclaimer — TEXT de-identification only, NOT DICOM
+  PS3.15. It is the auditable, transparent counterpart to an irreversible
+  black-box. Aggregate + storage-isolated (counts only); fetches lazily on
+  first open. en/it i18n at parity.
+
 ## 4.4.83 (2026-06-29)
 
 ### PHR-Bundle: the patient's portable health record (+ export builder fix)
