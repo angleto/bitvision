@@ -27,7 +27,7 @@ from typing import Any
 
 from mcp.types import Tool
 
-from bvmcp.tools.client import api_get, api_patch, api_post, api_post_with_headers
+from bvmcp.tools.client import api_get, api_post, api_post_with_headers
 
 TOOLS = [
     Tool(

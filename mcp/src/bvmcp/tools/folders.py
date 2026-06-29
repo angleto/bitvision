@@ -157,7 +157,7 @@ TOOLS: list[Tool] = [
             "Rename, re-parent, re-describe, or re-date a folder. Send "
             "only the fields you want to change (``exclude_unset`` "
             "semantics). Setting ``parent_folder_id`` to itself is "
-            "rejected. Pass ``description=\"\"`` or ``null`` to clear "
+            'rejected. Pass ``description=""`` or ``null`` to clear '
             "the description. Pass ``clinical_date=null`` to clear the "
             "display date (the FE falls back to ``created_at``). "
             "``created_at`` itself is system audit and remains "
