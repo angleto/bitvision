@@ -5,6 +5,20 @@ project follows semantic versioning; pre-release suffixes (`alpha`,
 `beta`) gate Kubernetes deployments via the GHCR image tag (without
 the leading `v`, see deployment guide).
 
+## 4.4.88 (2026-06-29)
+
+### DICOMweb: anonymous browse of the public OpenData library
+
+* The DICOMweb endpoints now use `public_user`, so an anonymous client can
+  run QIDO query and WADO metadata against **public (OpenData) studies**
+  with no credentials — the open-standard, point-OHIF-at-it browse path the
+  4.4.87 surface intended but blocked (the global auth gate 401'd anonymous
+  under `optional_user`). WADO **retrieve** stays gated on `download:dicom`
+  (public studies grant read/view but not file download), so anonymous
+  retrieve of a public study is a `403`, consistent with the rest of the
+  platform's `.dcm` export policy. `docs/dicomweb.md` documents the access
+  model.
+
 ## 4.4.87 (2026-06-29)
 
 ### DICOMweb read surface: QIDO-RS + WADO-RS under /api/dicom
