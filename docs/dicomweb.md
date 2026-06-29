@@ -9,8 +9,16 @@ prior inbound-only (STOW-RS) asymmetry.
 
 Point a DICOMweb client at that base URL. QIDO and WADO live under it with the
 standard PS3.18 paths. Authenticate with the same session/bearer token as the
-rest of the API; **anonymous access sees only public (OpenData) studies**, so
-the public library is browsable with no credentials.
+rest of the API.
+
+**Access model.** QIDO query and WADO metadata are open to anonymous callers
+for **public (OpenData) studies** — the public library is discoverable and
+browsable with no credentials. WADO **retrieve** (pulling the original `.dcm`
+bytes) requires the `download:dicom` permission, exactly as the rest of the
+platform's file-export does: a study owner, an admin, or a share-link grantee.
+Whether CC-licensed OpenData should additionally be anonymously *retrievable*
+(not just browsable) is a deliberate data-governance decision, tracked
+separately.
 
 ## What a client sees is what it is allowed to see
 

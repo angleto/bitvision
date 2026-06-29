@@ -248,6 +248,59 @@ async def test_cross_patient_uid_is_404_not_visible(db_session, make_user, make_
     assert all(s["0020000D"]["Value"] != [other_study.study_instance_uid] for s in bodies)
 
 
+async def _make_public(db, make_study, owner):
+    """A valid public OpenData study: set is_public + t4 + license together so
+    the ck_imaging_studies_public_tier_t4 / t4_license constraints hold."""
+    study, series = await make_study(owner)
+    study.is_public = True
+    study.contribution_tier = "t4"
+    study.license_spdx = "CC-BY-4.0"
+    study.source_collection = "test-collection"
+    db.add(study)
+    await db.flush()
+    return study, series
+
+
+@skip_if_no_db
+async def test_anonymous_qido_sees_only_public(db_session, make_user, make_study):
+    owner = await make_user()
+    public_study, _s = await _make_public(db_session, make_study, owner)
+    private_study, _s2 = await make_study(owner)  # is_public=False
+
+    # Anonymous (user=None): public_user allows the request; the visibility
+    # filter restricts results to public studies only.
+    resp = await qido_studies(_req(), db_session, None)
+    uids = {s["0020000D"]["Value"][0] for s in json.loads(resp.body)}
+    assert public_study.study_instance_uid in uids
+    assert private_study.study_instance_uid not in uids
+
+
+@skip_if_no_db
+async def test_anonymous_retrieve_public_is_403_no_download_perm(
+    db_session, make_user, make_study, monkeypatch
+):
+    owner = await make_user()
+    study, series = await _make_public(db_session, make_study, owner)
+    sop = f"1.2.{uuid.uuid4().int}"[:48]
+    await _add_instance(db_session, series, sop, key="k-pub")
+    monkeypatch.setattr(api_dw, "get_s3_storage", lambda: _FakeStorage({"k-pub": b"x"}))
+
+    # Public studies grant READ_METADATA/READ_PIXELS but NOT DOWNLOAD_DICOM:
+    # anonymous can browse + read metadata, but pulling the .dcm is gated.
+    with pytest.raises(HTTPException) as ei:
+        await wado_instance(
+            study.study_instance_uid,
+            series.series_instance_uid,
+            sop,
+            _req(),
+            db_session,
+            None,
+            _StubAudit(),
+            grant=None,
+        )
+    assert ei.value.status_code == 403
+
+
 @skip_if_no_db
 async def test_wado_instance_retrieve_is_byte_identical(
     db_session, make_user, make_study, monkeypatch

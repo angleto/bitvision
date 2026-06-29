@@ -34,7 +34,8 @@ from fastapi.responses import JSONResponse, StreamingResponse
 from sqlalchemy import Select, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from bvphoenix.auth import active_share_grant, optional_user, require_scope_if_agent
+from bvphoenix.auth import active_share_grant, require_scope_if_agent
+from bvphoenix.auth.deps import public_user
 from bvphoenix.config import get_settings
 from bvphoenix.db.models import Grant, ImagingStudy, Instance, Series, User
 from bvphoenix.db.session import get_db
@@ -195,7 +196,7 @@ async def _study_counts(
 async def qido_studies(
     request: Request,
     db: Annotated[AsyncSession, Depends(get_db)],
-    user: Annotated[User | None, Depends(optional_user)],
+    user: Annotated[User | None, Depends(public_user)],
     _scope: None = _AGENT_READ,
 ) -> Response:
     visible = await visible_studies_filter(db, user)
@@ -234,7 +235,7 @@ async def qido_series(
     study_uid: str,
     request: Request,
     db: Annotated[AsyncSession, Depends(get_db)],
-    user: Annotated[User | None, Depends(optional_user)],
+    user: Annotated[User | None, Depends(public_user)],
     _scope: None = _AGENT_READ,
 ) -> Response:
     study = await _resolve_study(db, user, study_uid)
@@ -324,7 +325,7 @@ async def qido_series_instances(
     series_uid: str,
     request: Request,
     db: Annotated[AsyncSession, Depends(get_db)],
-    user: Annotated[User | None, Depends(optional_user)],
+    user: Annotated[User | None, Depends(public_user)],
     _scope: None = _AGENT_READ,
 ) -> Response:
     study = await _resolve_study(db, user, study_uid)
@@ -337,7 +338,7 @@ async def qido_study_instances(
     study_uid: str,
     request: Request,
     db: Annotated[AsyncSession, Depends(get_db)],
-    user: Annotated[User | None, Depends(optional_user)],
+    user: Annotated[User | None, Depends(public_user)],
     _scope: None = _AGENT_READ,
 ) -> Response:
     study = await _resolve_study(db, user, study_uid)
@@ -439,7 +440,7 @@ async def wado_study(
     study_uid: str,
     request: Request,
     db: Annotated[AsyncSession, Depends(get_db)],
-    user: Annotated[User | None, Depends(optional_user)],
+    user: Annotated[User | None, Depends(public_user)],
     audit: AuditDep,
     grant: Annotated[Grant | None, Depends(active_share_grant)] = None,
     _scope: None = _AGENT_IMAGES,
@@ -455,7 +456,7 @@ async def wado_series(
     series_uid: str,
     request: Request,
     db: Annotated[AsyncSession, Depends(get_db)],
-    user: Annotated[User | None, Depends(optional_user)],
+    user: Annotated[User | None, Depends(public_user)],
     audit: AuditDep,
     grant: Annotated[Grant | None, Depends(active_share_grant)] = None,
     _scope: None = _AGENT_IMAGES,
@@ -472,7 +473,7 @@ async def wado_instance(
     sop_uid: str,
     request: Request,
     db: Annotated[AsyncSession, Depends(get_db)],
-    user: Annotated[User | None, Depends(optional_user)],
+    user: Annotated[User | None, Depends(public_user)],
     audit: AuditDep,
     grant: Annotated[Grant | None, Depends(active_share_grant)] = None,
     _scope: None = _AGENT_IMAGES,
@@ -519,7 +520,7 @@ async def _metadata(
 async def wado_study_metadata(
     study_uid: str,
     db: Annotated[AsyncSession, Depends(get_db)],
-    user: Annotated[User | None, Depends(optional_user)],
+    user: Annotated[User | None, Depends(public_user)],
     grant: Annotated[Grant | None, Depends(active_share_grant)] = None,
     _scope: None = _AGENT_READ,
 ) -> Response:
@@ -531,7 +532,7 @@ async def wado_series_metadata(
     study_uid: str,
     series_uid: str,
     db: Annotated[AsyncSession, Depends(get_db)],
-    user: Annotated[User | None, Depends(optional_user)],
+    user: Annotated[User | None, Depends(public_user)],
     grant: Annotated[Grant | None, Depends(active_share_grant)] = None,
     _scope: None = _AGENT_READ,
 ) -> Response:
@@ -546,7 +547,7 @@ async def wado_instance_metadata(
     series_uid: str,
     sop_uid: str,
     db: Annotated[AsyncSession, Depends(get_db)],
-    user: Annotated[User | None, Depends(optional_user)],
+    user: Annotated[User | None, Depends(public_user)],
     grant: Annotated[Grant | None, Depends(active_share_grant)] = None,
     _scope: None = _AGENT_READ,
 ) -> Response:
