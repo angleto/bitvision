@@ -21,11 +21,57 @@ from sqlalchemy import delete, select
 from bvphoenix.api.findings import (
     PromoteMeasurementIn,
     _apply_promoted_measurements,
+    _roi_stats_to_measurements,
     _voi_metrics_to_measurements,
+    _volume_to_measurements,
 )
+from bvphoenix.api.studies._shared import ROIStatsIn, ROIStatsOut
 from bvphoenix.db.models import Finding, FindingGeometry, FindingRevision, FindingType, Marker
 from bvphoenix.services.pet_voi import VoiMetrics
 from tests.conftest import skip_if_no_db
+
+
+def _roi_out(**over) -> ROIStatsOut:
+    base: dict = {
+        "voxel_count": 100,
+        "mean": 42.0,
+        "std": 7.5,
+        "min": 10.0,
+        "max": 88.0,
+        "peak_1cm3": 80.0,
+        "suv_mean": None,
+        "suv_sd": None,
+        "suv_max": None,
+        "suv_peak": None,
+        "suv_variant_used": None,
+        "units_native": None,
+    }
+    base.update(over)
+    return ROIStatsOut(**base)
+
+
+def test_roi_stats_mapping_hu_path_when_no_suv() -> None:
+    # CT (no SUV variant): native mean/std land in the HU columns.
+    out = _roi_stats_to_measurements(_roi_out(mean=-45.0, std=12.0, units_native="HU"))
+    assert out == {"hu_mean": -45.0, "hu_std": 12.0}
+    assert "suv_max" not in out
+
+
+def test_roi_stats_mapping_suv_path_excludes_hu() -> None:
+    # PET ROI with a resolved SUV variant: write only suv_* (a number in
+    # hu_mean is asserted to be HU, so it must not carry Bq/mL).
+    out = _roi_stats_to_measurements(
+        _roi_out(suv_max=6.1, suv_peak=5.5, suv_mean=4.0, units_native="BQML")
+    )
+    assert out == {"suv_max": 6.1, "suv_peak": 5.5, "suv_mean": 4.0}
+    assert "hu_mean" not in out
+
+
+def test_measure_volume_mapping_longest_short_volume() -> None:
+    # extent (dx, dy, dz) in mm → longest = max, short = median, volume_ml.
+    out = _volume_to_measurements({"extent_mm": [12.0, 30.0, 4.0], "volume_ml": 1.44})
+    assert out == {"longest_diameter_mm": 30.0, "short_axis_mm": 12.0, "volume_ml": 1.44}
+
 
 # ---------------------------------------------------------------------------
 # Pure: VOI metrics → finding measurement columns
@@ -83,6 +129,28 @@ def test_schema_voi_threshold_requires_seed_and_threshold() -> None:
             source="voi_threshold",
             seed_mm={"x": 1.0, "y": 2.0, "z": 3.0},  # type: ignore[arg-type]
         )
+
+
+def test_schema_roi_stats_requires_roi() -> None:
+    with pytest.raises(ValidationError):
+        PromoteMeasurementIn(series_id=uuid.uuid4(), source="roi_stats")
+    ok = PromoteMeasurementIn(
+        series_id=uuid.uuid4(),
+        source="roi_stats",
+        roi={"kind": "rectangle", "min_ijk": [0, 0, 0], "max_ijk": [4, 4, 4]},  # type: ignore[arg-type]
+    )
+    assert ok.roi is not None
+
+
+def test_schema_measure_volume_requires_volume() -> None:
+    with pytest.raises(ValidationError):
+        PromoteMeasurementIn(series_id=uuid.uuid4(), source="measure_volume")
+    ok = PromoteMeasurementIn(
+        series_id=uuid.uuid4(),
+        source="measure_volume",
+        volume={"p0": {"i": 0, "j": 0, "k": 0}, "p1": {"i": 4, "j": 4, "k": 2}},  # type: ignore[arg-type]
+    )
+    assert ok.volume is not None
 
 
 # ---------------------------------------------------------------------------
@@ -161,6 +229,63 @@ async def test_apply_materializes_columns_anchors_series_and_revisions(
     assert rev.author_kind == "agent"
 
     await _cleanup(db_session, finding_id=f.id)
+
+
+@skip_if_no_db
+async def test_compute_roi_stats_core_reads_packed_volume(
+    db_session, make_user, make_study, monkeypatch
+) -> None:
+    """The extracted core computes numpy-precise stats over the packed volume
+    (so the roi_stats promotion source measures the same number the route
+    does). Verifies the refactor didn't change the math."""
+    import numpy as np
+
+    from bvphoenix.api.studies import roi_stats as roi_mod
+    from bvphoenix.db.models import Derivative
+    from bvphoenix.services.volumes import DERIVATIVE_FORMAT, DERIVATIVE_KIND, HEADER_STRUCT
+
+    owner = await make_user()
+    study, series = await make_study(owner, modality="CT")
+
+    # Known volume: arr[z,y,x] = z*100 + y*10 + x over a 4x3x2 grid.
+    nz, ny, nx = 2, 3, 4
+    arr = np.fromfunction(lambda z, y, x: z * 100 + y * 10 + x, (nz, ny, nx), dtype=np.float32)
+    header = HEADER_STRUCT.pack(nx, ny, nz, 1.0, 1.0, 1.0, float(arr.min()), float(arr.max()))
+    packed = header + arr.tobytes()
+
+    db_session.add(
+        Derivative(
+            series_id=series.id,
+            kind=DERIVATIVE_KIND,
+            format=DERIVATIVE_FORMAT,
+            stack_index=0,
+            s3_bucket="bv-test",
+            s3_key="vol-roi",
+        )
+    )
+    await db_session.flush()
+
+    class _FakeStorage:
+        def get_object_bytes(self, *, bucket: str, key: str) -> bytes:
+            return packed
+
+    monkeypatch.setattr(roi_mod, "get_s3_storage", lambda: _FakeStorage())
+
+    out = await roi_mod.compute_roi_stats_core(
+        db_session,
+        series,
+        ROIStatsIn(kind="rectangle", min_ijk=[0, 0, 0], max_ijk=[nx - 1, ny - 1, nz - 1]),
+    )
+    assert out.voxel_count == arr.size
+    assert out.mean == pytest.approx(float(arr.mean()))
+    assert out.std == pytest.approx(float(arr.std()))
+    assert out.max == pytest.approx(float(arr.max()))
+    # No SUV variant requested → suv columns stay None (CT path → hu_*).
+    assert out.suv_max is None
+    assert _roi_stats_to_measurements(out) == {"hu_mean": out.mean, "hu_std": out.std}
+
+    await db_session.execute(delete(Finding).where(Finding.study_id == study.id))
+    await db_session.commit()
 
 
 @skip_if_no_db

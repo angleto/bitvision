@@ -12,45 +12,28 @@ from bvphoenix.api.studies._shared import *  # noqa: F403
 router = APIRouter()
 
 
-@router.post("/series/{series_id}/roi-stats", response_model=ROIStatsOut)
-async def compute_series_roi_stats(
-    series_id: uuid.UUID,
+async def compute_roi_stats_core(
+    db: AsyncSession,
+    series: Series,
     body: ROIStatsIn,
-    db: Annotated[AsyncSession, Depends(get_db)],
-    user: Annotated[User | None, Depends(optional_user)],
-    audit: AuditDep,
 ) -> ROIStatsOut:
-    """Compute deterministic ROI statistics for a series volume.
+    """Deterministic ROI statistics over a series' packed Float32 volume.
 
-    Server-side complement to the client-side cornerstone3D stats:
-    the viewer label uses the JS computation for instant feedback,
-    this endpoint provides the audit-traceable, numpy-precise number
-    that ends up in the report. The two should agree to within
-    floating-point rounding (no resampling on either side — both read
-    the same packed Float32 volume).
+    The numpy-precise compute, factored out of the route handler so the
+    finding measurement-promotion path (``POST /findings/{id}/promote-
+    measurement`` with ``source='roi_stats'``) can re-run the *same* number
+    server-side. No new math — this is the route body verbatim, minus auth
+    (the caller checks ``READ_PIXELS``) and audit. Raises ``HTTPException``
+    (422/409/413) for bad inputs or a cold cache, exactly as the route did.
 
-    Permission: ``READ_PIXELS`` on the parent study, same gate as
-    ``GET /series/{id}/volume.raw`` since the operation reads pixel
-    data. Storage isolation preserved: the bucket / S3 key never
-    appear in the response.
+    Memory-sensitive: the packed buffer (100-500 MB) and its numpy views are
+    explicitly released before returning so the resident set doesn't climb
+    request-after-request (glibc arena retention) into a later OOMKill.
     """
     import numpy as np
 
     from bvphoenix.services.memory import release_memory
     from bvphoenix.services.volumes import MAX_VOLUME_BYTES
-
-    row = (
-        await db.execute(
-            select(Series, ImagingStudy)
-            .join(ImagingStudy, ImagingStudy.id == Series.study_id)
-            .where(Series.id == series_id)
-        )
-    ).first()
-    if row is None:
-        raise HTTPException(status_code=404, detail="series not found")
-    series, study = row
-    if not await can(db, user=user, action=READ_PIXELS, study=study):
-        raise HTTPException(status_code=404, detail="series not found")
 
     # Shape-specific input validation. Sphere uses center+radius; the
     # other two use the bbox. Reject the wrong combination early so we
@@ -82,7 +65,6 @@ async def compute_series_roi_stats(
     # we 409 and tell the caller to warm the cache by GET-ing
     # ``volume.raw`` first. The viewer already does this on series
     # mount, so a cache miss is a sign the caller skipped the warm-up.
-    settings = get_settings()
     storage = get_s3_storage()
     derivative = (
         await db.execute(
@@ -109,7 +91,6 @@ async def compute_series_roi_stats(
             status_code=413,
             detail="volume too large to sample on this server",
         )
-    del settings  # unused but kept for symmetry with screenshot endpoint
 
     nx, ny, nz, sx, sy, sz, _vmin, _vmax = HEADER_STRUCT.unpack_from(cached, 0)
     arr = np.frombuffer(cached, dtype=np.float32, offset=HEADER_STRUCT.size).reshape(
@@ -303,12 +284,6 @@ async def compute_series_roi_stats(
         del exclusion_full
     release_memory()
 
-    await audit.log(
-        action="series_roi_stats",
-        actor_subject_id=user.subject_id if user else None,
-        resource_kind="series",
-        resource_id=series.id,
-    )
     return ROIStatsOut(
         voxel_count=voxel_count,
         mean=mean,
@@ -323,3 +298,49 @@ async def compute_series_roi_stats(
         suv_variant_used=suv_variant_used,
         units_native=units_native,
     )
+
+
+@router.post("/series/{series_id}/roi-stats", response_model=ROIStatsOut)
+async def compute_series_roi_stats(
+    series_id: uuid.UUID,
+    body: ROIStatsIn,
+    db: Annotated[AsyncSession, Depends(get_db)],
+    user: Annotated[User | None, Depends(optional_user)],
+    audit: AuditDep,
+) -> ROIStatsOut:
+    """Compute deterministic ROI statistics for a series volume.
+
+    Server-side complement to the client-side cornerstone3D stats:
+    the viewer label uses the JS computation for instant feedback,
+    this endpoint provides the audit-traceable, numpy-precise number
+    that ends up in the report. The two should agree to within
+    floating-point rounding (no resampling on either side — both read
+    the same packed Float32 volume).
+
+    Permission: ``READ_PIXELS`` on the parent study, same gate as
+    ``GET /series/{id}/volume.raw`` since the operation reads pixel
+    data. Storage isolation preserved: the bucket / S3 key never
+    appear in the response.
+    """
+    row = (
+        await db.execute(
+            select(Series, ImagingStudy)
+            .join(ImagingStudy, ImagingStudy.id == Series.study_id)
+            .where(Series.id == series_id)
+        )
+    ).first()
+    if row is None:
+        raise HTTPException(status_code=404, detail="series not found")
+    series, study = row
+    if not await can(db, user=user, action=READ_PIXELS, study=study):
+        raise HTTPException(status_code=404, detail="series not found")
+
+    out = await compute_roi_stats_core(db, series, body)
+
+    await audit.log(
+        action="series_roi_stats",
+        actor_subject_id=user.subject_id if user else None,
+        resource_kind="series",
+        resource_id=series.id,
+    )
+    return out
