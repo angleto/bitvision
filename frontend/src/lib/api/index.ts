@@ -2783,6 +2783,42 @@ export interface Consent {
   revoked_at: string | null;
 }
 
+export interface ConsentLedgerEvent {
+  at: string;
+  action: "granted" | "revoked";
+  scope: "account" | "study";
+  kind: string | null;
+  tier: string | null;
+  study_id: string | null;
+  consent_version: number | null;
+  consent_hash: string | null;
+  reason: string | null;
+}
+
+export interface ActiveStudyConsent {
+  study_id: string;
+  tier: string;
+  granted_at: string | null;
+  consent_version: number;
+  consent_hash: string;
+}
+
+export interface ConsentAsOfState {
+  account: { kind: string; granted: boolean }[];
+  active_study_consents: number;
+}
+
+export interface ConsentLedger {
+  subject_id: string;
+  generated_at: string;
+  account_consents: Consent[];
+  active_study_consents: ActiveStudyConsent[];
+  events: ConsentLedgerEvent[];
+  scope: string;
+  as_of: string | null;
+  as_of_state: ConsentAsOfState | null;
+}
+
 export interface ErasureRequest {
   id: string;
   scope: string;
@@ -2810,6 +2846,15 @@ export const gdprApi = {
    * presigned download URL on ``result_download_url``).
    */
   requestExport: () => request<import("../jobs").JobOut>("/api/gdpr/export", { method: "POST" }),
+  /**
+   * The caller's append-only consent ledger: grant/revoke history +
+   * point-in-time proof. Pass ``asOf`` (ISO-8601) for the state in
+   * effect at that instant.
+   */
+  consentLedger: (asOf?: string) =>
+    request<ConsentLedger>(
+      `/api/gdpr/consent-ledger${asOf ? `?as_of=${encodeURIComponent(asOf)}` : ""}`,
+    ),
 };
 
 // -------- embeddings admin --------

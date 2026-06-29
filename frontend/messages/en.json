@@ -1597,6 +1597,28 @@
     "catLlmScrub": "LLM scrub",
     "catManual": "Manual"
   },
+  "consentLedger": {
+    "title": "Consent history",
+    "loading": "Loading…",
+    "loadError": "Could not load the consent ledger.",
+    "noEvents": "No consent changes have been recorded yet.",
+    "summary": "{account} account consents active · {studies} studies opted into training.",
+    "colWhen": "When",
+    "colEvent": "Event",
+    "colWhat": "What",
+    "granted": "granted",
+    "revoked": "revoked",
+    "studyConsent": "Training opt-in {tier} · study {study}",
+    "versionLabel": "consent v{version}",
+    "reasonLabel": "reason: {reason}",
+    "kindTermsOfService": "Terms of Service",
+    "kindPrivacyPolicy": "Privacy Policy",
+    "kindMarketingEmail": "Marketing email",
+    "kindResearchUse": "Research use",
+    "kindCommercialUse": "Commercial use",
+    "kindAiTraining": "AI model training",
+    "kindThirdPartySharing": "Third-party sharing"
+  },
   "studyLicense": {
     "publicDataset": "Public Dataset",
     "cite": "cite",
