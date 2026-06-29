@@ -40,6 +40,7 @@ from bvphoenix.db.models import (
     ReportContent,
     User,
 )
+from bvphoenix.services.fhir_export import bundle_from_phr_bundle, dicomweb_base_url
 from bvphoenix.storage import get_s3_storage
 
 logger = logging.getLogger(__name__)
@@ -327,13 +328,22 @@ def pack_gdpr_zip(*, bundle: dict[str, Any], user: User) -> bytes:
     """Wrap the manifest dict in a self-describing ZIP.
 
     A ``README.txt`` explains scope and intentional omissions
-    (DICOM); ``manifest.json`` is the canonical payload.
+    (DICOM); ``manifest.json`` is the canonical payload;
+    ``fhir-bundle.json`` is the standards-based interop view (added,
+    not a replacement — see :mod:`bvphoenix.services.fhir_export`).
     """
+    fhir_bundle = bundle_from_phr_bundle(
+        bundle, wado_base=dicomweb_base_url(get_settings().public_frontend_url)
+    )
     buf = io.BytesIO()
     with zipfile.ZipFile(buf, "w", compression=zipfile.ZIP_DEFLATED) as zf:
         zf.writestr(
             "manifest.json",
             json.dumps(bundle, indent=2, default=str, ensure_ascii=False),
+        )
+        zf.writestr(
+            "fhir-bundle.json",
+            json.dumps(fhir_bundle, indent=2, default=str, ensure_ascii=False),
         )
         zf.writestr(
             "README.txt",
@@ -351,6 +361,12 @@ def pack_gdpr_zip(*, bundle: dict[str, Any], user: User) -> bytes:
                 "manifest schema is published at docs/phr-bundle.md and\n"
                 "docs/schemas/phr-bundle.v1.schema.json so the file can be\n"
                 "re-imported here or read by any third-party tool.\n\n"
+                "fhir-bundle.json is the same record as a FHIR R4 Bundle\n"
+                "(Patient / ImagingStudy / DiagnosticReport /\n"
+                "DocumentReference), so any FHIR-aware EHR can ingest it\n"
+                "without bespoke parsing. Images are referenced via\n"
+                "WADO-RS (ImagingStudy.endpoint); only human-attested\n"
+                "reports are marked DiagnosticReport.status=final.\n\n"
                 "DICOM pixel data is NOT included in this bundle — use the\n"
                 "per-study download endpoint or the Fascicolo export if you\n"
                 "also need the raw images.\n"

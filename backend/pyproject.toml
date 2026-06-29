@@ -177,6 +177,13 @@ dev = [
     # forthcoming FHIR / DICOMweb conformance tests). Test-only, so the
     # production API/worker images stay lean.
     "jsonschema>=4.23.0",
+    # FHIR R4(B) Pydantic models — the conformance validator for the
+    # fhir-bundle.json export (services/fhir_export.py). Test-only: the
+    # exporter emits plain dicts at runtime; the conformance test round-
+    # trips every emitted resource through the real FHIR models in CI, so
+    # a non-conformant change fails the lint+test gate without dragging
+    # the FHIR ORM into the production API/worker images.
+    "fhir.resources>=8.0.0",
 ]
 
 [build-system]

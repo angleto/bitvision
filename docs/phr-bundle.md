@@ -12,11 +12,12 @@ file with a documented schema.
 
 ## What's in it
 
-The bundle is a ZIP with two members:
+The bundle is a ZIP with three members:
 
 | Member | Purpose |
 | --- | --- |
 | `manifest.json` | The canonical payload — the full structured record. |
+| `fhir-bundle.json` | The same record as a FHIR R4 Bundle for EHR interop (see [fhir-export.md](fhir-export.md)). |
 | `README.txt` | Human-readable scope note + format/version banner. |
 
 `manifest.json` conforms to

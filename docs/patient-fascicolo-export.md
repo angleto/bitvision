@@ -42,6 +42,7 @@ the grant encodes.
 ```
 fascicolo-<name>-<patient_id>.zip
 ├── manifest.json
+├── fhir-bundle.json                         # FHIR R4 Bundle (interop view)
 ├── reports/
 │   ├── <study_id>_<version>.txt
 │   └── <study_id>_<version>.<ext>        # original blob, if any
@@ -83,6 +84,14 @@ Self-describing index of the archive:
 Each entry in the flat `reports` / `documents` arrays carries a
 `file_path` field when a blob sits alongside in the archive, so an
 importer can re-associate metadata with files without filename parsing.
+
+### `fhir-bundle.json` (root)
+
+The same record as an HL7 FHIR R4 `Bundle` (Patient / ImagingStudy /
+DiagnosticReport / DocumentReference), added so any FHIR-aware EHR can
+ingest the export without bespoke parsing. Images are referenced via
+WADO-RS and only human-attested reports are marked
+`DiagnosticReport.status = final`. See [fhir-export.md](fhir-export.md).
 
 ## Response headers
 

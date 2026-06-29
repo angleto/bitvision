@@ -59,6 +59,7 @@ from bvphoenix.db.models import (
     User,
 )
 from bvphoenix.services.deidentify import deidentify_dicom_bytes
+from bvphoenix.services.fhir_export import bundle_from_fascicolo_manifest, dicomweb_base_url
 from bvphoenix.services.file_ext import ext_for
 from bvphoenix.services.permissions import (
     DOWNLOAD_DICOM,
@@ -114,6 +115,11 @@ def _sanitize_component(name: str, *, maxlen: int = 120) -> str:
     if not cleaned.strip(" .-_"):
         return "senza-nome"
     return cleaned
+
+
+def _dicomweb_base_url() -> str:
+    """Public WADO-RS base for FHIR ImagingStudy.endpoint."""
+    return dicomweb_base_url(get_settings().public_frontend_url)
 
 
 def _study_label(s: ImagingStudy) -> str:
@@ -708,6 +714,15 @@ async def build_export_zip(
             "manifest.json",
             json.dumps(manifest, indent=2, ensure_ascii=False),
         )
+        zf.writestr(
+            "fhir-bundle.json",
+            json.dumps(
+                bundle_from_fascicolo_manifest(manifest, wado_base=_dicomweb_base_url()),
+                indent=2,
+                default=str,
+                ensure_ascii=False,
+            ),
+        )
 
     return buf.getvalue(), manifest
 
@@ -1244,6 +1259,7 @@ def _stream_zip_to_s3_sync(
     progress_q: list[int],
     parallelism: int,
     should_cancel: Callable[[], bool | Awaitable[bool]] | None = None,
+    fhir_bundle_bytes: bytes | None = None,
 ) -> int:
     """Sync core: feed stream-zip with the planned members and pipe
     its output into a single S3 multipart upload, with a
@@ -1340,6 +1356,12 @@ def _stream_zip_to_s3_sync(
         # JSON.
         yield _bytes_member("manifest.json", manifest_bytes, compress=True)
         progress_q[0] += 1
+        # Standards-based interop view, alongside (not replacing) the
+        # manifest. Built from the same plan, so it lists exactly what
+        # the archive carries.
+        if fhir_bundle_bytes is not None:
+            yield _bytes_member("fhir-bundle.json", fhir_bundle_bytes, compress=True)
+            progress_q[0] += 1
 
     try:
         result = storage.upload_iter(
@@ -1399,6 +1421,12 @@ async def stream_export_to_s3(
         layout=layout,
     )
     manifest_bytes = json.dumps(manifest, indent=2, ensure_ascii=False).encode("utf-8")
+    fhir_bundle_bytes = json.dumps(
+        bundle_from_fascicolo_manifest(manifest, wado_base=_dicomweb_base_url()),
+        indent=2,
+        default=str,
+        ensure_ascii=False,
+    ).encode("utf-8")
     bucket = settings.s3_bucket_derivatives
     # ``s3_key_override`` lets callers (study export, future kind-
     # specific exports, ...) land the artifact under their own prefix
@@ -1407,7 +1435,7 @@ async def stream_export_to_s3(
     # to the patient-wide layout used by the legacy fascicolo export.
     key = s3_key_override or export_s3_key(job_id=job_id, patient=patient)
 
-    total = len(work) + 1  # +1 for the trailing manifest.json
+    total = len(work) + 2  # +2 for the trailing manifest.json + fhir-bundle.json
     if on_progress is not None:
         await on_progress(0, total, "building_zip")
 
@@ -1462,6 +1490,7 @@ async def stream_export_to_s3(
             progress_q=progress_q,
             parallelism=settings.export_prefetch_parallelism,
             should_cancel=sync_cancel,
+            fhir_bundle_bytes=fhir_bundle_bytes,
         )
     finally:
         ticker_task.cancel()
