@@ -5,6 +5,26 @@ project follows semantic versioning; pre-release suffixes (`alpha`,
 `beta`) gate Kubernetes deployments via the GHCR image tag (without
 the leading `v`, see deployment guide).
 
+## 4.4.91 (2026-06-29)
+
+### Standards conformance: FHIR CapabilityStatement + DICOMweb conformance gate
+
+* `GET /api/fhir/metadata` now serves a FHIR R4 `CapabilityStatement` (the
+  standard capabilities interaction). Public and PHI-free. It is honest by
+  construction: it declares the resource types the export Bundle emits
+  (`Patient` / `ImagingStudy` / `DiagnosticReport` / `DocumentReference`) and
+  advertises **no** FHIR REST interactions bitvision doesn't implement —
+  bitvision *produces* FHIR Bundles and serves imaging over DICOMweb; it is
+  not a general FHIR REST server.
+* `docs/conformance.md` is the DICOMweb (QIDO-RS / WADO-RS) + FHIR conformance
+  statement. The claim is made **falsifiable in CI**
+  (`tests/test_fhir_capability.py`): the CapabilityStatement round-trips
+  through the FHIR R4B model, advertises exactly the exported resource types
+  (shared single source, so it can't drift), and every DICOMweb transaction
+  the statement claims is asserted to be a registered route — an over-claimed
+  conformance fails the gate. The proof that a patient-owned platform can hand
+  the data back, which a closed lake structurally cannot.
+
 ## 4.4.90 (2026-06-29)
 
 ### DICOMweb: WADO-RS frames/bulkdata + QIDO relational roots
