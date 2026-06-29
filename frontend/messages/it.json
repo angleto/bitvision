@@ -1597,6 +1597,28 @@
     "catLlmScrub": "Scrub LLM",
     "catManual": "Manuale"
   },
+  "consentLedger": {
+    "title": "Cronologia dei consensi",
+    "loading": "Caricamento…",
+    "loadError": "Impossibile caricare il registro dei consensi.",
+    "noEvents": "Nessuna modifica al consenso è stata ancora registrata.",
+    "summary": "{account} consensi dell'account attivi · {studies} studi inclusi nel training.",
+    "colWhen": "Quando",
+    "colEvent": "Evento",
+    "colWhat": "Cosa",
+    "granted": "concesso",
+    "revoked": "revocato",
+    "studyConsent": "Adesione al training {tier} · studio {study}",
+    "versionLabel": "consenso v{version}",
+    "reasonLabel": "motivo: {reason}",
+    "kindTermsOfService": "Termini di servizio",
+    "kindPrivacyPolicy": "Informativa sulla privacy",
+    "kindMarketingEmail": "Email marketing",
+    "kindResearchUse": "Uso per ricerca",
+    "kindCommercialUse": "Uso commerciale",
+    "kindAiTraining": "Addestramento modelli IA",
+    "kindThirdPartySharing": "Condivisione con terze parti"
+  },
   "studyLicense": {
     "publicDataset": "Dataset pubblico",
     "cite": "cita",

@@ -6,6 +6,7 @@
 
 import { useEffect, useState } from "react";
 
+import ConsentLedgerPanel from "@/components/ConsentLedgerPanel";
 import {
   ApiError,
   type Consent,
@@ -247,6 +248,9 @@ export default function PrivacySettingsPage() {
             </div>
           );
         })}
+
+        {/* Append-only grant/revoke history — the proof behind the toggles above. */}
+        <ConsentLedgerPanel />
       </section>
 
       <section style={{ marginTop: "2rem" }}>

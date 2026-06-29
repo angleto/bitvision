@@ -205,6 +205,13 @@ SCOPE_CATALOG: tuple[ScopeDef, ...] = (
         "no DICOM pixels.",
         sensitive=True,
     ),
+    ScopeDef(
+        "consent:read",
+        "Read the caller's append-only consent ledger: the grant / revoke "
+        "history of account-level GDPR consents and per-study training opt-ins, "
+        "plus point-in-time proof (GDPR Art. 7(1)). Read-only, self-scoped, no "
+        "DICOM pixels.",
+    ),
     # --- Annotations + markers ------------------------------------------------
     ScopeDef("annotations:read", "Read in-viewer markers / annotations"),
     ScopeDef("annotations:write", "Create / update / delete in-viewer markers + annotations"),
@@ -531,6 +538,7 @@ TOOL_SCOPE: dict[str, str] = {
     # an operator can grant "give me my data back" without also handing
     # over per-patient DICOM egress.
     "export_health_record_bundle": "health_record:export",
+    "get_consent_ledger": "consent:read",
     # --- Calendar transitions (FSM-checked sub-resources) ----------------
     "confirm_event": "events:write",
     "reschedule_event": "events:write",

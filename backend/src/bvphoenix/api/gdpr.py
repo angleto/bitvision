@@ -38,11 +38,14 @@ from bvphoenix.db.models import (
 from bvphoenix.db.models.gdpr import (
     CONSENT_KINDS,
     ERASURE_SCOPES,
-    REQUIRED_CONSENT_KINDS,
 )
 from bvphoenix.db.session import get_db
 from bvphoenix.services import jobs as jobs_service
 from bvphoenix.services.arq_redis import redis_settings
+from bvphoenix.services.consent_ledger import (
+    build_consent_ledger,
+    collapse_account_consents,
+)
 from bvphoenix.services.erasure import _user_has_legal_hold, execute_erasure
 
 router = APIRouter(prefix="/gdpr", tags=["gdpr"])
@@ -163,49 +166,94 @@ async def list_consents(
     user: Annotated[User, Depends(require_user)],
 ) -> list[ConsentOut]:
     rows = (
-        (
-            await db.execute(
-                select(Consent)
-                .where(Consent.user_subject_id == user.subject_id)
-                .order_by(Consent.kind, Consent.granted_at.desc())
-            )
-        )
+        (await db.execute(select(Consent).where(Consent.user_subject_id == user.subject_id)))
         .scalars()
         .all()
     )
+    # Collapse history → current state per kind. Required consents with no
+    # row surface as implicitly granted (acceptance is a precondition of
+    # account creation) so the UI checkbox reflects reality. The logic
+    # lives in one place, shared with the consent ledger.
+    return [ConsentOut(**c) for c in collapse_account_consents(rows)]
 
-    # Collapse history → current state per kind.
-    latest: dict[str, Consent] = {}
-    for row in rows:
-        if row.kind not in latest:
-            latest[row.kind] = row
 
-    out: list[ConsentOut] = []
-    for kind in CONSENT_KINDS:
-        row = latest.get(kind)
-        if row is None:
-            # Required consents are accepted implicitly at account
-            # creation (the signup flow gates on them). Surface the
-            # implicit grant so the UI checkbox reflects reality and
-            # the user is not nudged to "accept the ToS" while
-            # already using the platform. Explicit rows are persisted
-            # for new signups; for users predating that, the
-            # synthesised ``granted=true`` is the honest answer.
-            granted_default = kind in REQUIRED_CONSENT_KINDS
-            out.append(
-                ConsentOut(kind=kind, granted=granted_default, granted_at=None, revoked_at=None)
-            )
-        else:
-            granted = row.revoked_at is None
-            out.append(
-                ConsentOut(
-                    kind=kind,
-                    granted=granted,
-                    granted_at=row.granted_at.isoformat() if granted else None,
-                    revoked_at=row.revoked_at.isoformat() if row.revoked_at else None,
-                )
-            )
-    return out
+# ---- Consent ledger (Art. 7(1) demonstrable, point-in-time) ----
+
+
+class ConsentLedgerEventOut(BaseModel):
+    at: str
+    action: str  # "granted" | "revoked"
+    scope: str  # "account" | "study"
+    kind: str | None = None
+    tier: str | None = None
+    study_id: str | None = None
+    consent_version: int | None = None
+    consent_hash: str | None = None
+    reason: str | None = None
+
+
+class ActiveStudyConsentOut(BaseModel):
+    study_id: str
+    tier: str
+    granted_at: str | None
+    consent_version: int
+    consent_hash: str
+
+
+class AsOfConsentOut(BaseModel):
+    kind: str
+    granted: bool
+
+
+class ConsentAsOfStateOut(BaseModel):
+    account: list[AsOfConsentOut]
+    active_study_consents: int
+
+
+class ConsentLedgerOut(BaseModel):
+    subject_id: str
+    generated_at: str
+    account_consents: list[ConsentOut]
+    active_study_consents: list[ActiveStudyConsentOut]
+    events: list[ConsentLedgerEventOut]
+    scope: str
+    as_of: str | None = None
+    as_of_state: ConsentAsOfStateOut | None = None
+
+
+@router.get("/consent-ledger", response_model=ConsentLedgerOut)
+async def get_consent_ledger(
+    request: Request,
+    db: Annotated[AsyncSession, Depends(get_db)],
+    user: Annotated[User, Depends(require_user)],
+    as_of: str | None = None,
+) -> ConsentLedgerOut:
+    """Return the caller's append-only consent ledger: every grant and
+    revoke event (most recent first) for account-level GDPR consents and
+    per-study training opt-ins, the current state, and the currently-active
+    study consents. Derived from the authoritative consent rows that gate
+    data use, so it cannot drift from what actually governs processing.
+
+    Pass ``as_of`` (ISO-8601) for point-in-time proof of what was in effect
+    at that instant (GDPR Art. 7(1)). Self-scoped: always the calling
+    subject's own consents. Agent tokens need ``consent:read``; the gate is
+    a no-op for human sessions.
+    """
+    enforce_agent_scope(request, "consent:read")
+
+    as_of_dt: datetime | None = None
+    if as_of is not None:
+        try:
+            as_of_dt = datetime.fromisoformat(as_of)
+        except ValueError as exc:
+            raise HTTPException(
+                status_code=422, detail="as_of must be an ISO-8601 timestamp"
+            ) from exc
+        if as_of_dt.tzinfo is None:
+            as_of_dt = as_of_dt.replace(tzinfo=UTC)
+
+    ledger = await build_consent_ledger(db, user.subject_id, as_of=as_of_dt)
+    return ConsentLedgerOut.model_validate(ledger)
 
 
 # ---- Erasure request endpoint ----

@@ -28,6 +28,7 @@ from bvmcp.tools import care_phases as care_phases_tools
 from bvmcp.tools import clinical_event_attachments as clinical_event_attachments_tools
 from bvmcp.tools import clinical_events as clinical_events_tools
 from bvmcp.tools import clinical_notes as clinical_notes_tools
+from bvmcp.tools import consent as consent_tools
 from bvmcp.tools import contrast_phases as contrast_phases_tools
 from bvmcp.tools import contributions as contributions_tools
 from bvmcp.tools import document_reads as document_reads_tools
@@ -100,6 +101,7 @@ TOOL_MODULES = (
     documents_tools,
     documents_upload_tools,
     exports_tools,
+    consent_tools,
     external_identifiers_tools,
     provenance_tools,
     report_contents_tools,
