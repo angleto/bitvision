@@ -5,6 +5,31 @@ project follows semantic versioning; pre-release suffixes (`alpha`,
 `beta`) gate Kubernetes deployments via the GHCR image tag (without
 the leading `v`, see deployment guide).
 
+## 4.4.89 (2026-06-29)
+
+### FHIR R4 Bundle export (Health Record + GDPR)
+
+* Both the Health Record (Fascicolo) and GDPR/PHR exports now ship a
+  `fhir-bundle.json` next to the canonical `manifest.json` — the same
+  record as an HL7 FHIR R4 `Bundle` (Patient / ImagingStudy /
+  DiagnosticReport / DocumentReference), so any FHIR-aware EHR can ingest
+  a bitvision export with no bespoke parser. Additive: the PHR-Bundle
+  manifest stays the lossless, round-trippable payload.
+* **Patient-safety guard-rail.** `DiagnosticReport.status = final` is
+  reserved for *human-attested* reports — a `canonical_synthesis` a human
+  **signed** (a hard human-only gate) or an `original`/`derived` report a
+  human **authored and endorsed**. AI-authored (`author_kind=agent`) or
+  not-yet-attested content is `preliminary` at most and can never present
+  as a clinician-final report downstream; an `author-kind` extension (and
+  `ai-model`/`ai-provider` when an agent drafted it) preserves provenance.
+* Images are referenced via WADO-RS (`ImagingStudy.endpoint` →
+  `dicom-wado-rs` Endpoint), never inline pixels or storage URLs.
+* The exporter emits plain dicts; conformance is gated in CI by
+  `tests/test_fhir_export.py`, which round-trips every emitted resource
+  through `fhir.resources` R4B models (a test-only dependency, so the
+  production API/worker images stay free of the FHIR ORM).
+  `docs/fhir-export.md` documents the format and the guard-rail.
+
 ## 4.4.88 (2026-06-29)
 
 ### DICOMweb: anonymous browse of the public OpenData library
