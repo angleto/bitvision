@@ -5,7 +5,7 @@ project follows semantic versioning; pre-release suffixes (`alpha`,
 `beta`) gate Kubernetes deployments via the GHCR image tag (without
 the leading `v`, see deployment guide).
 
-## 4.4.94 (2026-06-29)
+## 4.4.95 (2026-06-29)
 
 ### Search: reach studies by structured fields + clinical IT/EN thesaurus
 

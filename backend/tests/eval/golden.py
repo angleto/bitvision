@@ -53,16 +53,27 @@ QUERIES: tuple[GoldenQuery, ...] = (
     GoldenQuery("stem_polmoni", "polmoni", frozenset({"evalm2"})),
     # Exact acronym preserved by the 'simple' half of the dual config.
     GoldenQuery("acronym_flair", "FLAIR", frozenset({"evalm3"})),
-    # Stem-shared term hitting two studies.
-    GoldenQuery("term_torace", "torace", frozenset({"evalm1", "evalm5"})),
+    # "torace" hits two CHEST studies by description (evalm1, evalm5) AND, via
+    # the thesaurus (torace->chest) + structured-field matching, every study
+    # whose body_part is CHEST (adds evalm2) — free text now reaches the
+    # structured fields, not just the description.
+    GoldenQuery("term_torace", "torace", frozenset({"evalm1", "evalm2", "evalm5"})),
     # Single-doc exact phrase token.
     GoldenQuery("term_contrasto", "contrasto", frozenset({"evalm1"})),
     # Structured filter, no free text: every CT study, nothing else.
     GoldenQuery("filter_ct", None, frozenset({"evalm1", "evalm2"}), modality="CT"),
-    # Synonym expansion: the corpus says "TC"; the English acronym "CT"
-    # only matches via the thesaurus (TC <-> CT). Requires the harness to
-    # have loaded the thesaurus.
-    GoldenQuery("synonym_ct", "CT", frozenset({"evalm1"})),
+    # The acronym "CT" reaches evalm1 by description (corpus says "TC", bridged
+    # by the thesaurus TC<->CT) and BOTH CT studies by the modality-code match
+    # in free text — so it converges with the structured CT filter.
+    GoldenQuery("synonym_ct", "CT", frozenset({"evalm1", "evalm2"})),
+    # Free text reaches a study whose only signal is its DICOM modality code:
+    # "mammografia" -> {mammography, MG, breast} (thesaurus) matches evalm6 by
+    # description, by modality (MG), and by body_part (BREAST). This is the
+    # user-reported scenario (an Italian term finding an MG study).
+    GoldenQuery("freetext_mammografia", "mammografia", frozenset({"evalm6"})),
+    # The English organ term reaches the BREAST study by body_part alone (its
+    # description carries no English token).
+    GoldenQuery("freetext_breast", "breast", frozenset({"evalm6"})),
 )
 
 # A foreign user issuing this query must receive ZERO of the corpus
