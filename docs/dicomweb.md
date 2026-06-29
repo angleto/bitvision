@@ -41,6 +41,11 @@ per DICOM PS3.15 before the bytes leave.
 | `GET /studies/{study}/series` | series in a study |
 | `GET /studies/{study}/series/{series}/instances` | instances in a series |
 | `GET /studies/{study}/instances` | instances in a study |
+| `GET /series` | series across all visible studies (relational root) |
+| `GET /instances` | instances across all visible studies (relational root) |
+
+The relational roots search the caller's whole visible set, scoped by the
+same patient-visibility filter as the hierarchical forms.
 
 Supported matching keys (others are ignored, not rejected):
 `StudyInstanceUID`, `SeriesInstanceUID`, `SOPInstanceUID`, `PatientID`
@@ -59,20 +64,30 @@ through the read surface.
 | `GET /studies/{study}` | all instances, `multipart/related; type="application/dicom"` |
 | `GET /studies/{study}/series/{series}` | series instances (multipart) |
 | `GET /studies/{study}/series/{series}/instances/{sop}` | one instance (multipart) |
+| `GET …/instances/{sop}/frames/{framelist}` | frame pixel data, `multipart/related` (one part per frame) |
+| `GET …/instances/{sop}/bulkdata/{tag}` | a top-level binary element, `multipart/related; type="application/octet-stream"` |
 | `GET /studies/{study}/metadata` | study metadata, `application/dicom+json` |
 | `GET /studies/{study}/series/{series}/metadata` | series metadata |
 | `GET /studies/{study}/series/{series}/instances/{sop}/metadata` | instance metadata |
 
-Retrieve serves the stored transfer syntax (no transcoding). Metadata is the
-DICOM-JSON header with pixel data excluded; it emits no `BulkDataURI`, so there
-are no dangling links.
+Retrieve serves the **stored transfer syntax** (no transcoding in this
+version). `framelist` is comma-separated, 1-based (e.g. `1` or `1,2,5`); each
+part's `Content-Type` carries the codec media type and a `transfer-syntax`
+parameter (`application/octet-stream` for uncompressed, `image/jp2`,
+`image/jls`, `image/jpeg`, `image/dicom-rle` for the encapsulated syntaxes).
+Frames make OHIF's default pixel-streaming path work; Slicer uses full-instance
+retrieve.
+
+Metadata is the DICOM-JSON header (pixel data excluded). It now wires
+`BulkDataURI`: `PixelData` points at the instance's `frames/1` resource and any
+other top-level binary element at its `bulkdata/{tag}` resource — so the links
+resolve instead of dangling.
 
 ## Not yet implemented (tracked follow-ups)
 
-* WADO-RS **frames** / **bulkdata** / **rendered** retrieval, and
-  transfer-syntax transcoding (the OHIF pixel-streaming optimization). Clients
-  that need pixels use full-instance WADO retrieve, which Slicer does natively.
-* QIDO relational roots `GET /series` and `GET /instances` (the hierarchical
-  forms above are implemented).
+* WADO-RS **rendered** (JPEG/PNG) retrieval and **transfer-syntax transcoding**
+  via `Accept` — this version serves the stored transfer syntax verbatim.
+* Nested-sequence bulkdata (the `bulkdata/{tag}` resource serves top-level
+  binary elements).
 * A formal DICOMweb conformance statement (separate task) will enumerate the
   supported attributes and options.

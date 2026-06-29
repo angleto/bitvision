@@ -371,12 +371,20 @@ async def test_wado_instance_metadata_json(db_session, make_user, make_study, mo
     monkeypatch.setattr(api_dw, "get_s3_storage", lambda: _FakeStorage({"k-meta": raw}))
 
     resp = await wado_instance_metadata(
-        study.study_instance_uid, series.series_instance_uid, sop, db_session, owner, grant=None
+        study.study_instance_uid,
+        series.series_instance_uid,
+        sop,
+        _req(),
+        db_session,
+        owner,
+        grant=None,
     )
     items = json.loads(resp.body)
     assert resp.media_type == dw.DICOM_JSON_MEDIA_TYPE
     assert len(items) == 1
     assert items[0]["00080018"]["Value"] == [sop]
+    # This synthetic instance has no Rows/PixelData, so no PixelData
+    # BulkDataURI is injected (nothing dangles).
     assert "7FE00010" not in items[0]
 
 
