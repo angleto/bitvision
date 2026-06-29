@@ -8,7 +8,7 @@
 [![License: AGPL v3](https://img.shields.io/github/license/angleto/bitvision?color=blue&label=license)](./LICENSE)
 [![CI](https://github.com/angleto/bitvision/actions/workflows/ci.yml/badge.svg?branch=v3.10)](https://github.com/angleto/bitvision/actions/workflows/ci.yml)
 [![OpenAPI drift](https://github.com/angleto/bitvision/actions/workflows/openapi-check.yml/badge.svg?branch=v3.10)](https://github.com/angleto/bitvision/actions/workflows/openapi-check.yml)
-[![Last commit](https://img.shields.io/github/last-commit/angleto/bitvision/v3.10)](https://github.com/angleto/bitvision/commits/v3.10)
+[![Last commit](https://img.shields.io/github/last-commit/angleto/bitvision/v4.4)](https://github.com/angleto/bitvision/commits/v4.4)
 [![Status: beta](https://img.shields.io/badge/status-beta-blue)](./CHANGELOG.md)
 
 <!-- stack -->
