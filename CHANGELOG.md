@@ -5,6 +5,14 @@ project follows semantic versioning; pre-release suffixes (`alpha`,
 `beta`) gate Kubernetes deployments via the GHCR image tag (without
 the leading `v`, see deployment guide).
 
+## 4.4.97 (2026-06-29)
+
+### Chore: MCP tool lint cleanup
+
+* Cosmetic-only cleanup of three MCP tool modules (quote-style normalization,
+  drop of an unused import, one-line string collapse). No behavior change;
+  affects the mcp-http image only.
+
 ## 4.4.96 (2026-06-29)
 
 ### Imaging: geometry-preserving DICOM SEG export
