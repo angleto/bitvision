@@ -16,11 +16,13 @@ from __future__ import annotations
 
 import asyncio
 import io
+import json
 import re
 import uuid
 from typing import Annotated, Any
 
 import pydicom
+from arq import create_pool
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, UploadFile, status
 from fastapi.responses import Response
 from pydantic import BaseModel
@@ -28,11 +30,14 @@ from sqlalchemy import func, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from bvphoenix.api.jobs import JobOut, cap_exceeded_to_http
 from bvphoenix.api.markers import _agent_provenance
-from bvphoenix.auth import optional_user, require_user
+from bvphoenix.auth import enforce_agent_patient_scope, optional_user, require_user
 from bvphoenix.config import get_settings
 from bvphoenix.db.models import Derivative, ImagingStudy, Instance, Segmentation, Series, User
 from bvphoenix.db.session import get_db
+from bvphoenix.services import jobs as jobs_service
+from bvphoenix.services.arq_redis import redis_settings
 from bvphoenix.services.dicom_seg_export import SegExportError, export_segmentation_seg
 from bvphoenix.services.permissions import READ_PIXELS, WRITE_ANNOTATIONS, can
 from bvphoenix.services.segmentation_import import (
@@ -373,6 +378,90 @@ async def export_segmentation_dicom_seg(
         media_type="application/dicom",
         headers={"Content-Disposition": f'attachment; filename="{label}.seg.dcm"'},
     )
+
+
+JOB_KIND_SEG_EXPORT = "segmentation_seg_export"
+_SEG_EXPORT_TTL_HOURS = 48
+
+
+@router.post(
+    "/series/{series_id}/segmentations/{label}/dicom-seg/export",
+    response_model=JobOut,
+    status_code=202,
+)
+async def export_segmentation_dicom_seg_async(
+    request: Request,
+    series_id: uuid.UUID,
+    label: str,
+    db: Annotated[AsyncSession, Depends(get_db)],
+    user: Annotated[User, Depends(require_user)],
+) -> JobOut:
+    """Enqueue an async DICOM SEG export Job whose result (an S3 artifact) is
+    downloadable off-platform via the standard job-result download token. The
+    MCP-reachable twin of the synchronous ``/dicom-seg`` route, for agents and
+    large series. Idempotent: a fresh request for the same segmentation dedups
+    onto the in-flight/recent Job."""
+    if not _LABEL_RE.match(label):
+        raise HTTPException(status_code=400, detail="invalid label")
+    _series, study = await _load_series_with_study(db, series_id)
+    enforce_agent_patient_scope(request, study.patient_id, scope="patient:images")
+    if not await can(db, user=user, action=READ_PIXELS, study=study):
+        raise HTTPException(status_code=404, detail="series not found")
+
+    seg = (
+        await db.execute(
+            select(Segmentation).where(
+                Segmentation.series_id == series_id, Segmentation.label == label
+            )
+        )
+    ).scalar_one_or_none()
+    if seg is None:
+        raise HTTPException(status_code=404, detail="segmentation not found")
+
+    canonical_input: dict[str, Any] = {"label": label, "_display_label": f"DICOM SEG: {label}"}
+    try:
+        result = await jobs_service.enqueue_or_get(
+            db,
+            kind=JOB_KIND_SEG_EXPORT,
+            owner_subject_id=user.subject_id,
+            canonical_input=canonical_input,
+            scope_ids=(seg.id,),
+            expires_in_hours=_SEG_EXPORT_TTL_HOURS,
+            is_admin=bool(user.is_admin),
+        )
+    except jobs_service.JobCapExceededError as e:
+        raise cap_exceeded_to_http(e) from e
+
+    if not result.deduped:
+        try:
+            settings = get_settings()
+            redis = await create_pool(redis_settings(settings.redis_url))
+            arq_handle = await redis.enqueue_job(
+                "export_segmentation_seg_dicom",
+                str(result.job.id),
+                str(seg.id),
+                str(user.subject_id),
+                json.dumps(canonical_input),
+            )
+            await redis.close()
+            if arq_handle is not None:
+                await jobs_service.set_arq_job_id(db, result.job.id, arq_handle.job_id)
+        except Exception as exc:
+            await jobs_service.mark_failed(
+                db, result.job.id, error={"code": "enqueue_failed", "message": str(exc)}
+            )
+            await db.commit()
+            raise HTTPException(
+                status_code=503,
+                detail={
+                    "error": "enqueue_failed",
+                    "hint": "worker queue unavailable; try again shortly",
+                },
+            ) from exc
+
+    await db.commit()
+    await db.refresh(result.job)
+    return JobOut.model_validate(result.job)
 
 
 @router.post(

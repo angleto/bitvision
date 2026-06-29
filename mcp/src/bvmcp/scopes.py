@@ -531,6 +531,7 @@ TOOL_SCOPE: dict[str, str] = {
     # any session that kicked off an export can watch it finish.
     "export_fascicolo": "fascicolo:export",
     "export_study": "fascicolo:export",
+    "export_segmentation_dicom_seg": "fascicolo:export",
     "export_folder": "fascicolo:export",
     "bulk_download": "fascicolo:export",
     "issue_download_token": "fascicolo:export",
