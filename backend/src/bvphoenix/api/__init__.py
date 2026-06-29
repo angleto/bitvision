@@ -24,6 +24,7 @@ from bvphoenix.api import consultations_compat as consultations_compat_routes
 from bvphoenix.api import contributions as contributions_routes
 from bvphoenix.api import credits as credits_routes
 from bvphoenix.api import dicom_upload as dicom_upload_routes
+from bvphoenix.api import dicomweb as dicomweb_routes
 from bvphoenix.api import display_metadata as display_metadata_routes
 from bvphoenix.api import docs as docs_routes
 from bvphoenix.api import document_catalog as document_catalog_routes
@@ -129,6 +130,7 @@ api_router.include_router(contributions_routes.router)
 api_router.include_router(internal_auth_routes.router)
 api_router.include_router(internal_inbound_email_routes.router)
 api_router.include_router(dicom_upload_routes.router)
+api_router.include_router(dicomweb_routes.router)
 api_router.include_router(display_metadata_routes.router)
 api_router.include_router(segmentations_routes.router)
 api_router.include_router(viewport_state_routes.router)
