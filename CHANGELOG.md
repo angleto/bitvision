@@ -5,6 +5,34 @@ project follows semantic versioning; pre-release suffixes (`alpha`,
 `beta`) gate Kubernetes deployments via the GHCR image tag (without
 the leading `v`, see deployment guide).
 
+## 4.4.87 (2026-06-29)
+
+### DICOMweb read surface: QIDO-RS + WADO-RS under /api/dicom
+
+* bitvision now answers DICOMweb queries and retrievals, not just STOW-RS
+  stores. Point OHIF / 3D Slicer / a PACS at `https://<host>/api/dicom` and
+  it queries (QIDO-RS, `application/dicom+json`) and pulls instances (WADO-RS
+  `multipart/related`) drop-in. A capability a closed, inbound-only,
+  irreversibly-anonymizing biobank structurally cannot offer — and the
+  foundation the FHIR bundle, the conformance statement, and the
+  bitvision↔bitvision pull connector build on.
+* **Patient scoping is the query base.** Every list is built on
+  `visible_studies_filter` and every UID resolves inside that filtered set,
+  so an out-of-scope study UID is a `404` — cross-patient access is
+  inexpressible, not merely refused. Bytes stream through the backend
+  (`iter_object`); no bucket/key/presigned URL crosses the boundary.
+  De-identification is honoured on egress (PS3.15) for share recipients and
+  T3 studies. Anonymous callers see only public OpenData studies, so the
+  public library is browsable with no credentials.
+* QIDO: `/studies`, `/studies/{s}/series`,
+  `/studies/{s}/series/{se}/instances`, `/studies/{s}/instances` with
+  matching (StudyInstanceUID / PatientID / ModalitiesInStudy / Modality /
+  StudyDate range / StudyDescription wildcard) + `limit`/`offset`. WADO
+  retrieve: study / series / instance as `multipart/related`. WADO metadata:
+  study / series / instance DICOM-JSON (pixel data excluded, no dangling
+  `BulkDataURI`). `docs/dicomweb.md` documents the surface; WADO
+  frames/bulkdata/rendered + transcoding are tracked follow-ups.
+
 ## 4.4.86 (2026-06-29)
 
 ### Consent: patient-visible append-only consent ledger + MCP tool + FE
