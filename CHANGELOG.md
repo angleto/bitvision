@@ -5,6 +5,29 @@ project follows semantic versioning; pre-release suffixes (`alpha`,
 `beta`) gate Kubernetes deployments via the GHCR image tag (without
 the leading `v`, see deployment guide).
 
+## 4.4.92 (2026-06-29)
+
+### Findings: promote ROI-stats + measure_volume measurements
+
+* The measurement-promotion endpoint (`POST /findings/{id}/promote-measurement`,
+  PET-VOI in v4.4.77) now accepts two more sources, so a finding's
+  quantitative columns are measured server-side from pixels for structural
+  ROIs too, not just PET VOIs:
+  * `roi_stats` — a bbox/sphere ROI → `hu_mean`/`hu_std` (Hounsfield on CT),
+    or the `suv_*` columns when the ROI request carries a PET `suv_variant`.
+  * `measure_volume` — two bbox corners → `longest_diameter_mm` (max extent),
+    `short_axis_mm` (median extent), `volume_ml`.
+* The ROI-stats math is now a reusable `compute_roi_stats_core` (extracted
+  from the `/series/{id}/roi-stats` route with no change to the numpy
+  computation or its memory-release behaviour), so the promotion path
+  re-runs the exact same number. Each source resolves its own series +
+  `READ_PIXELS` gate and re-asserts the series belongs to the finding's
+  study; SUV ROIs never write a PET value into the HU columns. The MCP
+  `promote_finding_measurement` tool gains both sources.
+* `status` is still left untouched (a promoted measurement stays
+  `candidate` until a human confirms it). Hot-spots → multi-finding
+  creation is a tracked follow-up of the same task.
+
 ## 4.4.91 (2026-06-29)
 
 ### Standards conformance: FHIR CapabilityStatement + DICOMweb conformance gate
