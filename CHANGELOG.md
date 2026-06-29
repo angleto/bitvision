@@ -5,6 +5,33 @@ project follows semantic versioning; pre-release suffixes (`alpha`,
 `beta`) gate Kubernetes deployments via the GHCR image tag (without
 the leading `v`, see deployment guide).
 
+## 4.4.83 (2026-06-29)
+
+### PHR-Bundle: the patient's portable health record (+ export builder fix)
+
+* **Fixed a broken export.** The GDPR Art. 20 / data-portability export
+  silently failed for every user: the builder still imported the v3-dead
+  `Report` symbol (ImportError the moment the worker ran the job) and
+  serialized a non-existent `Document.document_type` column. The builder
+  now reads `ReportContent` (with the `author_kind` human/agent trail)
+  and the real `kind_id` / `file_content_type` / `content_sha256`
+  columns, and lists soft-deleted-but-not-purged documents honestly.
+* **Formalised the format.** The export is now a self-identifying,
+  versioned open container — `bitvision.phr-bundle` — documented at
+  `docs/phr-bundle.md` with a published JSON Schema
+  (`docs/schemas/phr-bundle.v1.schema.json`) and example. A new
+  conformance test (`test_phr_bundle_conformance.py`) pins the schema's
+  `format` / `schema_version` to the code so the spec and builder cannot
+  drift, and validates the real builder output end-to-end.
+* **MCP = GUI parity.** New `export_health_record_bundle` MCP tool
+  (account-wide, no DICOM) on its own grantable `health_record:export`
+  scope, distinct from per-patient `fascicolo:export`. The
+  `POST /api/gdpr/export` route now enforces that scope for agent tokens
+  (no-op for human sessions).
+* **Discoverable.** The Settings → *Privacy & data* card and the export
+  section now name the PHR-Bundle and describe it as a portable,
+  re-importable open format.
+
 ## 4.4.82 (2026-06-28)
 
 ### Visual Search: scope + tier on the search step
