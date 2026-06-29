@@ -1,0 +1,109 @@
+{
+  "format": "bitvision.phr-bundle",
+  "schema_version": 1,
+  "exported_at": "2026-06-29T10:15:00+00:00",
+  "user": {
+    "subject_id": "4d113584-93cd-4f9e-bba5-ec40d7fe226e",
+    "email": "patient@example.com",
+    "oidc_subject": null,
+    "is_admin": false
+  },
+  "consents": [
+    {
+      "id": "1b9d6bcd-bbfd-4b2d-9b5d-ab8dfbbd4bed",
+      "kind": "research_use",
+      "granted_at": "2026-01-04T09:00:00+00:00",
+      "revoked_at": null,
+      "metadata": null
+    }
+  ],
+  "erasure_requests": [],
+  "studies": [
+    {
+      "id": "2c7a1f2e-0a1b-4c3d-9e8f-1234567890ab",
+      "study_instance_uid": "1.2.840.113619.2.55.3.604688.1.1234567890",
+      "patient_id": "0882c1d6-1111-2222-3333-444455556666",
+      "contribution_tier": "T1",
+      "is_public": false,
+      "study_description": "CT CHEST W CONTRAST",
+      "study_date": "2025-11-12",
+      "modalities": ["CT"],
+      "created_at": "2025-11-12T14:30:00+00:00"
+    }
+  ],
+  "reports": [
+    {
+      "id": "3d8038e0-280e-4d21-bfa0-63889fcd829d",
+      "clinical_event_id": "5f894798-8402-4dab-a62b-1f66a60bf9ae",
+      "authority_id": "canonical_synthesis",
+      "status": "draft",
+      "title": "CT chest summary",
+      "narrative_md": "No acute findings. Stable nodule in the right upper lobe.",
+      "author_kind": "agent",
+      "model_id": "claude-opus-4-8",
+      "provider": "anthropic",
+      "created_at": "2025-11-12T15:00:00+00:00"
+    }
+  ],
+  "markers": [
+    {
+      "id": "759d801a-7534-4a88-824a-1f3518c443e9",
+      "target_kind": "series",
+      "target_id": "9bc7a5cf-1234-5678-9abc-def012345678",
+      "kind": "ruler",
+      "geometry": { "type": "polyline", "points": [[10.0, 20.0, 5.0], [40.0, 22.0, 5.0]] },
+      "computed": { "length_mm": 30.1 },
+      "body": { "label": "nodule long axis" },
+      "created_at": "2025-11-12T15:05:00+00:00"
+    }
+  ],
+  "patients": [
+    {
+      "id": "0882c1d6-1111-2222-3333-444455556666",
+      "display_name": "Jane Doe",
+      "external_id": "MRN-00482",
+      "birth_date": "1972-03-08",
+      "sex": "F",
+      "tax_id": null,
+      "external_identifiers": [
+        { "type": "MR", "value": "MRN-00482", "system": "hospital-a" }
+      ],
+      "phone": null,
+      "email": null,
+      "address": null,
+      "blood_type": "0+",
+      "allergies": "penicillin",
+      "notes": null,
+      "managed_by_subject_id": "4d113584-93cd-4f9e-bba5-ec40d7fe226e",
+      "self_user_subject_id": null,
+      "created_at": "2025-10-01T08:00:00+00:00"
+    }
+  ],
+  "patient_documents": [
+    {
+      "id": "6ba5a5da-d275-4e74-9254-ba417861d74e",
+      "patient_id": "0882c1d6-1111-2222-3333-444455556666",
+      "document_kind": "referto",
+      "authority_id": "original",
+      "title": "Radiology report (PDF)",
+      "text": "Esame TC del torace con mezzo di contrasto...",
+      "content_type": "application/pdf",
+      "content_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "document_date": "2025-11-13",
+      "deleted_at": null,
+      "created_at": "2025-11-13T09:00:00+00:00"
+    }
+  ],
+  "audit_log": [
+    {
+      "id": "a691f811-71f7-49f6-abd1-4f6e4c421b36",
+      "action": "study.viewed",
+      "resource_kind": "imaging_study",
+      "resource_id": "2c7a1f2e-0a1b-4c3d-9e8f-1234567890ab",
+      "metadata": { "series_count": 3 },
+      "ip_address": "203.0.113.7",
+      "user_agent": "Mozilla/5.0",
+      "created_at": "2025-11-12T16:00:00+00:00"
+    }
+  ]
+}

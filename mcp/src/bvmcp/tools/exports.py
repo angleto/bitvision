@@ -215,6 +215,31 @@ TOOLS: list[Tool] = [
         },
     ),
     Tool(
+        name="export_health_record_bundle",
+        annotations=ToolAnnotations(
+            title="Export the owner's portable PHR-Bundle (job)",
+            readOnlyHint=False,
+            destructiveHint=False,
+            idempotentHint=True,
+            openWorldHint=False,
+        ),
+        description=(
+            "Enqueue an async Job that builds the token owner's PHR-Bundle "
+            "— the portable, versioned open container (format "
+            "'bitvision.phr-bundle', also the GDPR Art. 20 export) holding "
+            "the FULL structured record the platform keeps about them: "
+            "consents, owned studies, authored reports + markers, every "
+            "managed patient and their documents, and the audit log. No "
+            "DICOM pixels (use export_fascicolo / export_study for images). "
+            "Account-wide and self-scoped: takes no target id, always "
+            "exports the token's own owner. Returns a Job descriptor — poll "
+            "get_job(job_id) until status='succeeded', then "
+            "issue_download_token(job_id) for a curl-able URL. Needs the "
+            "health_record:export grant."
+        ),
+        inputSchema={"type": "object", "properties": {}},
+    ),
+    Tool(
         name="get_job",
         annotations=ToolAnnotations(
             title="Poll an async Job",
@@ -342,6 +367,13 @@ async def _bulk_download(args: dict[str, Any]) -> str:
     return await _enqueue("/api/bulk/download", body)
 
 
+async def _export_health_record_bundle(_args: dict[str, Any]) -> str:
+    # Account-wide, self-scoped: no body, no target id. The backend
+    # resolves the subject from the token and dedups concurrent retries
+    # to one in-flight job.
+    return await _enqueue("/api/gdpr/export", {})
+
+
 async def _get_job(args: dict[str, Any]) -> str:
     try:
         payload = await api_get(f"/api/jobs/{args['job_id']}")
@@ -407,6 +439,7 @@ _DISPATCH = {
     "export_study": _export_study,
     "export_folder": _export_folder,
     "bulk_download": _bulk_download,
+    "export_health_record_bundle": _export_health_record_bundle,
     "get_job": _get_job,
     "issue_download_token": _issue_download_token,
 }

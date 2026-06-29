@@ -290,10 +290,13 @@ export default function PrivacySettingsPage() {
       </section>
 
       <section style={{ marginTop: "2rem" }}>
-        <h2>Data export</h2>
+        <h2>Health Record export (PHR-Bundle)</h2>
         <p className="meta">
-          Download a ZIP archive of all personal data the platform holds about you (manifest only —
-          raw DICOM pixels are available through the per-study download endpoint).
+          Download your <strong>PHR-Bundle</strong>: a portable, versioned ZIP of every record the
+          platform holds about you (consents, studies, reports, documents, audit log). It is an
+          open, re-importable format (<code>bitvision.phr-bundle</code>) and doubles as your GDPR
+          Art. 20 export. Raw DICOM pixels are not included — use the per-study download or the
+          Fascicolo export for images.
         </p>
         <button
           type="button"

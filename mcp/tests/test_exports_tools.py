@@ -22,6 +22,7 @@ EXPORTS_TOOL_NAMES = {
     "export_study",
     "export_folder",
     "bulk_download",
+    "export_health_record_bundle",
     "get_job",
     "issue_download_token",
 }

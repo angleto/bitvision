@@ -37,7 +37,7 @@ from bvphoenix.db.models import (
     ImagingStudy,
     Marker,
     Patient,
-    Report,
+    ReportContent,
     User,
 )
 from bvphoenix.storage import get_s3_storage
@@ -46,6 +46,62 @@ logger = logging.getLogger(__name__)
 
 
 GDPR_EXPORT_SCHEMA_VERSION = 1
+
+# Self-identifying container tag. The manifest carries this so any
+# consumer (a re-import, a third-party PHR, a CI validator) can detect
+# "this is a bitvision PHR-Bundle" without sniffing the shape, and pair
+# it with ``schema_version`` to pick the right reader. The format and
+# its JSON Schema are published as an open spec in docs/phr-bundle.md +
+# docs/schemas/phr-bundle.v1.schema.json; the conformance test pins the
+# two constants to the schema's ``const`` declarations so the code and
+# the published spec can never drift silently.
+PHR_BUNDLE_FORMAT = "bitvision.phr-bundle"
+
+
+def _serialize_report(r: ReportContent) -> dict[str, Any]:
+    """Project a v3 ``ReportContent`` row into a PHR-Bundle entry.
+
+    Pure (no DB), so the conformance test can exercise the exact
+    serialization that the legacy ``Report`` dead-symbol bug silently
+    broke, without seeding a row. ``author_kind`` is surfaced so
+    AI-drafted content stays visibly distinct from human-written.
+    """
+    return {
+        "id": str(r.id),
+        "clinical_event_id": str(r.clinical_event_id),
+        "authority_id": r.authority_id,
+        "status": r.status,
+        "title": r.title,
+        "narrative_md": r.narrative_md,
+        "author_kind": r.author_kind,
+        "model_id": r.model_id,
+        "provider": r.provider,
+        "created_at": r.created_at.isoformat(),
+    }
+
+
+def _serialize_document(d: Document) -> dict[str, Any]:
+    """Project a ``Document`` row into a PHR-Bundle entry. Pure (no DB).
+
+    v3: the document "type" is the ``kind_id`` taxonomy slug (e.g.
+    'referto', 'unclassified'); the blob MIME is a separate field. Soft-
+    deleted-but-not-purged documents are still held by the platform, so
+    an honest "all your data" export lists them with ``deleted_at``
+    rather than hiding them.
+    """
+    return {
+        "id": str(d.id),
+        "patient_id": str(d.patient_id) if d.patient_id else None,
+        "document_kind": d.kind_id,
+        "authority_id": d.authority_id,
+        "title": d.title,
+        "text": d.text,
+        "content_type": d.file_content_type,
+        "content_sha256": d.content_sha256,
+        "document_date": str(d.document_date) if d.document_date else None,
+        "deleted_at": d.deleted_at.isoformat() if d.deleted_at else None,
+        "created_at": d.created_at.isoformat(),
+    }
 
 
 async def build_gdpr_bundle(db: AsyncSession, user: User) -> dict[str, Any]:
@@ -56,6 +112,7 @@ async def build_gdpr_bundle(db: AsyncSession, user: User) -> dict[str, Any]:
     the zip cost.
     """
     bundle: dict[str, Any] = {
+        "format": PHR_BUNDLE_FORMAT,
         "schema_version": GDPR_EXPORT_SCHEMA_VERSION,
         "exported_at": datetime.now(UTC).isoformat(),
         "user": {
@@ -135,21 +192,24 @@ async def build_gdpr_bundle(db: AsyncSession, user: User) -> dict[str, Any]:
         for s in studies
     ]
 
+    # v3: the legacy study-scoped ``Report`` was replaced by the
+    # clinical-event-scoped ``ReportContent`` (narrative markdown, with
+    # an explicit human/agent authoring trail). "Reports the user
+    # authored" maps to ``created_by_subject_id``. We surface the
+    # author_kind so AI-drafted content stays visibly distinct from
+    # human-written content even inside the user's own data export.
     reports = list(
-        (await db.execute(select(Report).where(Report.author_subject_id == user.subject_id)))
+        (
+            await db.execute(
+                select(ReportContent)
+                .where(ReportContent.created_by_subject_id == user.subject_id)
+                .order_by(ReportContent.created_at)
+            )
+        )
         .scalars()
         .all()
     )
-    bundle["reports"] = [
-        {
-            "id": str(r.id),
-            "study_id": str(r.study_id),
-            "version": r.version,
-            "text": r.text,
-            "created_at": r.created_at.isoformat(),
-        }
-        for r in reports
-    ]
+    bundle["reports"] = [_serialize_report(r) for r in reports]
 
     markers = list(
         (await db.execute(select(Marker).where(Marker.author_subject_id == user.subject_id)))
@@ -233,18 +293,7 @@ async def build_gdpr_bundle(db: AsyncSession, user: User) -> dict[str, Any]:
     if patient_ids:
         doc_filter = or_(doc_filter, Document.patient_id.in_(patient_ids))
     docs = list((await db.execute(select(Document).where(doc_filter))).scalars().all())
-    bundle["patient_documents"] = [
-        {
-            "id": str(d.id),
-            "patient_id": str(d.patient_id),
-            "document_type": d.document_type,
-            "title": d.title,
-            "text": d.text,
-            "document_date": str(d.document_date) if d.document_date else None,
-            "created_at": d.created_at.isoformat(),
-        }
-        for d in docs
-    ]
+    bundle["patient_documents"] = [_serialize_document(d) for d in docs]
 
     audit_rows = list(
         (
@@ -289,15 +338,22 @@ def pack_gdpr_zip(*, bundle: dict[str, Any], user: User) -> bytes:
         zf.writestr(
             "README.txt",
             (
-                "bitvision phoenix — GDPR Art. 20 data export\n"
+                "bitvision phoenix — PHR-Bundle (your portable health record)\n"
+                f"Format: {bundle['format']} v{bundle['schema_version']}\n"
                 f"Exported for: {user.email}\n"
                 f"Generated at: {bundle['exported_at']}\n\n"
                 "manifest.json contains every record the platform holds\n"
                 "about you, grouped by domain (user / consents / studies /\n"
                 "reports / markers / patients / patient_documents /\n"
-                "audit_log / erasure_requests). DICOM pixel data is NOT\n"
-                "included in this bundle — use the per-study download\n"
-                "endpoint if you also need the raw images.\n"
+                "audit_log / erasure_requests). It is also a GDPR Art. 20\n"
+                "data-portability export.\n\n"
+                "The PHR-Bundle is an open, versioned container: the\n"
+                "manifest schema is published at docs/phr-bundle.md and\n"
+                "docs/schemas/phr-bundle.v1.schema.json so the file can be\n"
+                "re-imported here or read by any third-party tool.\n\n"
+                "DICOM pixel data is NOT included in this bundle — use the\n"
+                "per-study download endpoint or the Fascicolo export if you\n"
+                "also need the raw images.\n"
             ),
         )
     return buf.getvalue()
@@ -338,6 +394,7 @@ def upload_gdpr_zip(zip_bytes: bytes, *, job_id: uuid.UUID, user: User) -> tuple
 
 __all__ = [
     "GDPR_EXPORT_SCHEMA_VERSION",
+    "PHR_BUNDLE_FORMAT",
     "build_gdpr_bundle",
     "build_gdpr_zip",
     "gdpr_export_filename",

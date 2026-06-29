@@ -1,0 +1,180 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://bitvision.xeno.garden/schemas/phr-bundle.v1.schema.json",
+  "title": "bitvision PHR-Bundle manifest, v1",
+  "description": "Open, versioned container for a patient's full portable health record (also the GDPR Art. 20 data-portability export). The manifest is the canonical payload of the bundle ZIP (manifest.json). DICOM pixel data is intentionally NOT part of this format. See docs/phr-bundle.md.",
+  "type": "object",
+  "required": ["format", "schema_version", "exported_at", "user"],
+  "properties": {
+    "format": {
+      "description": "Self-identifying container tag. Lets any consumer detect a bitvision PHR-Bundle without sniffing the shape.",
+      "const": "bitvision.phr-bundle"
+    },
+    "schema_version": {
+      "description": "Manifest schema version. Paired with `format` to pick the right reader.",
+      "const": 1
+    },
+    "exported_at": {
+      "description": "ISO-8601 timestamp when the bundle was generated.",
+      "type": "string",
+      "format": "date-time"
+    },
+    "user": {
+      "description": "The account the bundle belongs to (the export subject).",
+      "type": "object",
+      "required": ["subject_id"],
+      "properties": {
+        "subject_id": { "type": "string" },
+        "email": { "type": ["string", "null"] },
+        "oidc_subject": { "type": ["string", "null"] },
+        "is_admin": { "type": "boolean" }
+      }
+    },
+    "consents": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["id", "kind", "granted_at"],
+        "properties": {
+          "id": { "type": "string" },
+          "kind": { "type": "string" },
+          "granted_at": { "type": "string", "format": "date-time" },
+          "revoked_at": { "type": ["string", "null"] },
+          "metadata": { "type": ["object", "null"] }
+        }
+      }
+    },
+    "erasure_requests": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["id", "scope", "status", "requested_at"],
+        "properties": {
+          "id": { "type": "string" },
+          "scope": { "type": "string" },
+          "status": { "type": "string" },
+          "reason": { "type": ["string", "null"] },
+          "requested_at": { "type": "string", "format": "date-time" },
+          "completed_at": { "type": ["string", "null"] }
+        }
+      }
+    },
+    "studies": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["id", "study_instance_uid", "created_at"],
+        "properties": {
+          "id": { "type": "string" },
+          "study_instance_uid": { "type": "string" },
+          "patient_id": { "type": ["string", "null"] },
+          "contribution_tier": { "type": ["string", "null"] },
+          "is_public": { "type": "boolean" },
+          "study_description": { "type": ["string", "null"] },
+          "study_date": { "type": ["string", "null"] },
+          "modalities": { "type": "array", "items": { "type": "string" } },
+          "created_at": { "type": "string", "format": "date-time" }
+        }
+      }
+    },
+    "reports": {
+      "description": "Narrative reports authored by the user (v3 ReportContent). author_kind keeps AI-drafted content visibly distinct from human-written content.",
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["id", "clinical_event_id", "authority_id", "status", "author_kind", "created_at"],
+        "properties": {
+          "id": { "type": "string" },
+          "clinical_event_id": { "type": "string" },
+          "authority_id": { "type": "string" },
+          "status": { "type": "string" },
+          "title": { "type": ["string", "null"] },
+          "narrative_md": { "type": ["string", "null"] },
+          "author_kind": { "type": "string", "enum": ["human", "agent"] },
+          "model_id": { "type": ["string", "null"] },
+          "provider": { "type": ["string", "null"] },
+          "created_at": { "type": "string", "format": "date-time" }
+        }
+      }
+    },
+    "markers": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["id", "target_kind", "target_id", "kind", "created_at"],
+        "properties": {
+          "id": { "type": "string" },
+          "target_kind": { "type": "string" },
+          "target_id": { "type": "string" },
+          "kind": { "type": "string" },
+          "geometry": {},
+          "computed": {},
+          "body": {},
+          "created_at": { "type": "string", "format": "date-time" }
+        }
+      }
+    },
+    "patients": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["id", "display_name", "created_at"],
+        "properties": {
+          "id": { "type": "string" },
+          "display_name": { "type": ["string", "null"] },
+          "external_id": { "type": ["string", "null"] },
+          "birth_date": { "type": ["string", "null"] },
+          "sex": { "type": ["string", "null"] },
+          "tax_id": { "type": ["string", "null"] },
+          "external_identifiers": { "type": "array" },
+          "phone": { "type": ["string", "null"] },
+          "email": { "type": ["string", "null"] },
+          "address": { "type": ["string", "null"] },
+          "blood_type": { "type": ["string", "null"] },
+          "allergies": { "type": ["string", "null"] },
+          "notes": { "type": ["string", "null"] },
+          "managed_by_subject_id": { "type": ["string", "null"] },
+          "self_user_subject_id": { "type": ["string", "null"] },
+          "created_at": { "type": "string", "format": "date-time" }
+        }
+      }
+    },
+    "patient_documents": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["id", "document_kind", "created_at"],
+        "properties": {
+          "id": { "type": "string" },
+          "patient_id": { "type": ["string", "null"] },
+          "document_kind": { "type": "string" },
+          "authority_id": { "type": ["string", "null"] },
+          "title": { "type": ["string", "null"] },
+          "text": { "type": ["string", "null"] },
+          "content_type": { "type": ["string", "null"] },
+          "content_sha256": { "type": ["string", "null"] },
+          "document_date": { "type": ["string", "null"] },
+          "deleted_at": { "type": ["string", "null"] },
+          "created_at": { "type": "string", "format": "date-time" }
+        }
+      }
+    },
+    "audit_log": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["id", "action", "created_at"],
+        "properties": {
+          "id": { "type": "string" },
+          "action": { "type": "string" },
+          "resource_kind": { "type": ["string", "null"] },
+          "resource_id": { "type": ["string", "null"] },
+          "metadata": { "type": ["object", "null"] },
+          "ip_address": { "type": ["string", "null"] },
+          "user_agent": { "type": ["string", "null"] },
+          "created_at": { "type": "string", "format": "date-time" }
+        }
+      }
+    }
+  }
+}

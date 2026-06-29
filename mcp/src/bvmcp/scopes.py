@@ -191,6 +191,20 @@ SCOPE_CATALOG: tuple[ScopeDef, ...] = (
         "the one-time download token. Egresses full PHI including DICOM.",
         sensitive=True,
     ),
+    # The PHR-Bundle export is account-wide, not per-patient: it bundles
+    # the WHOLE structured record the platform holds about the token's
+    # owner (consents, studies metadata, reports, markers, every managed
+    # patient + their documents, audit log) into the portable, versioned
+    # open container documented in docs/phr-bundle.md. Distinct blast
+    # radius from ``fascicolo:export`` (one patient, DICOM included), so
+    # it gets its own grantable scope. No DICOM pixels are egressed.
+    ScopeDef(
+        "health_record:export",
+        "Export the owner's full account as a portable PHR-Bundle (the open, "
+        "versioned GDPR Art. 20 container). Egresses all structured PHI text; "
+        "no DICOM pixels.",
+        sensitive=True,
+    ),
     # --- Annotations + markers ------------------------------------------------
     ScopeDef("annotations:read", "Read in-viewer markers / annotations"),
     ScopeDef("annotations:write", "Create / update / delete in-viewer markers + annotations"),
@@ -513,6 +527,10 @@ TOOL_SCOPE: dict[str, str] = {
     "bulk_download": "fascicolo:export",
     "issue_download_token": "fascicolo:export",
     "get_job": "patients:read",
+    # Account-wide portable PHR-Bundle (GDPR Art. 20). Its own scope so
+    # an operator can grant "give me my data back" without also handing
+    # over per-patient DICOM egress.
+    "export_health_record_bundle": "health_record:export",
     # --- Calendar transitions (FSM-checked sub-resources) ----------------
     "confirm_event": "events:write",
     "reschedule_event": "events:write",
