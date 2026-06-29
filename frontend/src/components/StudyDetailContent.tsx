@@ -11,6 +11,7 @@ import { useEffect, useRef, useState } from "react";
 
 import ComparePriorButton from "@/components/ComparePriorButton";
 import ContextualBackLink from "@/components/ContextualBackLink";
+import DeidentificationProvenancePanel from "@/components/DeidentificationProvenancePanel";
 import LesionTracksPanel from "@/components/LesionTracksPanel";
 import LicenseBadge from "@/components/LicenseBadge";
 import NotesPanel from "@/components/NotesPanel";
@@ -156,6 +157,8 @@ export default function StudyDetailContent({ studyId, initialStudy }: Props) {
           />
         )}
       </p>
+
+      {study.is_public && <DeidentificationProvenancePanel studyId={studyId} />}
 
       <StudyTagsSection
         studyId={studyId}

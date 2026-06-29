@@ -632,10 +632,38 @@ export interface SubStackInfo {
   instance_count: number;
 }
 
+// --- Text de-identification provenance (GET /studies/{id}/deidentification-provenance) ---
+// The auditable counterpart to an irreversible black-box: what was
+// redacted from an OpenData study's clinical notes at publication.
+// Aggregate + storage-isolated (category counts only). TEXT de-id only
+// — see ``scope`` (it does NOT cover DICOM PS3.15).
+export interface RedactionCategory {
+  category: string; // regex_* / llm_scrub_via_mcp / manual
+  count: number;
+  model_id?: string | null; // set for llm_scrub_via_mcp
+  provider?: string | null;
+  last_applied_at: string;
+}
+
+export interface DeidentificationProvenance {
+  study_id: string;
+  is_public: boolean;
+  contribution_tier: string | null;
+  text_redactions: RedactionCategory[];
+  total_text_redactions: number;
+  notes_redacted: number;
+  scope: string;
+}
+
 export const studiesApi = {
   list: (params: StudyListParams = {}) =>
     request<Paginated<Study>>(`/api/studies${qs(params as Record<string, QSValue>)}`),
   detail: (id: string) => request<StudyDetail>(`/api/studies/${id}`),
+  /** Per-study text de-identification record (OpenData transparency).
+   *  Same read gate as the study detail, so a public study's provenance
+   *  is public. */
+  deidentificationProvenance: (id: string) =>
+    request<DeidentificationProvenance>(`/api/studies/${id}/deidentification-provenance`),
   series: (id: string) => request<Series>(`/api/series/${id}`),
   fusionCandidates: (studyId: string, excludeSeriesId?: string) =>
     request<Series[]>(

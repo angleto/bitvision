@@ -1581,6 +1581,22 @@
     "searchWholeStudy": "Cerca nell’intero studio",
     "pickDifferentReference": "Scegli un altro riferimento"
   },
+  "deidentificationProvenance": {
+    "title": "Registro di de-identificazione del testo",
+    "loading": "Caricamento…",
+    "loadError": "Impossibile caricare il registro di de-identificazione.",
+    "noneRedacted": "Nessuna redazione del testo registrata per questo studio.",
+    "summary": "{total} redazioni su {notes} nota/e cliniche.",
+    "colCategory": "Categoria",
+    "colCount": "Conteggio",
+    "catCodiceFiscale": "Codice fiscale",
+    "catEmail": "Email",
+    "catPhone": "Telefono",
+    "catDatePrecise": "Data precisa",
+    "catAddress": "Indirizzo",
+    "catLlmScrub": "Scrub LLM",
+    "catManual": "Manuale"
+  },
   "studyLicense": {
     "publicDataset": "Dataset pubblico",
     "cite": "cita",
