@@ -5,6 +5,33 @@ project follows semantic versioning; pre-release suffixes (`alpha`,
 `beta`) gate Kubernetes deployments via the GHCR image tag (without
 the leading `v`, see deployment guide).
 
+## 4.4.90 (2026-06-29)
+
+### DICOMweb: WADO-RS frames/bulkdata + QIDO relational roots
+
+* The DICOMweb read surface now answers WADO-RS **frames**
+  (`GET …/instances/{sop}/frames/{framelist}`), so OHIF's default
+  pixel-streaming path works (not just full-instance retrieve). Each frame
+  is the stored codec bitstream — native data is sliced by stride,
+  encapsulated data is read back per fragment — with no transcoding; the
+  part `Content-Type` carries the codec media type and a `transfer-syntax`
+  parameter (`application/octet-stream`, `image/jp2`, `image/jls`,
+  `image/jpeg`, `image/dicom-rle`).
+* WADO-RS **bulkdata** (`GET …/instances/{sop}/bulkdata/{tag}`) serves a
+  top-level binary element, and the metadata endpoint now wires
+  `BulkDataURI` (PixelData → the frames resource, other bulk elements →
+  their bulkdata resource) instead of emitting none.
+* QIDO-RS **relational roots** `GET /series` and `GET /instances` search the
+  caller's whole visible set (the hierarchical forms already existed).
+* Fix: `RetrieveURL` / `Content-Location` now honour `X-Forwarded-Proto`, so
+  the emitted URLs are `https` behind the TLS-terminating Traefik proxy
+  (where `request.base_url` is `http`) — no mixed-content for a client
+  following a RetrieveURL from an https context.
+* Patient-scoping (cross-patient inexpressible), storage isolation, and
+  PS3.15 de-identification-on-egress carry over unchanged. Rendered
+  (JPEG/PNG) and transfer-syntax transcoding remain tracked follow-ups.
+  `docs/dicomweb.md` updated.
+
 ## 4.4.89 (2026-06-29)
 
 ### FHIR R4 Bundle export (Health Record + GDPR)
