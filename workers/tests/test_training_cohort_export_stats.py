@@ -110,3 +110,45 @@ def test_high_risk_pixel_instance_excluded(monkeypatch):
     assert [s["name"] for s in skipped] == ["s/us.dcm"]
     assert stats[s1]["size_bytes"] == len(ct)
     assert stats[s1]["content_sha256"] == hashlib.sha256(ct).hexdigest()
+
+
+def _face_ct() -> bytes:
+    # Head CT -> classify_pixel_risk == 'low' (recognizable-visual-feature risk).
+    return _dcm(_CT, Modality="CT", ImageType=["ORIGINAL", "PRIMARY"], BodyPartExamined="HEAD")
+
+
+def _run(work, monkeypatch, bodies):
+    monkeypatch.setattr(mod, "_fetch_blob_bytes", lambda _s, _b, key, *, deidentify: bodies[key])
+    monkeypatch.setattr(mod, "get_s3_storage", lambda: _FakeStorage())
+    return mod._stream_cohort_sync(
+        work, b"{}", bucket="b", key="out.zip", progress_q=[0], cancel=threading.Event()
+    )
+
+
+def test_face_risk_instance_shipped_when_defacing_off(monkeypatch):
+    # De-facing disabled (default): face-risk ships as today — no regression.
+    s1 = uuid.uuid4()
+    face = _face_ct()
+    monkeypatch.setattr(mod, "get_defacer", lambda: None)
+    work = [{"kind": "dicom", "name": "s/head.dcm", "bucket": "b", "key": "k", "study_id": s1}]
+    _total, stats, skipped = _run(work, monkeypatch, {"k": face})
+    assert skipped == []
+    assert stats[s1]["size_bytes"] == len(face)
+
+
+def test_face_risk_instance_excluded_when_defacing_on(monkeypatch):
+    # De-facing enabled: the face-risk instance is excluded from the public
+    # cohort (no human-review step here) and recorded with its risk level.
+    s1 = uuid.uuid4()
+    face = _face_ct()
+    ct = _dcm(_CT, Modality="CT", ImageType=["ORIGINAL", "PRIMARY"], BodyPartExamined="CHEST")
+    monkeypatch.setattr(mod, "get_defacer", lambda: object())  # any non-None defacer
+    work = [
+        {"kind": "dicom", "name": "s/head.dcm", "bucket": "b", "key": "k_face", "study_id": s1},
+        {"kind": "dicom", "name": "s/chest.dcm", "bucket": "b", "key": "k_ct", "study_id": s1},
+    ]
+    _total, stats, skipped = _run(work, monkeypatch, {"k_face": face, "k_ct": ct})
+    assert [s["name"] for s in skipped] == ["s/head.dcm"]
+    assert skipped[0]["risk"] == "low"
+    # Only the non-face CT remains in the artifact stats.
+    assert stats[s1]["size_bytes"] == len(ct)
