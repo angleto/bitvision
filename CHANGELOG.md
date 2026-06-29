@@ -5,6 +5,28 @@ project follows semantic versioning; pre-release suffixes (`alpha`,
 `beta`) gate Kubernetes deployments via the GHCR image tag (without
 the leading `v`, see deployment guide).
 
+## 4.4.96 (2026-06-29)
+
+### Imaging: geometry-preserving DICOM SEG export
+
+* Stored segmentation masks (headerless raw `.bin`, no geometry) can now be
+  exported as a conformant, geo-referenced **DICOM SEG** object (SOP class
+  `…66.4`) that references the source series — openable in 3D Slicer / OHIF /
+  MONAI. The serializer reads the source instances back, sorts them by the same
+  key the volume-build used so `mask[k]` lines up with `source[k]`, and lets
+  highdicom copy the exact per-frame `ImagePositionPatient`/orientation/spacing +
+  `FrameOfReferenceUID` + `ReferencedSeriesSequence`. A slice-count/plane
+  mismatch (multi-stack / resampled) is refused, never emitted mis-aligned.
+* AI provenance preserved: agent/automatic masks are declared `AUTOMATIC` with an
+  `AlgorithmIdentificationSequence` (DCM 123110 "Artificial Intelligence"); human
+  masks are `MANUAL`. Multi-label masks map each `label_map` value to a segment.
+* `GET /series/{id}/segmentations/{label}/dicom-seg` returns the bytes inline
+  (sync, storage-isolated) for the GUI/viewer; `POST …/dicom-seg/export` enqueues
+  an async Job whose `.dcm` artifact is fetched off-platform via the standard
+  job-result download token — with an `export_segmentation_dicom_seg` MCP tool
+  (poll `get_job`, then `issue_download_token`). Unblocks the COCO/nnU-Net/MONAI
+  cohort serializers. No new dependency (highdicom already present).
+
 ## 4.4.95 (2026-06-29)
 
 ### Search: reach studies by structured fields + clinical IT/EN thesaurus
