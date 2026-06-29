@@ -47,6 +47,7 @@ from bvphoenix.db.models import DatasetStudy, LicensedDataset, User
 from bvphoenix.db.session import SERVICE_SUBJECT, set_current_subject
 from bvphoenix.services import jobs as jobs_service
 from bvphoenix.services import k_anonymity, training_cohort
+from bvphoenix.services.face_deid import get_defacer
 from bvphoenix.services.patient_export import _bytes_member, _fetch_blob_bytes
 from bvphoenix.services.pixel_deid import classify_pixel_risk_bytes
 from bvphoenix.storage import get_s3_storage
@@ -115,6 +116,10 @@ def _stream_cohort_sync(
     storage = get_s3_storage()
     per_study: dict[uuid.UUID, dict[str, Any]] = {}
     skipped: list[dict[str, Any]] = []
+    # Resolve the de-facer once: when enabled (``face_deid_enabled``), face-risk
+    # (``low``) instances are gated too — see the per-item comment below. Off by
+    # default, so the face branch is inert unless explicitly enabled.
+    deface_on = get_defacer() is not None
 
     def _members():  # type: ignore[no-untyped-def]
         for item in work:
@@ -122,17 +127,30 @@ def _stream_cohort_sync(
                 raise _ExportCancelledError
             is_dicom = item["kind"] == "dicom"
             body = _fetch_blob_bytes(storage, item["bucket"], item["key"], deidentify=is_dicom)
-            # Burned-in-pixel PHI gate (M0): ``deidentify`` above scrubs the
-            # DICOM *header* but leaves pixels untouched, so an instance with
-            # PHI burned into the image (ultrasound banners, secondary capture,
+            # Burned-in-pixel PHI gate: ``deidentify`` above scrubs the DICOM
+            # *header* but leaves pixels untouched, so an instance with PHI
+            # burned into the image (ultrasound banners, secondary capture,
             # dose-report screenshots) would otherwise ship to the public /
-            # licensed cohort. Until automated pixel redaction + human review
-            # land (M1/M4), high-risk instances are EXCLUDED from the artifact
-            # and recorded so the drop is never silent.
-            if is_dicom and classify_pixel_risk_bytes(body).is_high:
-                skipped.append({"study_id": item.get("study_id"), "name": item["name"]})
-                progress_q[0] += 1
-                continue
+            # licensed cohort. ``high``-risk instances are ALWAYS EXCLUDED.
+            #
+            # ``low``-risk (recognizable-visual-feature: head/face CT/MR/PT) is
+            # excluded too WHEN de-facing is enabled — this is an automated
+            # egress with no human-review step, and a face can be surface-
+            # rendered from the volume, so it must not ship un-defaced. With
+            # de-facing off (default) face-risk ships as today (no regression).
+            # Excluded instances are recorded so the drop is never silent.
+            if is_dicom:
+                risk = classify_pixel_risk_bytes(body)
+                if risk.is_high or (deface_on and risk.level == "low"):
+                    skipped.append(
+                        {
+                            "study_id": item.get("study_id"),
+                            "name": item["name"],
+                            "risk": risk.level,
+                        }
+                    )
+                    progress_q[0] += 1
+                    continue
             sid = item.get("study_id")
             if sid is not None:
                 stat = per_study.setdefault(sid, {"size": 0, "hash": hashlib.sha256()})
@@ -272,11 +290,16 @@ async def training_cohort_export_zip(
             engine, jid, work, labels_bytes, bucket=bucket, key=key, total=total
         )
         if pixel_skipped:
+            by_risk: dict[str, int] = {}
+            for s in pixel_skipped:
+                lvl = str(s.get("risk") or "high")
+                by_risk[lvl] = by_risk.get(lvl, 0) + 1
             logger.warning(
-                "training cohort export %s: burned-in-PHI gate EXCLUDED %d high-risk "
-                "instance(s) from the public artifact; affected studies=%s",
+                "training cohort export %s: burned-in-PHI / face-risk gate EXCLUDED %d "
+                "instance(s) from the public artifact (by risk: %s); affected studies=%s",
                 job_id,
                 len(pixel_skipped),
+                by_risk,
                 sorted({str(s["study_id"]) for s in pixel_skipped if s.get("study_id")}),
             )
 

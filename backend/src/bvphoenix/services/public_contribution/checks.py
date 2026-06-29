@@ -13,7 +13,8 @@ from __future__ import annotations
 from bvphoenix.services.content_safety import get_screener
 from bvphoenix.services.deid.errors import DeidVerificationError, RequiresReview
 from bvphoenix.services.deidentify import deidentify_dicom_bytes
-from bvphoenix.services.pixel_deid import classify_pixel_risk_bytes
+from bvphoenix.services.face_deid import get_defacer
+from bvphoenix.services.pixel_deid import classify_pixel_risk_bytes, clean_pixel_data
 from bvphoenix.services.review_queue import CheckContext, CheckResult
 from bvphoenix.services.review_queue.checks import aggregate_verdicts
 
@@ -62,19 +63,51 @@ class HeaderDeidCheck:
 
 
 class PixelPhiCheck:
-    """Burned-in-pixel screening (services.pixel_deid). ``high`` risk -> ``fail``
-    so a human MUST review (no automated clearing of high-risk pixels);
-    ``none``/``low`` -> ``pass``."""
+    """Burned-in-pixel + recognizable-visual-feature screening (services.pixel_deid).
+
+    * ``high`` risk (burned-in text / encapsulated docs) -> ``fail`` so a human
+      MUST review (no automated clearing of high-risk pixels).
+    * ``none`` -> ``pass``.
+    * ``low`` risk is the face / recognizable-visual-feature tier (head/face
+      CT/MR/PT). With de-facing disabled (default) it ``pass``es as today. With
+      de-facing enabled (``face_deid_enabled``) a face-risk instance is NEVER
+      auto-passed: it routes to human review (``fail``), and the de-facer is
+      exercised so the reviewer sees whether a mask was applied
+      (``face_deid_applied``) and why (``face_deid_reason``). The heuristic
+      masker is not validated de-facing, so the verdict is ``fail`` even when a
+      mask was applied; ``RecognizableVisualFeatures=NO`` + CID 7050 ``113102``
+      are stamped only after a human accepts, via
+      ``pixel_deid.mark_visual_features_removed``.
+    """
 
     name = "pixel_phi"
 
     async def run(self, ctx: CheckContext) -> CheckResult:
+        defacer = get_defacer()  # None when de-facing is disabled (default)
         verdicts: list[str] = []
         components: dict[str, dict] = {}
         for comp in ctx.staged.components:
-            risk = classify_pixel_risk_bytes(await comp.read())
-            components[comp.name] = {"risk": risk.level, "reasons": list(risk.reasons)}
-            verdicts.append("fail" if risk.is_high else "pass")
+            blob = await comp.read()
+            risk = classify_pixel_risk_bytes(blob)
+            entry: dict = {"risk": risk.level, "reasons": list(risk.reasons)}
+            if risk.is_high:
+                verdict = "fail"
+            elif risk.level == "low" and defacer is not None:
+                # Face-risk + de-facing enabled: exercise the de-facer so the
+                # reviewer sees the masking outcome, but never auto-pass — the
+                # signal a human must confirm before features are declared removed.
+                try:
+                    res = clean_pixel_data(blob, face_defacer=defacer)
+                    entry["face_deid_applied"] = bool(res.redactions)
+                    entry["face_deid_reason"] = res.face_deid_reason
+                except Exception as exc:  # fail-safe: a de-facer error never auto-passes
+                    entry["face_deid_applied"] = False
+                    entry["face_deid_reason"] = f"deface_error:{type(exc).__name__}"
+                verdict = "fail"
+            else:
+                verdict = "pass"
+            components[comp.name] = entry
+            verdicts.append(verdict)
         return CheckResult(
             verdict=aggregate_verdicts(verdicts) if verdicts else "pass",
             details={"components": components},
