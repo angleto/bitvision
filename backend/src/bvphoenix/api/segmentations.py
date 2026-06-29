@@ -33,6 +33,7 @@ from bvphoenix.auth import optional_user, require_user
 from bvphoenix.config import get_settings
 from bvphoenix.db.models import Derivative, ImagingStudy, Instance, Segmentation, Series, User
 from bvphoenix.db.session import get_db
+from bvphoenix.services.dicom_seg_export import SegExportError, export_segmentation_seg
 from bvphoenix.services.permissions import READ_PIXELS, WRITE_ANNOTATIONS, can
 from bvphoenix.services.segmentation_import import (
     SegmentationImportError,
@@ -332,6 +333,46 @@ async def get_segmentation(
     except Exception as exc:
         raise HTTPException(status_code=404, detail="segmentation not found") from exc
     return Response(content=body, media_type="application/octet-stream")
+
+
+@router.get("/series/{series_id}/segmentations/{label}/dicom-seg")
+async def export_segmentation_dicom_seg(
+    series_id: uuid.UUID,
+    label: str,
+    db: Annotated[AsyncSession, Depends(get_db)],
+    user: Annotated[User | None, Depends(optional_user)],
+) -> Response:
+    """Export a stored mask as a conformant, geo-referenced DICOM SEG object
+    (SOP class 1.2.840.10008.5.1.4.1.1.66.4) that references the source series,
+    so it can be opened in any DICOM-aware tool (3D Slicer, OHIF, ...) — unlike
+    the raw ``.bin``. Same read gate as the mask; the bytes are returned inline
+    (storage-isolated, no presigned URL / bucket name leaves the platform)."""
+    if not _LABEL_RE.match(label):
+        raise HTTPException(status_code=400, detail="invalid label")
+    _series, study = await _load_series_with_study(db, series_id)
+    if not await can(db, user=user, action=READ_PIXELS, study=study):
+        raise HTTPException(status_code=404, detail="series not found")
+
+    seg = (
+        await db.execute(
+            select(Segmentation).where(
+                Segmentation.series_id == series_id, Segmentation.label == label
+            )
+        )
+    ).scalar_one_or_none()
+    if seg is None:
+        raise HTTPException(status_code=404, detail="segmentation not found")
+    try:
+        body = await export_segmentation_seg(db, seg)
+    except SegExportError as exc:
+        # The mask cannot be expressed as a conformant SEG (e.g. it does not
+        # line up 1:1 with the source slices — multi-stack / resampled series).
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    return Response(
+        content=body,
+        media_type="application/dicom",
+        headers={"Content-Disposition": f'attachment; filename="{label}.seg.dcm"'},
+    )
 
 
 @router.post(
