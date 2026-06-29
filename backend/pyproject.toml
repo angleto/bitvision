@@ -173,6 +173,10 @@ dev = [
     "httpx>=0.28.0",
     "ruff>=0.8.0",
     "mypy>=1.13.0",
+    # JSON Schema validator for the PHR-Bundle conformance gate (and the
+    # forthcoming FHIR / DICOMweb conformance tests). Test-only, so the
+    # production API/worker images stay lean.
+    "jsonschema>=4.23.0",
 ]
 
 [build-system]

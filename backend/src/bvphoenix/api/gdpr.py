@@ -21,13 +21,13 @@ from datetime import UTC, datetime
 from typing import Annotated, Any
 
 from arq import create_pool
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Request, status
 from pydantic import BaseModel, Field
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from bvphoenix.api.jobs import JobOut, cap_exceeded_to_http
-from bvphoenix.auth import require_user
+from bvphoenix.auth import enforce_agent_scope, require_user
 from bvphoenix.config import get_settings
 from bvphoenix.db.models import (
     AuditLog,
@@ -275,17 +275,28 @@ async def create_erasure_request(
 
 @router.post("/export", response_model=JobOut, status_code=status.HTTP_202_ACCEPTED)
 async def export_user_data_async(
+    request: Request,
     db: Annotated[AsyncSession, Depends(get_db)],
     user: Annotated[User, Depends(require_user)],
 ) -> JobOut:
-    """Enqueue a GDPR Art. 20 data export Job. Returns 202 with the
-    job descriptor; poll ``GET /api/jobs/{id}`` for progress and the
-    presigned download URL.
+    """Enqueue a GDPR Art. 20 / PHR-Bundle data export Job. Returns 202
+    with the job descriptor; poll ``GET /api/jobs/{id}`` for progress
+    and the presigned download URL.
+
+    The artifact is the patient's portable, versioned PHR-Bundle (see
+    docs/phr-bundle.md): the full structured manifest of everything the
+    platform holds about the caller, re-importable as an open format.
 
     Idempotency: a single user is the entire scope, so concurrent
     retries dedup to one in-flight job. After the job lands a
     terminal state, a fresh request creates a new job (e.g. to
-    refresh data added since the previous export)."""
+    refresh data added since the previous export).
+
+    Agent tokens must carry ``health_record:export`` (the MCP
+    ``export_health_record_bundle`` tool rides this scope); the gate is
+    a no-op for human sessions, which are always the subject of their
+    own GDPR workflow."""
+    enforce_agent_scope(request, "health_record:export")
     canonical_input: dict[str, Any] = {"version": 1}
 
     try:
