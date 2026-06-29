@@ -447,6 +447,48 @@ TOOLS: list[Tool] = [
             "required": ["finding_id", "series_id", "source"],
         },
     ),
+    Tool(
+        name="create_findings_from_hot_spots",
+        annotations=ToolAnnotations(
+            title="Create candidate findings from PET/CT hot spots",
+            readOnlyHint=False,
+            destructiveHint=False,
+            idempotentHint=True,
+            openWorldHint=False,
+        ),
+        description=(
+            f"{_APPROVAL_NOTE}\n\n"
+            "Run the hot-spot lesion finder (``find_hot_spots``) on a series "
+            "and create ONE ``candidate`` finding per detected spot — a "
+            "creation flow, distinct from promote_finding_measurement (which "
+            "writes onto one existing finding). Each finding gets the spot's "
+            "volume_ml (+ SUVmax/peak/mean when the series is a dosed PET), "
+            "author_kind=agent, and a bbox.lesion marker linked as its bbox "
+            "geometry. Idempotent on the spot signature: re-running detection "
+            "does not duplicate findings for spots already materialised. "
+            "``type`` is the finding-type vocab key to assign. Findings stay "
+            f"``candidate`` until a human confirms them. {_VOCAB_HINT}"
+        ),
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "series_id": {"type": "string"},
+                "type": {"type": "string", "description": "finding type key (required)"},
+                "hot_spots": {
+                    "type": "object",
+                    "description": (
+                        "find_hot_spots params: {threshold_mode:'percent_of_max'|"
+                        "'absolute_suv', threshold_value, top_n, min_volume_ml, "
+                        "suv_variant?, slice_min?, slice_max?, "
+                        "exclude_segmentation_labels?, exclude_marker_ids?}."
+                    ),
+                },
+                "confidence": {"type": "number", "minimum": 0, "maximum": 1},
+                "idempotency_key": {"type": "string"},
+            },
+            "required": ["series_id", "type", "hot_spots"],
+        },
+    ),
 ]
 
 
@@ -648,6 +690,22 @@ async def _promote_finding_measurement(args: dict[str, Any]) -> str:
     return json.dumps(payload, indent=2, ensure_ascii=False)
 
 
+async def _create_findings_from_hot_spots(args: dict[str, Any]) -> str:
+    series_id = args["series_id"]
+    body: dict[str, Any] = {"type": args["type"], "hot_spots": args["hot_spots"]}
+    if args.get("confidence") is not None:
+        body["confidence"] = args["confidence"]
+    try:
+        payload, _headers = await api_post_with_headers(
+            f"/api/series/{series_id}/findings-from-hot-spots",
+            json=body,
+            idempotency_key=args.get("idempotency_key"),
+        )
+    except httpx.HTTPStatusError as exc:
+        return format_http_error(exc, hint=_VOCAB_HINT)
+    return json.dumps(payload, indent=2, ensure_ascii=False)
+
+
 _DISPATCH = {
     "get_finding_vocab": _get_finding_vocab,
     "search_findings": _search_findings,
@@ -659,6 +717,7 @@ _DISPATCH = {
     "restore_finding": _restore_finding,
     "add_finding_geometry": _add_finding_geometry,
     "promote_finding_measurement": _promote_finding_measurement,
+    "create_findings_from_hot_spots": _create_findings_from_hot_spots,
 }
 
 

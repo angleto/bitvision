@@ -12,41 +12,20 @@ from bvphoenix.api.studies._shared import *  # noqa: F403
 router = APIRouter()
 
 
-@router.post(
-    "/series/{series_id}/hot-spots",
-    response_model=HotSpotsOut,
-)
-async def find_series_hot_spots(
-    series_id: uuid.UUID,
+async def compute_hot_spots_core(
+    db: AsyncSession,
+    series: Series,
     body: HotSpotsIn,
-    db: Annotated[AsyncSession, Depends(get_db)],
-    user: Annotated[User | None, Depends(optional_user)],
-    audit: AuditDep,
 ) -> HotSpotsOut:
-    """Find the top-N high-uptake connected regions in a PET (or
-    raw-intensity) volume. Modeled on Hermes / Mirada "lesion
-    finder" tools: threshold (default 50% of global max, PERCIST
-    1.0), 3D 6-connected components via ``scipy.ndimage.label``,
-    filter by ``min_volume_ml``, sort descending by per-component
-    max, return top-N with SUVmax/mean/peak (1 cm³).
+    """Top-N high-uptake connected regions in a series' packed Float32 volume.
 
-    Permission: ``READ_PIXELS`` (same as volume.raw). 409 when the
-    derivative cache is cold."""
+    The numpy/scipy detection, factored out of the route handler so the
+    create-findings-from-hot-spots flow can re-run the same lesion finder. No
+    new math — the route body verbatim, minus auth (the caller checks
+    ``READ_PIXELS``) and audit. Raises ``HTTPException`` (409) on a cold cache.
+    """
     import numpy as np
     from scipy import ndimage as _ndi
-
-    row = (
-        await db.execute(
-            select(Series, ImagingStudy)
-            .join(ImagingStudy, ImagingStudy.id == Series.study_id)
-            .where(Series.id == series_id)
-        )
-    ).first()
-    if row is None:
-        raise HTTPException(status_code=404, detail="series not found")
-    series, study = row
-    if not await can(db, user=user, action=READ_PIXELS, study=study):
-        raise HTTPException(status_code=404, detail="series not found")
 
     storage = get_s3_storage()
     derivative = (
@@ -175,12 +154,6 @@ async def find_series_hot_spots(
         "slice_max_used": int(z_hi),
     }
     if n_components == 0:
-        await audit.log(
-            action="series_hot_spots",
-            actor_subject_id=user.subject_id if user else None,
-            resource_kind="series",
-            resource_id=series.id,
-        )
         return HotSpotsOut(spots=[], **base_response)
 
     voxel_volume_ml = (float(sx) * float(sy) * float(sz)) / 1000.0
@@ -267,13 +240,49 @@ async def find_series_hot_spots(
             )
         )
 
+    return HotSpotsOut(spots=spots, **base_response)
+
+
+@router.post(
+    "/series/{series_id}/hot-spots",
+    response_model=HotSpotsOut,
+)
+async def find_series_hot_spots(
+    series_id: uuid.UUID,
+    body: HotSpotsIn,
+    db: Annotated[AsyncSession, Depends(get_db)],
+    user: Annotated[User | None, Depends(optional_user)],
+    audit: AuditDep,
+) -> HotSpotsOut:
+    """Find the top-N high-uptake connected regions in a PET (or
+    raw-intensity) volume. Modeled on Hermes / Mirada "lesion
+    finder" tools: threshold (default 50% of global max, PERCIST
+    1.0), 3D 6-connected components via ``scipy.ndimage.label``,
+    filter by ``min_volume_ml``, sort descending by per-component
+    max, return top-N with SUVmax/mean/peak (1 cm³).
+
+    Permission: ``READ_PIXELS`` (same as volume.raw). 409 when the
+    derivative cache is cold."""
+    row = (
+        await db.execute(
+            select(Series, ImagingStudy)
+            .join(ImagingStudy, ImagingStudy.id == Series.study_id)
+            .where(Series.id == series_id)
+        )
+    ).first()
+    if row is None:
+        raise HTTPException(status_code=404, detail="series not found")
+    series, study = row
+    if not await can(db, user=user, action=READ_PIXELS, study=study):
+        raise HTTPException(status_code=404, detail="series not found")
+    out = await compute_hot_spots_core(db, series, body)
     await audit.log(
         action="series_hot_spots",
         actor_subject_id=user.subject_id if user else None,
         resource_kind="series",
         resource_id=series.id,
     )
-    return HotSpotsOut(spots=spots, **base_response)
+    return out
 
 
 @router.post(

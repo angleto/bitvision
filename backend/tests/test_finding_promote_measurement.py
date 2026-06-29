@@ -289,6 +289,112 @@ async def test_compute_roi_stats_core_reads_packed_volume(
 
 
 @skip_if_no_db
+async def test_create_findings_from_hot_spots_creates_and_is_idempotent(
+    db_session, make_user, make_study, monkeypatch
+) -> None:
+    """The hot-spots creation flow makes one candidate finding per detected
+    spot (with a bbox.lesion marker) and is idempotent on the spot signature:
+    a second identical run creates nothing new."""
+    import numpy as np
+    from starlette.requests import Request
+
+    from bvphoenix.api.findings import create_findings_from_hot_spots
+    from bvphoenix.api.studies import bulk as bulk_mod
+    from bvphoenix.api.studies._shared import HotSpotsIn
+    from bvphoenix.db.models import Derivative, FindingGeometry, Marker
+    from bvphoenix.services.volumes import DERIVATIVE_FORMAT, DERIVATIVE_KIND, HEADER_STRUCT
+
+    owner = await make_user()
+    study, series = await make_study(owner, modality="PT")
+
+    # 8x8x4 background with one bright 2x2x2 cube → exactly one component
+    # above the 50%-of-max threshold.
+    nz, ny, nx = 4, 8, 8
+    arr = np.zeros((nz, ny, nx), dtype=np.float32)
+    arr[1:3, 2:4, 2:4] = 100.0
+    packed = HEADER_STRUCT.pack(nx, ny, nz, 1.0, 1.0, 1.0, 0.0, 100.0) + arr.tobytes()
+    db_session.add(
+        Derivative(
+            series_id=series.id,
+            kind=DERIVATIVE_KIND,
+            format=DERIVATIVE_FORMAT,
+            stack_index=0,
+            s3_bucket="bv-test",
+            s3_key="vol-hs",
+        )
+    )
+    await db_session.flush()
+    monkeypatch.setattr(
+        bulk_mod,
+        "get_s3_storage",
+        lambda: type("S", (), {"get_object_bytes": staticmethod(lambda **k: packed)})(),
+    )
+
+    ftype = (await db_session.execute(select(FindingType).limit(1))).scalars().first()
+
+    class _StubIdem:
+        replay = None
+
+        def capture(self, payload, **_kw):
+            return payload
+
+    req = Request({"type": "http", "method": "POST", "headers": [], "query_string": b""})
+
+    body = type(
+        "B",
+        (),
+        {
+            "hot_spots": HotSpotsIn(
+                threshold_mode="percent_of_max", threshold_value=0.5, min_volume_ml=0.0
+            ),
+            "type": ftype.key,
+            "confidence": 0.5,
+        },
+    )()
+
+    class _StubAuditLocal:
+        async def log(self, **_kw):
+            return None
+
+    out = await create_findings_from_hot_spots(
+        req, series.id, body, db_session, owner, _StubAuditLocal(), _StubIdem()
+    )
+    assert out["total_spots"] == 1
+    assert len(out["created"]) == 1
+    fid = uuid.UUID(out["created"][0]["id"])
+    # measurements + a linked bbox marker
+    assert out["created"][0]["volume_ml"] is not None
+    assert out["created"][0]["status"] == "candidate"
+    geoms = (
+        (await db_session.execute(select(FindingGeometry).where(FindingGeometry.finding_id == fid)))
+        .scalars()
+        .all()
+    )
+    assert any(g.role == "bbox" for g in geoms)
+
+    # Second identical run: the spot signature already has a bbox.lesion
+    # marker → nothing new.
+    out2 = await create_findings_from_hot_spots(
+        req, series.id, body, db_session, owner, _StubAuditLocal(), _StubIdem()
+    )
+    assert out2["total_spots"] == 1
+    assert out2["created"] == []
+    assert out2["skipped_existing"] == 1
+
+    # Cleanup
+    for f in (
+        (await db_session.execute(select(Finding).where(Finding.study_id == study.id)))
+        .scalars()
+        .all()
+    ):
+        await db_session.execute(delete(FindingGeometry).where(FindingGeometry.finding_id == f.id))
+        await db_session.execute(delete(FindingRevision).where(FindingRevision.finding_id == f.id))
+        await db_session.execute(delete(Finding).where(Finding.id == f.id))
+    await db_session.execute(delete(Marker).where(Marker.target_id == series.id))
+    await db_session.commit()
+
+
+@skip_if_no_db
 async def test_measurement_geometry_link_is_idempotent(db_session, make_user, make_study) -> None:
     owner = await make_user()
     study, series = await make_study(owner, modality="PT")
