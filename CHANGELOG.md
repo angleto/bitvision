@@ -5,6 +5,26 @@ project follows semantic versioning; pre-release suffixes (`alpha`,
 `beta`) gate Kubernetes deployments via the GHCR image tag (without
 the leading `v`, see deployment guide).
 
+## 4.4.93 (2026-06-29)
+
+### Findings: create candidate findings from hot spots
+
+* New `POST /series/{id}/findings-from-hot-spots` runs the hot-spot lesion
+  finder and creates **one `candidate` finding per detected spot** — a
+  creation flow, distinct from promote-measurement (which writes onto one
+  existing finding). Each finding gets the spot's `volume_ml` (+ SUVmax/peak/
+  mean when the series is a dosed PET), `author_kind=agent`, and a
+  `bbox.lesion` marker (box + metrics) linked as its `bbox` geometry.
+* **Idempotent on the spot signature** (centroid + bbox, stored in the
+  marker's `computed`): re-running detection on a series does not duplicate
+  findings for spots already materialised. Patient-write gated; findings stay
+  `candidate` for a human to confirm or retract.
+* The hot-spot detector is now a reusable `compute_hot_spots_core` (extracted
+  from the `/series/{id}/hot-spots` route, no math change). New MCP tool
+  `create_findings_from_hot_spots` (`findings:write`). This completes the
+  finding measurement-promotion task (ROI-stats + measure_volume landed in
+  4.4.92).
+
 ## 4.4.92 (2026-06-29)
 
 ### Findings: promote ROI-stats + measure_volume measurements
