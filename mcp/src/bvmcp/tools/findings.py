@@ -370,28 +370,34 @@ TOOLS: list[Tool] = [
         ),
         description=(
             f"{_APPROVAL_NOTE}\n\n"
-            "Recompute a PET Volume-of-Interest SERVER-SIDE and materialise "
-            "its radiomic numbers (SUVmax / SUVpeak / SUVmean, and MTV as "
-            "volume_ml) onto the finding's typed measurement columns, so the "
-            "corpus is quantitatively queryable. The number is measured from "
-            "the pixels, not taken from you. ``source='voi_spherical'`` needs "
-            "``center_mm`` + ``radius_mm``; ``source='voi_threshold'`` needs "
-            "``seed_mm`` + ``threshold`` (coords in mm, origin at voxel 0,0,0 "
-            "— same frame as the VOI tools). The series must belong to the "
-            "finding's study. SUV columns are filled only when the series "
-            "carries a decay-corrected dose; otherwise just volume_ml. The "
+            "Recompute a live measurement SERVER-SIDE and materialise it onto "
+            "the finding's typed measurement columns, so the corpus is "
+            "quantitatively queryable. The number is measured from the pixels, "
+            "not taken from you. Sources:\n"
+            "- ``voi_spherical`` (PET): ``center_mm`` + ``radius_mm`` → "
+            "SUVmax/peak/mean + MTV (volume_ml).\n"
+            "- ``voi_threshold`` (PET): ``seed_mm`` + ``threshold`` → same.\n"
+            "- ``roi_stats``: ``roi`` (bbox/sphere in voxel indices) → "
+            "hu_mean/hu_std (HU on CT), or the SUV columns when ``roi`` carries "
+            "a PET ``suv_variant``.\n"
+            "- ``measure_volume``: ``volume`` (two bbox corners in voxel "
+            "indices) → longest_diameter_mm/short_axis_mm/volume_ml.\n"
+            "VOI coords are mm (origin at voxel 0,0,0); roi/volume coords are "
+            "voxel indices. The series must belong to the finding's study. The "
             "finding's ``status`` is left unchanged (a human confirms it). "
-            "Optionally pass ``geometry_marker_id`` to link the placed VOI "
-            "marker as the measurement geometry. Idempotent on "
-            "``idempotency_key``; pass ``if_match`` (the finding's etag) for "
-            "optimistic concurrency."
+            "Optionally pass ``geometry_marker_id`` to link the placed marker "
+            "as the measurement geometry. Idempotent on ``idempotency_key``; "
+            "pass ``if_match`` (the finding's etag) for optimistic concurrency."
         ),
         inputSchema={
             "type": "object",
             "properties": {
                 "finding_id": {"type": "string"},
                 "series_id": {"type": "string"},
-                "source": {"type": "string", "enum": ["voi_spherical", "voi_threshold"]},
+                "source": {
+                    "type": "string",
+                    "enum": ["voi_spherical", "voi_threshold", "roi_stats", "measure_volume"],
+                },
                 "center_mm": {
                     "type": "object",
                     "properties": {
@@ -418,6 +424,22 @@ TOOLS: list[Tool] = [
                 },
                 "threshold": {"type": "number", "description": "Cutoff (voi_threshold)."},
                 "threshold_units": {"type": "string", "enum": ["SUV", "raw"]},
+                "roi": {
+                    "type": "object",
+                    "description": (
+                        "ROI geometry for source='roi_stats': "
+                        "{kind:'rectangle'|'ellipse'|'sphere', min_ijk:[i,j,k], "
+                        "max_ijk:[i,j,k]} or {kind:'sphere', center_ijk:[i,j,k], "
+                        "radius_mm}. Optional suv_variant ('bw' etc.) on a PET series."
+                    ),
+                },
+                "volume": {
+                    "type": "object",
+                    "description": (
+                        "Bbox for source='measure_volume': "
+                        "{p0:{i,j,k}, p1:{i,j,k}} (voxel indices)."
+                    ),
+                },
                 "geometry_marker_id": {"type": "string"},
                 "idempotency_key": {"type": "string"},
                 "if_match": {"type": "string"},
@@ -608,6 +630,8 @@ async def _promote_finding_measurement(args: dict[str, Any]) -> str:
         "seed_mm",
         "threshold",
         "threshold_units",
+        "roi",
+        "volume",
         "geometry_marker_id",
     ):
         if args.get(k) is not None:

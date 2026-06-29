@@ -54,6 +54,13 @@ from bvphoenix.api.markers import (
     _study_or_404,
 )
 from bvphoenix.api.pet_voi import load_pet_volume
+from bvphoenix.api.studies._shared import (
+    MeasureVolumeIn,
+    ROIStatsIn,
+    ROIStatsOut,
+    _meta_for_series,
+)
+from bvphoenix.api.studies.roi_stats import compute_roi_stats_core
 from bvphoenix.auth import require_user
 from bvphoenix.db.models import (
     AnatomySite,
@@ -71,6 +78,11 @@ from bvphoenix.db.session import get_db
 from bvphoenix.middleware.audit_dependency import AuditDep
 from bvphoenix.middleware.idempotency import IdempotencyContext, idempotent
 from bvphoenix.services.etag import enforce_optional_if_match, format_etag
+from bvphoenix.services.measurements import (
+    MissingSpacingError,
+    compute_volume,
+    spacing_from_meta,
+)
 from bvphoenix.services.permissions import apply_scope_filter, visible_studies_filter
 from bvphoenix.services.pet_voi import (
     VoiMetrics,
@@ -197,18 +209,27 @@ class _CenterMm(BaseModel):
 
 
 class PromoteMeasurementIn(BaseModel):
-    """Recompute a live PET-VOI measurement and materialise it onto the
-    finding's typed columns.
+    """Recompute a live measurement and materialise it onto the finding's
+    typed columns.
 
     The server re-runs the named computer against the packed volume so the
     number on a clinical finding is measured from pixels, never asserted by
-    the caller. The geometry is given explicitly (same inputs the VOI
-    endpoints take); ``geometry_marker_id`` optionally links an existing
-    marker the caller placed for this VOI as the measurement geometry.
+    the caller. Each ``source`` supplies its own geometry:
+
+    * ``voi_spherical`` / ``voi_threshold`` — PET VOI in mm (``center_mm`` +
+      ``radius_mm`` / ``seed_mm`` + ``threshold``) → SUVmax/peak/mean + MTV.
+    * ``roi_stats`` — a bbox/sphere ROI (``roi``, voxel indices) → hu_mean /
+      hu_std (native ROI mean/std, HU on CT), and the SUV columns when the
+      ROI request carries a PET ``suv_variant``.
+    * ``measure_volume`` — two bbox corners (``volume``, voxel indices) →
+      longest_diameter_mm / short_axis_mm / volume_ml from the mm spacing.
+
+    ``geometry_marker_id`` optionally links an existing marker the caller
+    placed for this measurement as the ``measurement`` geometry.
     """
 
     series_id: uuid.UUID
-    source: Literal["voi_spherical", "voi_threshold"]
+    source: Literal["voi_spherical", "voi_threshold", "roi_stats", "measure_volume"]
     # voi_spherical
     center_mm: _CenterMm | None = None
     radius_mm: float | None = Field(default=None, gt=0, le=200)
@@ -216,7 +237,11 @@ class PromoteMeasurementIn(BaseModel):
     seed_mm: _CenterMm | None = None
     threshold: float | None = Field(default=None, gt=0)
     threshold_units: Literal["SUV", "raw"] = "SUV"
-    # Optional: link an existing marker (the placed VOI) as role='measurement'.
+    # roi_stats / measure_volume geometry (voxel-index inputs, reusing the
+    # study endpoints' own request models).
+    roi: ROIStatsIn | None = None
+    volume: MeasureVolumeIn | None = None
+    # Optional: link an existing marker (the placed VOI/ROI) as role='measurement'.
     geometry_marker_id: uuid.UUID | None = None
 
     @model_validator(mode="after")
@@ -224,9 +249,15 @@ class PromoteMeasurementIn(BaseModel):
         if self.source == "voi_spherical":
             if self.center_mm is None or self.radius_mm is None:
                 raise ValueError("voi_spherical requires center_mm and radius_mm")
-        else:  # voi_threshold
+        elif self.source == "voi_threshold":
             if self.seed_mm is None or self.threshold is None:
                 raise ValueError("voi_threshold requires seed_mm and threshold")
+        elif self.source == "roi_stats":
+            if self.roi is None:
+                raise ValueError("roi_stats requires roi")
+        else:  # measure_volume
+            if self.volume is None:
+                raise ValueError("measure_volume requires volume")
         return self
 
 
@@ -564,6 +595,39 @@ def _voi_metrics_to_measurements(metrics: VoiMetrics) -> dict[str, float | None]
         measurements["suv_peak"] = metrics.suv_peak
         measurements["suv_mean"] = metrics.suv_mean
     return measurements
+
+
+def _roi_stats_to_measurements(roi: ROIStatsOut) -> dict[str, float | None]:
+    """Map an ROI-stats computation onto the finding's measurement columns.
+
+    When the request asked for a PET ``suv_variant`` and it resolved, the ROI
+    is an SUV measurement → fill the ``suv_*`` columns (exactly like a VOI).
+    Otherwise the native mean/std go to ``hu_mean``/``hu_std`` — Hounsfield
+    units on a CT, the intended use. We never write both: a number in
+    ``hu_mean`` is asserted to be HU, so a PET-SUV ROI populates only the
+    ``suv_*`` columns."""
+    if roi.suv_max is not None:
+        return {
+            "suv_max": roi.suv_max,
+            "suv_peak": roi.suv_peak,
+            "suv_mean": roi.suv_mean,
+        }
+    return {"hu_mean": roi.mean, "hu_std": roi.std}
+
+
+def _volume_to_measurements(vol: dict[str, Any]) -> dict[str, float | None]:
+    """Map a bbox volume computation onto the finding's measurement columns.
+
+    The axis-aligned bbox has three mm extents; ``longest_diameter_mm`` is the
+    largest, ``short_axis_mm`` the median (the RECIST-style second axis), and
+    ``volume_ml`` the bbox volume. Geometric, units-agnostic — valid on any
+    modality."""
+    extents = sorted(float(e) for e in vol["extent_mm"])
+    return {
+        "longest_diameter_mm": extents[2],
+        "short_axis_mm": extents[1],
+        "volume_ml": float(vol["volume_ml"]),
+    }
 
 
 async def _apply_promoted_measurements(
@@ -1083,13 +1147,16 @@ async def promote_finding_measurement(
     idem: Annotated[IdempotencyContext, Depends(idempotent)],
     if_match: Annotated[str | None, Header(alias="If-Match")] = None,
 ) -> FindingOut | JSONResponse:
-    """Recompute a live PET-VOI measurement and materialise it onto the finding.
+    """Recompute a live measurement and materialise it onto the finding.
 
-    The radiomic numbers (SUVmax/peak/mean, MTV) that make the corpus
-    quantitatively queryable ("confirmed nodules with SUVmax > 4") are
-    computed SERVER-SIDE from the packed volume — never asserted by the
-    caller — and written onto the finding's typed columns with an audit
-    revision. Same write gate as PATCH (an agent token cannot promote onto a
+    The quantitative numbers that make the corpus queryable ("confirmed
+    nodules with SUVmax > 4", "lesions with hu_mean < -50") are computed
+    SERVER-SIDE from the packed volume — never asserted by the caller — and
+    written onto the finding's typed columns with an audit revision. Four
+    sources dispatch to the matching live computer: ``voi_spherical`` /
+    ``voi_threshold`` (PET VOI → SUV + MTV), ``roi_stats`` (bbox/sphere ROI →
+    hu_mean/hu_std or SUV), ``measure_volume`` (bbox → diameters + volume).
+    Same write gate as PATCH (an agent token cannot promote onto a
     human-authored finding); ``status`` is left untouched (a promoted
     measurement stays ``candidate`` until a human confirms it). Idempotent on
     ``Idempotency-Key``; optional ``If-Match`` for optimistic concurrency.
@@ -1099,42 +1166,73 @@ async def promote_finding_measurement(
     if idem.replay is not None:
         return idem.replay
 
-    # Server-side recompute against the named live computer.
-    series, _study, payload, factors = await load_pet_volume(db, body.series_id, user)
-    # Defense in depth: the measured series must belong to the finding's own
-    # study (``load_pet_volume`` already gates READ on the series' study; this
-    # blocks attaching another study's number to this finding).
-    if series.study_id != f.study_id:
-        raise HTTPException(
-            status_code=422,
-            detail="series does not belong to the finding's study",
+    # Server-side recompute against the named live computer. Each source
+    # resolves its own series + READ_PIXELS gate and re-asserts the measured
+    # series belongs to the finding's own study (defense in depth: a promote
+    # can never attach another study's number to this finding).
+    measurements: dict[str, float | None]
+    units: str | None = None
+    if body.source in ("voi_spherical", "voi_threshold"):
+        series, _study, payload, factors = await load_pet_volume(db, body.series_id, user)
+        if series.study_id != f.study_id:
+            raise HTTPException(
+                status_code=422, detail="series does not belong to the finding's study"
+            )
+        blob = parse_volume_blob(payload)
+        if body.source == "voi_spherical":
+            assert body.center_mm is not None and body.radius_mm is not None
+            metrics = compute_voi_spherical(
+                blob,
+                center_mm=(body.center_mm.x, body.center_mm.y, body.center_mm.z),
+                radius_mm=body.radius_mm,
+                suv_factor_bw=factors.get("factor_bw"),
+            )
+        else:  # voi_threshold
+            assert body.seed_mm is not None and body.threshold is not None
+            metrics = compute_voi_threshold(
+                blob,
+                seed_mm=(body.seed_mm.x, body.seed_mm.y, body.seed_mm.z),
+                threshold_value=body.threshold,
+                threshold_units=body.threshold_units,
+                suv_factor_bw=factors.get("factor_bw"),
+            )
+        if metrics.voxel_count == 0:
+            raise HTTPException(
+                status_code=422, detail={"code": "empty_voi", "notes": metrics.notes}
+            )
+        measurements = _voi_metrics_to_measurements(metrics)
+        units = metrics.units
+    elif body.source == "roi_stats":
+        assert body.roi is not None
+        series, _study, _meta = await _meta_for_series(db, body.series_id, user)
+        if series.study_id != f.study_id:
+            raise HTTPException(
+                status_code=422, detail="series does not belong to the finding's study"
+            )
+        roi_out = await compute_roi_stats_core(db, series, body.roi)
+        measurements = _roi_stats_to_measurements(roi_out)
+        units = roi_out.units_native
+    else:  # measure_volume
+        assert body.volume is not None
+        series, _study, meta = await _meta_for_series(db, body.series_id, user)
+        if series.study_id != f.study_id:
+            raise HTTPException(
+                status_code=422, detail="series does not belong to the finding's study"
+            )
+        try:
+            spacing = spacing_from_meta(meta)
+        except MissingSpacingError as exc:
+            raise HTTPException(
+                status_code=422,
+                detail={"code": "measurement_unavailable", "missing_fields": exc.missing},
+            ) from exc
+        vol = compute_volume(
+            (body.volume.p0.i, body.volume.p0.j, body.volume.p0.k),
+            (body.volume.p1.i, body.volume.p1.j, body.volume.p1.k),
+            spacing,
         )
+        measurements = _volume_to_measurements(vol)
 
-    blob = parse_volume_blob(payload)
-    if body.source == "voi_spherical":
-        assert body.center_mm is not None and body.radius_mm is not None
-        metrics = compute_voi_spherical(
-            blob,
-            center_mm=(body.center_mm.x, body.center_mm.y, body.center_mm.z),
-            radius_mm=body.radius_mm,
-            suv_factor_bw=factors.get("factor_bw"),
-        )
-    else:  # voi_threshold
-        assert body.seed_mm is not None and body.threshold is not None
-        metrics = compute_voi_threshold(
-            blob,
-            seed_mm=(body.seed_mm.x, body.seed_mm.y, body.seed_mm.z),
-            threshold_value=body.threshold,
-            threshold_units=body.threshold_units,
-            suv_factor_bw=factors.get("factor_bw"),
-        )
-    if metrics.voxel_count == 0:
-        raise HTTPException(
-            status_code=422,
-            detail={"code": "empty_voi", "notes": metrics.notes},
-        )
-
-    measurements = _voi_metrics_to_measurements(metrics)
     author_kind, _m, _p, _t = _agent_provenance(request)
     changed = await _apply_promoted_measurements(
         db,
@@ -1157,7 +1255,7 @@ async def promote_finding_measurement(
             "source": body.source,
             "series_id": str(series.id),
             "changed": changed,
-            "units": metrics.units,
+            "units": units,
         },
     )
     out = await _serialize_one(db, f)
