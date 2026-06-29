@@ -5,6 +5,31 @@ project follows semantic versioning; pre-release suffixes (`alpha`,
 `beta`) gate Kubernetes deployments via the GHCR image tag (without
 the leading `v`, see deployment guide).
 
+## 4.4.86 (2026-06-29)
+
+### Consent: patient-visible append-only consent ledger + MCP tool + FE
+
+* New `GET /api/gdpr/consent-ledger`: the caller's append-only grant/revoke
+  history for account-level GDPR consents and per-study training opt-ins
+  (tiers T3 / T4), most recent first, plus the current state and the
+  currently-active study consents. Pass `as_of` (ISO-8601) for point-in-time
+  proof of what was in effect at that instant (GDPR Art. 7(1)). Reversible,
+  patient-mediated, provable consent — the governance an irreversible data
+  lake precludes by construction.
+* Derived from the authoritative consent rows, not a parallel table: the
+  `Consent` and `TrainingConsent` tables are already append-only episode
+  ledgers (a grant inserts a fresh row, a revoke stamps `revoked_at` once),
+  and the ledger reads the very rows that gate cohort selection
+  (`training_cohort.select_cohort` filters `revoked_at IS NULL`), so it
+  cannot drift from what actually governs data use. No migration; works
+  retroactively over all existing consent history.
+* New MCP tool `get_consent_ledger` on a grantable `consent:read` scope
+  (read-only, self-scoped) — MCP stays a superset of the GUI.
+* New `ConsentLedgerPanel` on the privacy settings page beside the consent
+  toggles and the PHR-Bundle export; en/it i18n parity.
+* `list_consents` refactored onto the shared collapse helper (single source
+  of the current-state logic, no duplication).
+
 ## 4.4.85 (2026-06-29)
 
 ### Governance: public applied-policy endpoint + data-governance dossier
