@@ -34,6 +34,7 @@ from bvphoenix.api import external_identifiers as external_identifiers_routes
 from bvphoenix.api import findings as findings_routes
 from bvphoenix.api import folders as folders_routes
 from bvphoenix.api import gdpr as gdpr_routes
+from bvphoenix.api import governance as governance_routes
 from bvphoenix.api import history as history_routes
 from bvphoenix.api import inbox as inbox_routes
 from bvphoenix.api import internal_auth as internal_auth_routes
@@ -141,6 +142,7 @@ api_router.include_router(bulk_upload_routes.router)
 api_router.include_router(upload_sessions_routes.router)
 api_router.include_router(bulk_routes.router)
 api_router.include_router(transparency_routes.router)
+api_router.include_router(governance_routes.router)
 api_router.include_router(user_api_keys_routes.router)
 api_router.include_router(credits_routes.router)
 api_router.include_router(duc_routes.router)
