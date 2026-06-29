@@ -359,6 +359,72 @@ def to_collection_bundle(
 # --------------------------------------------------------------------------- #
 
 
+# Resource types bitvision emits in an export Bundle — also what the
+# CapabilityStatement advertises. Single source so the two can't drift.
+EXPORTED_RESOURCE_TYPES: tuple[str, ...] = (
+    "Patient",
+    "ImagingStudy",
+    "DiagnosticReport",
+    "DocumentReference",
+)
+
+
+def capability_statement(
+    *,
+    software_version: str,
+    fhir_base_url: str,
+    dicomweb_base_url: str,
+    date_iso: str,
+) -> dict[str, Any]:
+    """A FHIR R4 ``CapabilityStatement`` for bitvision's standards surface.
+
+    PHI-free by construction — pure capability metadata. It is deliberately
+    honest about what bitvision *is*: a system that **produces** FHIR R4
+    Bundles (the Health Record / GDPR export) and retrieves imaging over
+    **DICOMweb**, not a general FHIR REST server. So it declares the emitted
+    resource types with documentation but advertises **no** REST interactions
+    it does not implement — a conformance claim a closed lake cannot make and
+    a client can falsify by GETting ``/api/fhir/metadata``.
+    """
+    return {
+        "resourceType": "CapabilityStatement",
+        "status": "active",
+        "date": date_iso,
+        "kind": "instance",
+        "fhirVersion": "4.0.1",
+        "format": ["application/fhir+json"],
+        "software": {"name": "bitvision phoenix", "version": software_version},
+        "implementation": {
+            "description": (
+                "bitvision phoenix — patient-owned imaging platform. Produces "
+                "FHIR R4 Bundles via the Health Record / GDPR export and serves "
+                "imaging over DICOMweb (QIDO-RS / WADO-RS)."
+            ),
+            "url": fhir_base_url.rstrip("/"),
+        },
+        "rest": [
+            {
+                "mode": "server",
+                "documentation": (
+                    "Read / export surface. FHIR R4 Bundles (type=collection) are "
+                    "produced by the export — see docs/fhir-export.md — and are not "
+                    f"served via FHIR REST. Imaging is retrieved over DICOMweb at "
+                    f"{dicomweb_base_url.rstrip('/')} (QIDO-RS query, WADO-RS "
+                    "retrieve / metadata / frames / bulkdata). DiagnosticReport "
+                    "carries status=final only for human-attested reports."
+                ),
+                "resource": [
+                    {
+                        "type": rtype,
+                        "documentation": "Emitted in the bitvision export Bundle.",
+                    }
+                    for rtype in EXPORTED_RESOURCE_TYPES
+                ],
+            }
+        ],
+    }
+
+
 def _endpoint_id_for(wado_base: str) -> str:
     return str(uuid.uuid5(_ENDPOINT_NS, wado_base))
 
@@ -545,11 +611,14 @@ def bundle_from_phr_bundle(phr: dict[str, Any], *, wado_base: str | None) -> dic
 
 __all__ = [
     "AUTHOR_KIND_EXTENSION",
+    "EXPORTED_RESOURCE_TYPES",
     "SOURCE_STATUS_EXTENSION",
     "bundle_from_fascicolo_manifest",
     "bundle_from_phr_bundle",
+    "capability_statement",
     "diagnostic_report_resource",
     "diagnostic_report_status",
+    "dicomweb_base_url",
     "document_reference_resource",
     "endpoint_resource",
     "imaging_study_resource",
