@@ -5,6 +5,27 @@ project follows semantic versioning; pre-release suffixes (`alpha`,
 `beta`) gate Kubernetes deployments via the GHCR image tag (without
 the leading `v`, see deployment guide).
 
+## 4.4.85 (2026-06-29)
+
+### Governance: public applied-policy endpoint + data-governance dossier
+
+* New public, versioned endpoint `GET /api/governance` exposing the
+  *applied* data-governance policy as a machine-readable descriptor: the
+  de-identification passes, the k-anonymity threshold, the contribution
+  tiers, the licences, and the patient rights. Values are sourced from the
+  runtime constants the code actually enforces
+  (`k_anonymity.DEFAULT_K_MIN`, `deid_text._KIND_TO_PATTERN`) so the
+  published policy cannot drift from the code; a DB-free conformance test
+  pins it. The endpoint is the auditable, open counterpart to a closed
+  irreversible black-box.
+* Load-bearing honesty: the policy frames bitvision as pseudonymization +
+  tiering + k-anonymity + auditable redaction, and states explicitly it is
+  NOT a claim of irreversible-anonymization parity (a test asserts the
+  framing).
+* New `docs/data-governance.md` dossier mapping every de-id / k-anon /
+  audit / erasure / portability module to its file, plus a reproducible
+  deploy quickstart.
+
 ## 4.4.84 (2026-06-29)
 
 ### OpenData: de-identification provenance panel on the study page
