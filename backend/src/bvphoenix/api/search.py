@@ -27,6 +27,7 @@ from bvphoenix.db.models import Embedding, ImagingStudy, Series, Tag, User
 from bvphoenix.db.session import get_db
 from bvphoenix.middleware.problem_details import problem
 from bvphoenix.services.embedding_status import indexed_study_ids
+from bvphoenix.services.fts import dual_tsvector
 from bvphoenix.services.mmr import MMRCandidate, mmr_rerank
 from bvphoenix.services.permissions import (
     READ_METADATA,
@@ -131,6 +132,19 @@ async def search(
             or_(
                 ImagingStudy.study_description_tsv.op("@@")(ts_query),
                 Series.series_description_tsv.op("@@")(ts_query),
+                # Also match the STRUCTURED fields, not just free-text
+                # descriptions: a study whose clinical meaning lives in its
+                # modality code or body part (e.g. a mammography with a NULL
+                # StudyDescription) is otherwise invisible to the search bar.
+                # With the thesaurus expanding "mammografia" -> {mammography,
+                # MG, breast, ...} and "fegato" -> {liver, ...}, matching these
+                # inline dual-config tsvectors lets the Italian query reach the
+                # English/coded data. Short strings, not GIN-indexed, but the
+                # candidate set is already auth/scope-narrowed.
+                dual_tsvector(Series.body_part_examined).op("@@")(ts_query),
+                dual_tsvector(func.array_to_string(ImagingStudy.modalities, " ")).op("@@")(
+                    ts_query
+                ),
             )
         )
 

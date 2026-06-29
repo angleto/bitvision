@@ -105,6 +105,59 @@ async def test_search_filter_body_part(db_session, make_user, make_study) -> Non
 
 
 @pytest.mark.asyncio
+async def test_search_freetext_matches_body_part(db_session, make_user, make_study) -> None:
+    # The free-text bar (not just the body_part filter) must reach a study
+    # whose clinical meaning lives in body_part_examined, with a description
+    # that does NOT contain the term.
+    user = await make_user()
+    await make_study(user, description="screening exam", body_part="BREAST")
+    await make_study(user, description="routine", body_part="HEAD")
+    client = await _client_for(db_session, user)
+    r = await client.get("/api/search", params={"q": "breast"})
+    assert r.status_code == 200
+    assert r.json()["total"] >= 1
+    await client.aclose()
+    app.dependency_overrides.clear()
+
+
+@pytest.mark.asyncio
+async def test_search_freetext_matches_modality_code(db_session, make_user, make_study) -> None:
+    # A study whose only relevant signal is the DICOM modality code (e.g. a
+    # mammography with an uninformative description) must be reachable by the
+    # code typed into the bar.
+    user = await make_user()
+    await make_study(user, description="exam", modality="MG", body_part="OTHER")
+    await make_study(user, description="exam", modality="CT", body_part="OTHER")
+    client = await _client_for(db_session, user)
+    r = await client.get("/api/search", params={"q": "MG"})
+    assert r.status_code == 200
+    items = r.json()["items"]
+    assert items and all("MG" in (s.get("modalities") or []) for s in items)
+    await client.aclose()
+    app.dependency_overrides.clear()
+
+
+@pytest.mark.asyncio
+async def test_search_thesaurus_bridges_italian_to_english(
+    db_session, make_user, make_study, monkeypatch
+) -> None:
+    # With the thesaurus loaded, an Italian term expands to its English
+    # equivalent and reaches an English-described study (the user's symptom:
+    # "fegato" finding a "...LIVER..." exam).
+    monkeypatch.setattr("bvphoenix.services.thesaurus._synonyms", {"fegato": ["liver"]})
+    user = await make_user()
+    await make_study(user, description="CT ABDOMEN LIVER PROTOCOL", body_part="ABDOMEN")
+    await make_study(user, description="brain mri routine", body_part="HEAD")
+    client = await _client_for(db_session, user)
+    r = await client.get("/api/search", params={"q": "fegato"})
+    assert r.status_code == 200
+    items = r.json()["items"]
+    assert any("LIVER" in (s.get("study_description") or "").upper() for s in items)
+    await client.aclose()
+    app.dependency_overrides.clear()
+
+
+@pytest.mark.asyncio
 async def test_search_filter_date_range(db_session, make_user, make_study) -> None:
     user = await make_user()
     await make_study(user, description="old", study_date=date(2020, 1, 1))
