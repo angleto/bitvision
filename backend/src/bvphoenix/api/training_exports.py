@@ -55,6 +55,12 @@ class TrainingCohortQueryIn(BaseModel):
     min_suv_max: float | None = Field(default=None, ge=0)
     scope: Literal["all", "mine", "public"] = "all"
     k_min: int = Field(default=k_anonymity.DEFAULT_K_MIN, ge=1, le=1000)
+    # Bundle output format. ``bvphoenix`` = raw de-identified DICOM + .bin
+    # masks + labels.json; ``nnunet``/``monai`` = NIfTI image/label pairs +
+    # dataset.json; ``coco`` = per-slice PNG + RLE annotations. Affects only
+    # the byte bundle (POST /training-exports); the manifest endpoint is
+    # format-agnostic (the coded labels are the same regardless).
+    format: Literal["bvphoenix", "nnunet", "monai", "coco"] = "bvphoenix"
 
 
 @router.post("/training-exports/manifest")
@@ -116,11 +122,13 @@ async def create_training_cohort_export(
     db: Annotated[AsyncSession, Depends(get_db)],
     user: Annotated[User, Depends(require_user)],
 ) -> JobOut:
-    """Enqueue the de-identified training-cohort ZIP bundle (images +
-    masks + labels.json) as a Job. Poll ``GET /api/jobs/{id}`` and download
-    via the Job's ``result_download_url``. Admin / platform-owner only. The
-    worker re-selects the cohort at run time, so consent + tier + k-anon
-    are re-validated then (a consent revoked after enqueue is honored)."""
+    """Enqueue the de-identified training-cohort ZIP bundle as a Job, in the
+    requested ``format``: ``bvphoenix`` (raw DICOM + .bin masks + labels.json),
+    ``nnunet`` / ``monai`` (NIfTI image+label pairs + dataset.json), or
+    ``coco`` (per-slice PNG + RLE annotations). Poll ``GET /api/jobs/{id}``
+    and download via the Job's ``result_download_url``. Admin / platform-owner
+    only. The worker re-selects the cohort at run time, so consent + tier +
+    k-anon are re-validated then (a consent revoked after enqueue is honored)."""
     if not getattr(user, "is_admin", False):
         raise HTTPException(status_code=403, detail="training cohort export requires admin")
 

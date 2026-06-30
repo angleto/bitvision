@@ -75,14 +75,16 @@ TOOLS: list[Tool] = [
             openWorldHint=False,
         ),
         description=(
-            "Enqueue the full de-identified training BUNDLE (images + masks "
-            "+ labels.json as a ZIP) for the cohort matching a structured "
-            "Finding query. Returns a Job descriptor — poll get_job(job_id) "
-            "and download via its result_download_url. Same gating as the "
-            "manifest (consent + tier + k-anonymity + admin), re-validated "
-            "when the worker runs. Use export_training_manifest first to "
-            "preview the cohort + check k-anonymity before committing the "
-            "heavy bundle."
+            "Enqueue the full de-identified training BUNDLE (a ZIP) for the "
+            "cohort matching a structured Finding query, in the requested "
+            "format: 'bvphoenix' (raw DICOM + .bin masks + labels.json), "
+            "'nnunet' / 'monai' (NIfTI image+label pairs + dataset.json), or "
+            "'coco' (per-slice PNG + RLE annotations). Returns a Job "
+            "descriptor — poll get_job(job_id) and download via its "
+            "result_download_url. Same gating as the manifest (consent + tier "
+            "+ k-anonymity + admin), re-validated when the worker runs. Use "
+            "export_training_manifest first to preview the cohort + check "
+            "k-anonymity before committing the heavy bundle."
         ),
         inputSchema={
             "type": "object",
@@ -108,6 +110,15 @@ TOOLS: list[Tool] = [
                     "default": "all",
                 },
                 "k_min": {"type": "integer", "default": 5, "minimum": 1, "maximum": 1000},
+                "format": {
+                    "type": "string",
+                    "enum": ["bvphoenix", "nnunet", "monai", "coco"],
+                    "default": "bvphoenix",
+                    "description": (
+                        "bundle layout: bvphoenix (raw DICOM+masks), nnunet/monai "
+                        "(NIfTI + dataset.json), coco (PNG + RLE)"
+                    ),
+                },
             },
         },
     ),

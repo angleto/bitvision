@@ -36,17 +36,21 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import hashlib
+import io
 import json
 import logging
 import threading
 import uuid
+from collections.abc import Callable
 from datetime import UTC, datetime
 from typing import Any
 
+import pydicom
 from bvphoenix.db.models import DatasetStudy, LicensedDataset, User
 from bvphoenix.db.session import SERVICE_SUBJECT, set_current_subject
 from bvphoenix.services import jobs as jobs_service
 from bvphoenix.services import k_anonymity, training_cohort
+from bvphoenix.services import training_cohort_formats as fmts
 from bvphoenix.services.face_deid import get_defacer
 from bvphoenix.services.patient_export import _bytes_member, _fetch_blob_bytes
 from bvphoenix.services.pixel_deid import classify_pixel_risk_bytes
@@ -175,20 +179,168 @@ def _stream_cohort_sync(
     return result.size_bytes, stats, skipped
 
 
-async def _stream_cohort(
-    engine: Any,
-    job_id: uuid.UUID,
-    work: list[dict[str, Any]],
+def _stream_cohort_volumes_sync(
+    series_plan: list[dict[str, Any]],
     labels_bytes: bytes,
+    fmt: str,
+    label_index: dict[str, int],
     *,
     bucket: str,
     key: str,
-    total: int,
+    progress_q: list[int],
+    cancel: threading.Event,
 ) -> tuple[int, dict[uuid.UUID, dict[str, Any]], list[dict[str, Any]]]:
-    """Run the sync stream in a thread while an async poller publishes the
-    shared progress counter to the Job. Returns the streamed size, the
-    per-study byte/hash stats the dataset producer needs, and the list of
-    high-risk-pixel instances the burned-in-PHI gate excluded."""
+    """Sync core for the volume formats (nnU-Net / MONAI / COCO).
+
+    Per series: fetch + de-id every DICOM instance, run the SAME burned-in-PHI
+    gate as the raw bundle — but because a NIfTI/PNG ships the WHOLE series as
+    one artifact, a single high-risk (or, with de-facing on, face-risk) slice
+    drops the ENTIRE series (it cannot be excluded slice-by-slice without
+    leaving a hole in the volume). Surviving series are stacked into an image
+    volume + a label volume (masks painted through the dataset-wide label
+    index) and serialized: nnU-Net/MONAI emit NIfTI image/label pairs, COCO
+    emits per-slice PNG + RLE annotations. ``labels.json`` (the coded manifest)
+    and the format manifest (``dataset.json`` / ``annotations/instances.json``)
+    trail the artifacts. Per-study size/hash accumulate over the EMITTED bytes
+    (the payout weight + integrity for the dataset ledger). Returns
+    ``(total_size_bytes, per_study_stats, skipped)``; ``skipped`` records every
+    dropped series with the reason so a gap is never silent.
+
+    Memory is bounded per series (one image volume + one label volume at a
+    time), not per cohort."""
+    storage = get_s3_storage()
+    per_study: dict[uuid.UUID, dict[str, Any]] = {}
+    skipped: list[dict[str, Any]] = []
+    deface_on = get_defacer() is not None
+    coco = fmts.CocoBuilder(label_index) if fmt == "coco" else None
+    monai_cases: list[tuple[str, str]] = []
+    modalities: dict[str, int] = {}
+    nnunet_count = [0]
+
+    def _acc(sid: uuid.UUID | None, *blobs: bytes) -> None:
+        if sid is None:
+            return
+        stat = per_study.setdefault(sid, {"size": 0, "hash": hashlib.sha256()})
+        for b in blobs:
+            stat["size"] += len(b)
+            stat["hash"].update(b)
+
+    def _members():  # type: ignore[no-untyped-def]
+        for s in series_plan:
+            if cancel.is_set():
+                raise _ExportCancelledError
+            sid = s.get("study_id")
+            name = f"{s['study_syn']}/series-{s['series_idx']:02d}"
+            # Fetch + de-id every slice; gate on burned-in / face-risk pixels.
+            datasets: list[pydicom.Dataset] = []
+            risk_hit: str | None = None
+            for d in s["dicom"]:
+                body = _fetch_blob_bytes(storage, d["bucket"], d["key"], deidentify=True)
+                risk = classify_pixel_risk_bytes(body)
+                if risk.is_high or (deface_on and risk.level == "low"):
+                    risk_hit = risk.level
+                    break
+                datasets.append(pydicom.dcmread(io.BytesIO(body)))
+            if risk_hit is not None or not datasets:
+                skipped.append({"study_id": sid, "name": name, "risk": risk_hit or "no_image"})
+                progress_q[0] += 1
+                continue
+            try:
+                img_arr, spacing, ordered = fmts.build_image_volume(datasets)
+                mask_inputs = []
+                for m in s["masks"]:
+                    raw = _fetch_blob_bytes(storage, m["bucket"], m["key"], deidentify=False)
+                    mask_inputs.append(
+                        {"label": m["label"], "label_map": m.get("label_map") or {}, "raw": raw}
+                    )
+                label_arr = fmts.build_label_volume(mask_inputs, img_arr.shape, label_index)
+            except fmts.CohortFormatError as exc:
+                skipped.append({"study_id": sid, "name": name, "risk": f"format:{exc}"})
+                progress_q[0] += 1
+                continue
+            if label_arr is None:
+                # No usable mask → nothing supervised to learn from this series.
+                skipped.append({"study_id": sid, "name": name, "risk": "no_mask"})
+                progress_q[0] += 1
+                continue
+            modality = str(getattr(ordered[0], "Modality", "") or "image")
+            modalities[modality] = modalities.get(modality, 0) + 1
+            window = fmts.default_window(ordered[0], img_arr) if fmt == "coco" else (0.0, 0.0)
+            datasets = ordered = []  # release per-slice pixel caches early
+            case_id = f"{s['study_syn']}_series-{s['series_idx']:02d}"
+            if fmt in fmts.NIFTI_FORMATS:
+                img_name = fmts.nnunet_image_name(case_id)
+                lbl_name = fmts.nnunet_label_name(case_id)
+                img_bytes = fmts.write_nifti(img_arr, spacing)
+                lbl_bytes = fmts.write_nifti(label_arr, spacing)
+                _acc(sid, img_bytes, lbl_bytes)
+                monai_cases.append((img_name, lbl_name))
+                nnunet_count[0] += 1
+                yield _bytes_member(img_name, img_bytes, compress=False)
+                yield _bytes_member(lbl_name, lbl_bytes, compress=False)
+            else:  # coco
+                wc, ww = window
+                for z in range(label_arr.shape[0]):
+                    if not label_arr[z].any():
+                        continue
+                    fname = f"images/{case_id}_z{z:04d}.png"
+                    if coco is not None and coco.add_slice(fname, label_arr[z]):
+                        png = fmts.encode_png(fmts.window_to_uint8(img_arr[z], wc=wc, ww=ww))
+                        _acc(sid, png)
+                        yield _bytes_member(fname, png, compress=False)
+            progress_q[0] += 1
+
+        if cancel.is_set():
+            raise _ExportCancelledError
+        modality = max(modalities, key=lambda k: modalities[k]) if modalities else "image"
+        if fmt == "nnunet":
+            man = fmts.nnunet_dataset_json(
+                modality=modality, label_index=label_index, num_training=nnunet_count[0]
+            )
+            yield _bytes_member("dataset.json", _json_bytes(man), compress=True)
+        elif fmt == "monai":
+            man = fmts.monai_dataset_json(
+                modality=modality, label_index=label_index, cases=monai_cases
+            )
+            yield _bytes_member("dataset.json", _json_bytes(man), compress=True)
+        elif fmt == "coco" and coco is not None:
+            yield _bytes_member(
+                "annotations/instances.json", _json_bytes(coco.build()), compress=True
+            )
+        progress_q[0] += 1
+        if cancel.is_set():
+            raise _ExportCancelledError
+        yield _bytes_member("labels.json", labels_bytes, compress=True)
+        progress_q[0] += 1
+
+    result = storage.upload_iter(
+        stream_zip(_members()), bucket=bucket, key=key, content_type="application/zip"
+    )
+    stats = {
+        sid: {"size_bytes": s["size"], "content_sha256": s["hash"].hexdigest()}
+        for sid, s in per_study.items()
+    }
+    return result.size_bytes, stats, skipped
+
+
+def _json_bytes(obj: Any) -> bytes:
+    return json.dumps(obj, ensure_ascii=False, indent=2).encode("utf-8")
+
+
+async def _run_streamer(
+    engine: Any,
+    job_id: uuid.UUID,
+    total: int,
+    runner: Callable[
+        [list[int], threading.Event],
+        tuple[int, dict[uuid.UUID, dict[str, Any]], list[dict[str, Any]]],
+    ],
+) -> tuple[int, dict[uuid.UUID, dict[str, Any]], list[dict[str, Any]]]:
+    """Run a sync streaming ``runner`` in a thread while an async poller
+    publishes the shared progress counter to the Job and honours a mid-stream
+    cancel. Format-agnostic: the bvphoenix bundle and the volume formats share
+    this exact progress + cancellation machinery. ``runner(progress_q, cancel)``
+    returns ``(size_bytes, per_study_stats, skipped)``."""
     progress_q = [0]
     stop = asyncio.Event()
     cancel = threading.Event()
@@ -220,15 +372,7 @@ async def _stream_cohort(
 
     poller = asyncio.create_task(_poll())
     try:
-        return await asyncio.to_thread(
-            _stream_cohort_sync,
-            work,
-            labels_bytes,
-            bucket=bucket,
-            key=key,
-            progress_q=progress_q,
-            cancel=cancel,
-        )
+        return await asyncio.to_thread(runner, progress_q, cancel)
     finally:
         stop.set()
         poller.cancel()
@@ -280,15 +424,44 @@ async def training_cohort_export_zip(
                 kanon=kanon,
                 study_syn=study_syn,
             )
-            work = await training_cohort.cohort_blob_plan(db, study_syn)
+            fmt = str(query.get("format") or "bvphoenix")
+            if fmt not in fmts.COHORT_FORMATS:
+                fmt = "bvphoenix"
+            if fmt == "bvphoenix":
+                work = await training_cohort.cohort_blob_plan(db, study_syn)
+                series_plan: list[dict[str, Any]] = []
+                label_index: dict[str, int] = {}
+            else:
+                series_plan = await training_cohort.cohort_series_plan(db, study_syn)
+                label_index = fmts.build_label_index([s["masks"] for s in series_plan])
+                work = []
 
-        labels_bytes = json.dumps(manifest, ensure_ascii=False, indent=2).encode("utf-8")
-        total = len(work) + 1  # + labels.json
+        labels_bytes = _json_bytes(manifest)
         bucket = settings.s3_bucket_derivatives
         key = f"exports/training/{job_id}/cohort.zip"
-        size, per_study_stats, pixel_skipped = await _stream_cohort(
-            engine, jid, work, labels_bytes, bucket=bucket, key=key, total=total
-        )
+        if fmt == "bvphoenix":
+            total = len(work) + 1  # + labels.json
+
+            def runner(pq: list[int], cx: threading.Event) -> Any:
+                return _stream_cohort_sync(
+                    work, labels_bytes, bucket=bucket, key=key, progress_q=pq, cancel=cx
+                )
+        else:
+            total = len(series_plan) + 2  # + format manifest + labels.json
+
+            def runner(pq: list[int], cx: threading.Event) -> Any:
+                return _stream_cohort_volumes_sync(
+                    series_plan,
+                    labels_bytes,
+                    fmt,
+                    label_index,
+                    bucket=bucket,
+                    key=key,
+                    progress_q=pq,
+                    cancel=cx,
+                )
+
+        size, per_study_stats, pixel_skipped = await _run_streamer(engine, jid, total, runner)
         if pixel_skipped:
             by_risk: dict[str, int] = {}
             for s in pixel_skipped:
