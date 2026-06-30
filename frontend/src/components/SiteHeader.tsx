@@ -134,6 +134,7 @@ export default function SiteHeader() {
               <Link href="/register">{t("register")}</Link>
             </>
           )}
+          <Link href="/datasets">{t("datasets")}</Link>
           <ThemeToggle className="ghost" />
           <LanguageSwitcher />
         </nav>
