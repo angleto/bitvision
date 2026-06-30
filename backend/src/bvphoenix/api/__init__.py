@@ -15,6 +15,7 @@ from bvphoenix.api import bulk as bulk_routes
 from bvphoenix.api import bulk_upload as bulk_upload_routes
 from bvphoenix.api import calendar as calendar_routes
 from bvphoenix.api import care_phases as care_phases_routes
+from bvphoenix.api import catalog as catalog_routes
 from bvphoenix.api import (
     clinical_event_attachments as clinical_event_attachments_routes,
 )
@@ -147,6 +148,7 @@ api_router.include_router(upload_sessions_routes.router)
 api_router.include_router(bulk_routes.router)
 api_router.include_router(transparency_routes.router)
 api_router.include_router(governance_routes.router)
+api_router.include_router(catalog_routes.router)
 api_router.include_router(user_api_keys_routes.router)
 api_router.include_router(credits_routes.router)
 api_router.include_router(duc_routes.router)

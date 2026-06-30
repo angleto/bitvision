@@ -868,6 +868,11 @@ EXPECTED_TOOL_NAMES = {
     "list_contribution_queue",
     "get_contribution",
     "reject_contribution",
+    # --- Public dataset catalog (OpenData commons; catalog:read scope).
+    # Backend api/catalog.py. Read-only, aggregate/citation data, no PHI.
+    "list_public_datasets",
+    "get_public_dataset",
+    "get_dataset_citation",
 }
 
 

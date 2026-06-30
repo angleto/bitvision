@@ -1,4 +1,35 @@
 {
+  "datasetCatalog": {
+    "title": "Catalogo dataset aperti",
+    "intro": "Un commons consultabile e citabile di collezioni di imaging medico pubbliche, con licenza CC. Ogni dataset riporta licenza e citazione per riuso e citazione.",
+    "totals": "{collections} collezioni · {subjects} soggetti · {studies} studi · {instances} immagini",
+    "loading": "Caricamento…",
+    "empty": "Nessun dataset pubblico disponibile al momento.",
+    "loadError": "Impossibile caricare il catalogo.",
+    "subjects": "Soggetti",
+    "studies": "Studi",
+    "series": "Serie",
+    "images": "Immagini",
+    "modalities": "Modalità",
+    "bodyParts": "Distretti",
+    "license": "Licenza",
+    "nonCommercial": "non commerciale",
+    "commercialOk": "uso commerciale consentito",
+    "view": "Apri dataset",
+    "back": "← Tutti i dataset",
+    "notFound": "Dataset non trovato.",
+    "pid": "ID persistente",
+    "sourceCollection": "Collezione di origine",
+    "publishedYear": "Prima pubblicazione",
+    "citationRequired": "La citazione è obbligatoria per il riuso di questo dataset.",
+    "citeHeading": "Cita questo dataset",
+    "copy": "Copia",
+    "copied": "Copiato",
+    "downloadBibtex": "BibTeX",
+    "downloadRis": "RIS",
+    "downloadDatacite": "DataCite JSON",
+    "samplesHeading": "Studi di esempio"
+  },
   "lesionTracks": {
     "title": "Lesioni seguite",
     "loading": "Caricamento…",
@@ -537,7 +568,8 @@
     "adminMenuHubLink": "Pannello admin (hub)",
     "adminMenuSectionAccess": "Persone & Accessi",
     "adminMenuSectionAI": "AI",
-    "adminMenuSectionSystem": "Sistema"
+    "adminMenuSectionSystem": "Sistema",
+    "datasets": "Dataset"
   },
   "landing": {
     "headline": "Imaging medicale per il web aperto.",

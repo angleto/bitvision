@@ -3416,6 +3416,72 @@ export const transparencyApi = {
   },
 };
 
+// Public dataset catalog (GET /api/catalog/*) — the browsable, citable
+// OpenData commons. Anonymous-friendly: every field is an aggregate or
+// attribution metadata, no per-study PHI.
+export type CatalogCollectionSummary = {
+  slug: string;
+  pid: string;
+  collection: string;
+  title: string;
+  subjects: number;
+  studies: number;
+  series: number;
+  instances: number;
+  modalities: string[];
+  body_parts: string[];
+  license_spdx: string | null;
+  license_url: string | null;
+  citation_required: boolean;
+  commercial_use_allowed: boolean;
+  first_published_year: number | null;
+};
+
+export type CatalogList = {
+  generated_at: string;
+  version: string;
+  totals: {
+    collections: number;
+    subjects: number;
+    studies: number;
+    series: number;
+    instances: number;
+  };
+  collections: CatalogCollectionSummary[];
+};
+
+export type CatalogSampleStudy = {
+  id: string;
+  study_description: string | null;
+  study_date: string | null;
+  modalities: string[];
+};
+
+export type CatalogCollectionDetail = CatalogCollectionSummary & {
+  landing_url: string;
+  citation_text: string | null;
+  datacite: Record<string, unknown>;
+  sample_studies: CatalogSampleStudy[];
+};
+
+export type CitationFormat = "text" | "bibtex" | "ris" | "datacite";
+
+export const catalogApi = {
+  listCollections(): Promise<CatalogList> {
+    return request<CatalogList>("/api/catalog/collections");
+  },
+  getCollection(slug: string): Promise<CatalogCollectionDetail> {
+    return request<CatalogCollectionDetail>(`/api/catalog/collections/${encodeURIComponent(slug)}`);
+  },
+  // Absolute URL so anchor downloads / new-tab opens hit the API host
+  // directly (the citation endpoints are public, no bearer needed).
+  citationDownloadUrl(slug: string, format: CitationFormat): string {
+    return absoluteApiUrl(
+      `/api/catalog/collections/${encodeURIComponent(slug)}/citation?format=${format}`,
+    );
+  },
+};
+
 // "My data in datasets" — the contributor-sovereignty view (a5c3f73e).
 // Aggregate + storage-isolated: no study/patient id or storage location.
 export interface MyDataset {

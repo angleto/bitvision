@@ -127,6 +127,13 @@ SCOPE_CATALOG: tuple[ScopeDef, ...] = (
         sensitive=True,
         human_only=True,
     ),
+    # --- Public dataset catalog (OpenData commons, read-only) -----------------
+    ScopeDef(
+        "catalog:read",
+        "Browse the public OpenData dataset catalog: collections, aggregate "
+        "counts, license, and citation metadata. Aggregate, attribution-only "
+        "data — no PHI — the same surface the public landing page shows.",
+    ),
     # --- Report contents (Expression) -----------------------------------------
     ScopeDef("reports:read", "Read report_contents, list per event, citations"),
     ScopeDef(
@@ -683,6 +690,10 @@ TOOL_SCOPE: dict[str, str] = {
     "list_contribution_queue": "contributions:read",
     "get_contribution": "contributions:read",
     "reject_contribution": "contributions:review",
+    # --- Public dataset catalog (OpenData commons, read-only) --------
+    "list_public_datasets": "catalog:read",
+    "get_public_dataset": "catalog:read",
+    "get_dataset_citation": "catalog:read",
 }
 
 
