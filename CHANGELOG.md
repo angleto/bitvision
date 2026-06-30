@@ -5,6 +5,41 @@ project follows semantic versioning; pre-release suffixes (`alpha`,
 `beta`) gate Kubernetes deployments via the GHCR image tag (without
 the leading `v`, see deployment guide).
 
+## 4.4.100 (2026-07-01)
+
+### Public dataset catalog (browsable + citable OpenData commons)
+
+* New public, anonymous-friendly read surface over the OpenData library:
+  `GET /api/catalog/collections` (every public collection with aggregate
+  counts, modalities, license, commercial-use flag),
+  `GET /api/catalog/collections/{slug}` (one collection in full + a few
+  sample studies + a DataCite-4 metadata block), and
+  `GET /api/catalog/collections/{slug}/citation?format=text|bibtex|ris|datacite`.
+  This is the *read* side of `services.public_dataset` (which ingests):
+  it groups public studies by their upstream `source_collection` into
+  TCIA/IDC-style collections and turns the per-study provenance into a
+  citable catalog. Fills the largest gap a microsite-only competitor
+  leaves: a real, browsable, citable commons.
+* **Storage isolation by construction.** The aggregation hard-codes
+  `is_public` and never consults the caller, so no path can surface a
+  private study; only aggregate counts and attribution metadata (license,
+  citation) leave the service — no S3 keys, no patient identity. A DB CHECK
+  invariant (`is_public ⇒ t4 ⇒ source_collection IS NOT NULL`) makes the
+  membership filter provably total.
+* **Citation.** Each collection carries a stable local PID
+  (`bitvision:dataset:<slug>`) and a resolvable landing URL; the upstream
+  academic citation is surfaced verbatim and, when it carries a DOI, the
+  DataCite record back-links it as `IsDerivedFrom`. A real DataCite DOI is
+  a fast-follow (external account) — the metadata is already DOI-ready.
+* **Next.js landing.** `/datasets` (collection grid) and `/datasets/{slug}`
+  (detail + copy-citation + BibTeX/RIS/DataCite download), reachable from
+  the site header for anonymous external citers. No auth, no PHI.
+* **MCP parity** (`catalog:read` scope): `list_public_datasets`,
+  `get_public_dataset`, `get_dataset_citation` — the MCP stays a superset
+  of the browse surface.
+* Backend + frontend + mcp-http images; no workers change, no migration
+  (the catalog is derived purely from existing columns).
+
 ## 4.4.99 (2026-06-30)
 
 ### Findings: SNOMED CT codes for the controlled vocabulary
