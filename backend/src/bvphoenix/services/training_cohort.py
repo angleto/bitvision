@@ -85,8 +85,10 @@ class FindingExportRow:
     type_key: str
     type_category: str
     type_code: str | None
+    type_code_system: str | None
     anatomy_key: str | None
     anatomy_code: str | None
+    anatomy_code_system: str | None
     laterality: str | None
     morphology: list[str]
     measurements: dict[str, float]
@@ -137,9 +139,9 @@ def build_labels_manifest(
                 "study_id": study_syn[r.study_id],
                 "type": r.type_key,
                 "category": r.type_category,
-                "type_code": _code(r.type_code),
+                "type_code": _code(r.type_code, r.type_code_system),
                 "anatomy": r.anatomy_key,
-                "anatomy_code": _code(r.anatomy_code),
+                "anatomy_code": _code(r.anatomy_code, r.anatomy_code_system),
                 "laterality": r.laterality,
                 "morphology": list(r.morphology or []),
                 "measurements": dict(r.measurements or {}),
@@ -161,9 +163,13 @@ def build_labels_manifest(
     }
 
 
-def _code(code: str | None) -> dict[str, str] | None:
-    """A code value carries its system; seeded NULL today (curated later)."""
-    return {"code": code} if code else None
+def _code(code: str | None, system: str | None = None) -> dict[str, str] | None:
+    """A coded value as ``{system, code}`` (e.g. SNOMED CT). ``system`` is
+    omitted when the vocab row carries a code but no system (legacy / curated
+    later); the whole object is ``None`` when there is no code at all."""
+    if not code:
+        return None
+    return {"system": system, "code": code} if system else {"code": code}
 
 
 async def select_cohort(
@@ -207,8 +213,10 @@ async def select_cohort(
             FindingType.key,
             FindingType.category,
             FindingType.code,
+            FindingType.code_system,
             AnatomySite.key,
             AnatomySite.code,
+            AnatomySite.code_system,
             ImagingStudy.modalities,
             ImagingStudy.study_description,
         )
@@ -245,7 +253,7 @@ async def select_cohort(
     rows: list[FindingExportRow] = []
     fingerprints: list[k_anonymity.StudyFingerprint] = []
     seen_studies: set[uuid.UUID] = set()
-    for f, tkey, tcat, tcode, akey, acode, modalities, descr in db_rows:
+    for f, tkey, tcat, tcode, tcs, akey, acode, acs, modalities, descr in db_rows:
         measurements = {m: getattr(f, m) for m in _MEASUREMENT_FIELDS if getattr(f, m) is not None}
         rows.append(
             FindingExportRow(
@@ -255,8 +263,10 @@ async def select_cohort(
                 type_key=tkey,
                 type_category=tcat,
                 type_code=tcode,
+                type_code_system=tcs,
                 anatomy_key=akey,
                 anatomy_code=acode,
+                anatomy_code_system=acs,
                 laterality=f.laterality,
                 morphology=list(f.morphology_keys or []),
                 measurements=measurements,

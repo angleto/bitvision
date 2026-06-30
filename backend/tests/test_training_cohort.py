@@ -18,16 +18,27 @@ from bvphoenix.services.training_cohort import (
 )
 
 
-def _row(study_id: uuid.UUID, finding_id: uuid.UUID, author: str = "agent") -> FindingExportRow:
+def _row(
+    study_id: uuid.UUID,
+    finding_id: uuid.UUID,
+    author: str = "agent",
+    *,
+    type_code: str | None = None,
+    type_code_system: str | None = None,
+    anatomy_code: str | None = None,
+    anatomy_code_system: str | None = None,
+) -> FindingExportRow:
     return FindingExportRow(
         finding_id=finding_id,
         study_id=study_id,
         author_kind=author,
         type_key="nodule",
         type_category="lesion",
-        type_code=None,
+        type_code=type_code,
+        type_code_system=type_code_system,
         anatomy_key="lung_upper_lobe",
-        anatomy_code=None,
+        anatomy_code=anatomy_code,
+        anatomy_code_system=anatomy_code_system,
         laterality="right",
         morphology=["spiculated"],
         measurements={"longest_diameter_mm": 14.0, "suv_max": 6.2},
@@ -36,6 +47,26 @@ def _row(study_id: uuid.UUID, finding_id: uuid.UUID, author: str = "agent") -> F
         confidence=0.9,
         geometry=[{"role": "mask", "kind": "segmentation", "mask_label": "nodule_1"}],
     )
+
+
+def test_manifest_emits_coded_system_and_value() -> None:
+    """A populated vocab code (SNOMED CT) is emitted as {system, code} so a
+    bare concept id is never ambiguous; an uncoded row emits None."""
+    s = uuid.uuid4()
+    coded = _row(
+        s,
+        uuid.uuid4(),
+        type_code="27925004",
+        type_code_system="SNOMED-CT",
+        anatomy_code="45653009",
+        anatomy_code_system="SNOMED-CT",
+    )
+    uncoded = _row(s, uuid.uuid4())
+    m = build_labels_manifest([coded, uncoded], dataset_id="d", generated_at="t")
+    assert m["items"][0]["type_code"] == {"system": "SNOMED-CT", "code": "27925004"}
+    assert m["items"][0]["anatomy_code"] == {"system": "SNOMED-CT", "code": "45653009"}
+    assert m["items"][1]["type_code"] is None
+    assert m["items"][1]["anatomy_code"] is None
 
 
 def test_manifest_deidentifies_and_rekeys() -> None:
