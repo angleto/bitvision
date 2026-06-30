@@ -272,7 +272,14 @@ jobs:
         if: env.SCW_REGISTRY_SECRET_KEY != ''
         run: |
           ver="${{ steps.buildmeta.outputs.version }}"
-          skopeo copy --all --retry-times 5 \
+          # The NAT'd Scaleway egress drops large blob uploads to the registry
+          # in sustained windows (a 504 / "closed network connection" mid-PATCH
+          # on the multi-hundred-MB layers of the backend/workers images — see
+          # the registry-egress infra task). skopeo re-uploads a failed blob
+          # from scratch, so ride out a bad window with many fixed-delay
+          # retries (~12 x 30s) rather than the default fast exponential backoff
+          # that exhausts in ~1 min.
+          skopeo copy --all --retry-times 12 --retry-delay 30s \
             --src-creds "${{ github.actor }}:${{ secrets.GITHUB_TOKEN }}" \
             --dest-creds "nologin:${SCW_REGISTRY_SECRET_KEY}" \
             "docker://ghcr.io/${{ env.IMAGE_PREFIX }}/${{ matrix.service }}:${ver}" \
