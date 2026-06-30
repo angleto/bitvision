@@ -315,24 +315,13 @@ async def _geometry_refs(
     return out
 
 
-async def cohort_blob_plan(
+async def _iter_cohort_series(
     db: AsyncSession, study_syn: dict[uuid.UUID, str]
-) -> list[dict[str, Any]]:
-    """Enumerate the cohort's image + mask blobs, named by SYNTHETIC ids.
-
-    Returns work items ``{kind, name, bucket, key, study_id}`` where ``name``
-    is a synthetic, de-identified path (``study-0001/series-01/img-0001.dcm``
-    / ``.../masks/<label>.bin``) — never a real study / series / instance
-    UUID. ``kind`` drives the worker's per-blob de-id (DICOM scrubbed;
-    masks are headerless raw uint8, no PHI). The byte fetch happens in the
-    worker; this is the (DB-only) plan.
-
-    Each item also carries the real ``study_id`` (a UUID) for worker-side
-    ledger attribution (per-study bytes + content hash for the dataset
-    producer). It is NEVER serialized into the artifact — only ``name``
-    reaches the ZIP — so this does not weaken the de-identification.
-    """
-    work: list[dict[str, Any]] = []
+):  # -> AsyncIterator[tuple[uuid.UUID, str, int, Series, list[Instance], list[Segmentation]]]
+    """Yield ``(study_id, syn, series_idx, series, instances, segmentations)``
+    for the cohort in a stable order — the single DB traversal shared by the
+    flat blob plan AND the structured volume plan, so their series numbering
+    and ordering never drift apart."""
     for study_id, syn in study_syn.items():
         series_rows = (
             (
@@ -357,34 +346,103 @@ async def cohort_blob_plan(
                 .scalars()
                 .all()
             )
-            for j, inst in enumerate(instances, start=1):
-                if inst.s3_bucket and inst.s3_key:
-                    work.append(
-                        {
-                            "kind": "dicom",
-                            "name": f"{syn}/series-{k:02d}/img-{j:04d}.dcm",
-                            "bucket": inst.s3_bucket,
-                            "key": inst.s3_key,
-                            "study_id": study_id,
-                        }
-                    )
             seg_rows = (
                 (await db.execute(select(Segmentation).where(Segmentation.series_id == series.id)))
                 .scalars()
                 .all()
             )
-            for seg in seg_rows:
-                if seg.s3_bucket and seg.s3_key:
-                    work.append(
-                        {
-                            "kind": "mask",
-                            "name": f"{syn}/series-{k:02d}/masks/{seg.label}.bin",
-                            "bucket": seg.s3_bucket,
-                            "key": seg.s3_key,
-                            "study_id": study_id,
-                        }
-                    )
+            yield study_id, syn, k, series, list(instances), list(seg_rows)
+
+
+async def cohort_blob_plan(
+    db: AsyncSession, study_syn: dict[uuid.UUID, str]
+) -> list[dict[str, Any]]:
+    """Enumerate the cohort's image + mask blobs, named by SYNTHETIC ids.
+
+    Returns work items ``{kind, name, bucket, key, study_id}`` where ``name``
+    is a synthetic, de-identified path (``study-0001/series-01/img-0001.dcm``
+    / ``.../masks/<label>.bin``) — never a real study / series / instance
+    UUID. ``kind`` drives the worker's per-blob de-id (DICOM scrubbed;
+    masks are headerless raw uint8, no PHI). The byte fetch happens in the
+    worker; this is the (DB-only) plan.
+
+    Each item also carries the real ``study_id`` (a UUID) for worker-side
+    ledger attribution (per-study bytes + content hash for the dataset
+    producer). It is NEVER serialized into the artifact — only ``name``
+    reaches the ZIP — so this does not weaken the de-identification.
+    """
+    work: list[dict[str, Any]] = []
+    async for study_id, syn, k, _series, instances, seg_rows in _iter_cohort_series(db, study_syn):
+        for j, inst in enumerate(instances, start=1):
+            if inst.s3_bucket and inst.s3_key:
+                work.append(
+                    {
+                        "kind": "dicom",
+                        "name": f"{syn}/series-{k:02d}/img-{j:04d}.dcm",
+                        "bucket": inst.s3_bucket,
+                        "key": inst.s3_key,
+                        "study_id": study_id,
+                    }
+                )
+        for seg in seg_rows:
+            if seg.s3_bucket and seg.s3_key:
+                work.append(
+                    {
+                        "kind": "mask",
+                        "name": f"{syn}/series-{k:02d}/masks/{seg.label}.bin",
+                        "bucket": seg.s3_bucket,
+                        "key": seg.s3_key,
+                        "study_id": study_id,
+                    }
+                )
     return work
+
+
+async def cohort_series_plan(
+    db: AsyncSession, study_syn: dict[uuid.UUID, str]
+) -> list[dict[str, Any]]:
+    """Structured per-series plan for the volume formats (nnU-Net / MONAI /
+    COCO), which assemble whole-series volumes rather than streaming loose
+    files.
+
+    Returns one item per series that has at least one image:
+    ``{study_syn, study_id, series_idx, dicom: [{bucket, key}], masks:
+    [{label, label_map, bucket, key}]}``. Same de-id contract as
+    :func:`cohort_blob_plan`: only the synthetic ``study_syn`` + ``series_idx``
+    name the artifact; the real ``study_id`` rides along for worker-side
+    ledger attribution and never reaches the ZIP. The DICOM are kept in
+    instance order; the worker re-sorts them by the canonical volume key when
+    it stacks the array.
+    """
+    plan: list[dict[str, Any]] = []
+    async for study_id, syn, k, _series, instances, seg_rows in _iter_cohort_series(db, study_syn):
+        dicom = [
+            {"bucket": inst.s3_bucket, "key": inst.s3_key}
+            for inst in instances
+            if inst.s3_bucket and inst.s3_key
+        ]
+        if not dicom:
+            continue
+        masks = [
+            {
+                "label": seg.label,
+                "label_map": seg.label_map or {},
+                "bucket": seg.s3_bucket,
+                "key": seg.s3_key,
+            }
+            for seg in seg_rows
+            if seg.s3_bucket and seg.s3_key
+        ]
+        plan.append(
+            {
+                "study_syn": syn,
+                "study_id": study_id,
+                "series_idx": k,
+                "dicom": dicom,
+                "masks": masks,
+            }
+        )
+    return plan
 
 
 async def resolve_cohort_contributors(
