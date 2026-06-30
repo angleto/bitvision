@@ -5,6 +5,26 @@ project follows semantic versioning; pre-release suffixes (`alpha`,
 `beta`) gate Kubernetes deployments via the GHCR image tag (without
 the leading `v`, see deployment guide).
 
+## 4.4.99 (2026-06-30)
+
+### Findings: SNOMED CT codes for the controlled vocabulary
+
+* Migration `0040` fills in the `code`/`code_system` columns that `0020`
+  deliberately seeded NULL, anchoring the Finding controlled vocabulary to
+  **SNOMED CT** (FHIR-native, interoperable): all 18 anatomy sites, 15/16
+  finding types (`other` left NULL), and the 6 morphology terms with a clean
+  dedicated SNOMED radiographic margin/shape concept (spiculated, lobulated,
+  circumscribed, irregular, ill_defined, necrotic). Descriptors with no clean
+  1:1 concept (smooth, well_defined, solid, part_solid, ground_glass,
+  calcified, cavitary) stay NULL rather than mapped approximately. Every
+  concept id was verified against the live EBI OLS4 SNOMED ontology.
+* The migration is idempotent (`UPDATE ... WHERE code IS NULL`, never clobbers
+  a manual code) and reversible (downgrade clears only the rows it stamped).
+* The training-labels manifest now emits each code as `{system, code}` instead
+  of a bare `{code}`, so a SNOMED concept id is unambiguous. Backward-compatible
+  addition to the `bvphoenix.training-labels/v1` schema. Backend + workers
+  images + a `migrate-job` run; no frontend change.
+
 ## 4.4.98 (2026-06-30)
 
 ### Training: COCO / nnU-Net / MONAI cohort export serializers
