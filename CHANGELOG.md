@@ -5,6 +5,35 @@ project follows semantic versioning; pre-release suffixes (`alpha`,
 `beta`) gate Kubernetes deployments via the GHCR image tag (without
 the leading `v`, see deployment guide).
 
+## 4.4.98 (2026-06-30)
+
+### Training: COCO / nnU-Net / MONAI cohort export serializers
+
+* The de-identified training-cohort bundle gains a `format` axis
+  (`POST /api/training-exports`, MCP `export_training_cohort_bundle`): a cohort
+  can now ship in the exact layout researchers ingest — `nnunet` / `monai`
+  (NIfTI image+label pairs + `dataset.json`) or `coco` (per-slice PNG + RLE
+  annotations) — alongside the default `bvphoenix` (raw DICOM + `.bin` masks +
+  `labels.json`). Builds on the geometry-preserving DICOM SEG work (4.4.96).
+* Geometry is correct by construction: the image volume and the label volume
+  are stacked from the SAME source instances sorted by the canonical volume key
+  the SEG export uses, so `image[k]` and `mask[k]` line up voxel-for-voxel — no
+  world↔image projection (the usual silent-misalignment footgun). NIfTI uses a
+  spacing-only diagonal affine (matching the TotalSegmentator writer); image and
+  label share it. A mask whose voxel count ≠ the image volume is **refused**, so
+  a mis-rasterized label is never published as ground truth.
+* A dataset-wide class→int index keeps per-case labels mutually consistent
+  (0 = background); nnU-Net `dataset.json` carries `channel_names` + `labels`,
+  MONAI an MSD-style datalist, COCO uncompressed RLE + bbox + categories.
+* Same safety envelope as the raw bundle, re-validated at run time: training
+  consent + contribution tier (t3/t4) + k-anonymity + synthetic re-keying (no
+  patient / study / author identifier reaches the artifact). The burned-in-PHI /
+  face-risk gate runs per series — one high-risk slice drops the WHOLE series
+  (a volume can't ship with a PHI hole), and every drop is recorded, never
+  silent.
+* No new dependency (`nibabel` + `Pillow` already present); no DB migration.
+  Backend + worker + mcp images.
+
 ## 4.4.97 (2026-06-29)
 
 ### Chore: MCP tool lint cleanup
