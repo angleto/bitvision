@@ -21,8 +21,11 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from bvphoenix.db.models import ClinicalEvent, ImagingStudy, Patient, Series
 from bvphoenix.db.models.principals import Subject
 from bvphoenix.services import dataset_catalog as catalog
+from tests.conftest import skip_if_no_db
 
-pytestmark = pytest.mark.asyncio
+# Needs a live Postgres: skips in the no-DB ``backend-test`` job, runs in
+# the DB-backed CI job (and locally against a migrated test DB).
+pytestmark = [pytest.mark.asyncio, skip_if_no_db]
 
 
 async def _add_study(
