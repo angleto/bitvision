@@ -43,11 +43,15 @@ from bvphoenix.services.vector_search import tune_vector_query
 logger = logging.getLogger(__name__)
 
 # Coarse target kinds that map to exactly one study:
+#   study          -> target_id IS the study id (no projection needed); the
+#                     coarse structural vector every study carries (incl.
+#                     public OpenData), so this arm is not starved when a
+#                     corpus has few reports/findings.
 #   report_content -> study via the report's clinical_event
 #                     (imaging_studies.clinical_event_id is 1:1)
 #   finding        -> Finding.study_id directly
 # Other coarse kinds (document, patient) don't resolve to a single study.
-_STUDY_TARGET_KINDS = ("report_content", "finding")
+_STUDY_TARGET_KINDS = ("study", "report_content", "finding")
 
 
 async def _embed_active_query(model_id: str, q: str) -> list[float] | None:
@@ -129,11 +133,14 @@ async def text_dense_study_ids(
         return []
 
     dist_by_target: dict[tuple[str, uuid.UUID], float] = {}
+    st_ids: list[uuid.UUID] = []
     rc_ids: list[uuid.UUID] = []
     fn_ids: list[uuid.UUID] = []
     for kind, target_id, distance in cand_rows:
         dist_by_target[(kind, target_id)] = float(distance)
-        if kind == "report_content":
+        if kind == "study":
+            st_ids.append(target_id)
+        elif kind == "report_content":
             rc_ids.append(target_id)
         elif kind == "finding":
             fn_ids.append(target_id)
@@ -147,6 +154,20 @@ async def text_dense_study_ids(
         prev = study_dist.get(study_id)
         if prev is None or d < prev:
             study_dist[study_id] = d
+
+    if st_ids:
+        # ``study`` vectors carry the study id directly — no join, just the
+        # visibility intersection (an invisible study can never surface).
+        rows = (
+            await db.execute(
+                select(ImagingStudy.id).where(
+                    ImagingStudy.id.in_(st_ids),
+                    ImagingStudy.id.in_(visible_ids_sq),
+                )
+            )
+        ).all()
+        for (study_id,) in rows:
+            _accumulate(study_id, "study", study_id)
 
     if rc_ids:
         rows = (

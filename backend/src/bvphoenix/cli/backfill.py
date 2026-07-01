@@ -44,7 +44,7 @@ from bvphoenix.services.embeddable import (
     embeddable_modality_clause,
     embeddable_sop_class_clause,
 )
-from bvphoenix.services.text_embedding import finding_embed_text
+from bvphoenix.services.text_embedding import finding_embed_text, study_embed_text
 from bvphoenix.services.text_models import load_text_model_specs_sync
 
 
@@ -934,6 +934,162 @@ def embed_findings(
         return
 
     n = asyncio.run(_enqueue_embed_text(task_name, "finding", rows))
+    click.echo(f"enqueued {task_name}: {n} jobs")
+    click.echo("Run an Arq worker with the `ai` extra to process the queue.")
+
+
+# Study coarse-text backfill -------------------------------------------
+# The text_dense /search/hybrid arm reads coarse whole-object vectors that
+# map to a study. Real exams carry DICOM SR (not report_content) and few
+# app findings, so the arm contributes ~0 until every study gets its own
+# structural-metadata vector (target_kind='study'). The on-write hook
+# (dicom_ingest.finalize / ensure_imaging_event / study-metadata edits)
+# covers new + edited studies; this command is the catch-up for the
+# existing corpus (incl. public OpenData, which has no report/finding text).
+
+
+def _study_candidates(
+    session: Session,
+    *,
+    patient_id: uuid.UUID | None,
+    only_missing: bool,
+    store_table: str,
+    model_id: str,
+) -> list[tuple[uuid.UUID, str]]:
+    where: list[str] = []
+    params: dict[str, object] = {}
+    if patient_id is not None:
+        where.append("s.patient_id = :pid")
+        params["pid"] = patient_id
+    if only_missing:
+        # ``store_table`` is interpolated (table names cannot be bind
+        # params); injection-safe — identifier-validated registry data.
+        where.append(
+            f"NOT EXISTS (SELECT 1 FROM {store_table} te "
+            "WHERE te.target_kind = 'study' AND te.target_id = s.id "
+            "AND te.model_id = :model)"
+        )
+        params["model"] = model_id
+    clause = (" WHERE " + " AND ".join(where)) if where else ""
+    sql = (
+        "SELECT s.id, s.study_description, s.modalities, "
+        "array_agg(DISTINCT se.body_part_examined) "
+        "FILTER (WHERE se.body_part_examined IS NOT NULL) AS body_parts "
+        "FROM imaging_studies s "
+        "LEFT JOIN series se ON se.study_id = s.id"
+        f"{clause} GROUP BY s.id ORDER BY s.id"
+    )
+    rows = session.execute(text(sql), params).all()
+    out: list[tuple[uuid.UUID, str]] = []
+    for sid, description, modalities, body_parts in rows:
+        body = study_embed_text(
+            study_description=description,
+            modalities=list(modalities or []),
+            body_parts=list(body_parts or []),
+        )
+        if body:  # skip blank compositions — the worker would no-op anyway
+            out.append((uuid.UUID(str(sid)), body))
+    return out
+
+
+@main.command("embed-studies")
+@click.option(
+    "--model",
+    "model",
+    required=True,
+    help=(
+        "Text embedding model name (a routed, active row of the "
+        "embedding_models registry, e.g. minilm-multi-v1 | bge-m3-v1)."
+    ),
+)
+@click.option(
+    "--patient",
+    "patient",
+    default=None,
+    help="Patient UUID. Mutually exclusive with --all.",
+)
+@click.option(
+    "--all",
+    "all_patients",
+    is_flag=True,
+    default=False,
+    help="Backfill study embeddings for every study (incl. public OpenData). Use with care.",
+)
+@click.option(
+    "--only-missing/--all-studies",
+    "only_missing",
+    default=True,
+    show_default=True,
+    help="Only studies lacking a vector for the chosen model (default), or re-embed all.",
+)
+@click.option(
+    "--dry-run",
+    is_flag=True,
+    help="Count candidate studies and print the plan without enqueueing.",
+)
+def embed_studies(
+    model: str,
+    patient: str | None,
+    all_patients: bool,
+    only_missing: bool,
+    dry_run: bool,
+) -> None:
+    """Enqueue coarse text-embedding jobs (target_kind='study') for the chosen
+    model over existing studies.
+
+    Study text = study_description + modalities + distinct series body parts,
+    composed via the shared ``study_embed_text`` (single source of truth with
+    the on-write path). This lights up the text_dense /search/hybrid arm for a
+    corpus that has few report_content / finding vectors, and gives public
+    OpenData studies (no report/finding text) a dense vector. Routes to the
+    model's Arq task + pgvector store from its registry row; idempotent (ON
+    CONFLICT upsert). Requires an Arq worker with the ``ai`` extra running.
+    """
+    if (patient is None) == (not all_patients):
+        click.echo("specify exactly one of --patient <id> or --all", err=True)
+        sys.exit(2)
+
+    patient_uuid: uuid.UUID | None = None
+    if patient is not None:
+        try:
+            patient_uuid = uuid.UUID(patient)
+        except ValueError:
+            click.echo(f"--patient must be a UUID, got {patient!r}", err=True)
+            sys.exit(2)
+
+    engine = _engine()
+    with Session(engine) as session:
+        specs = load_text_model_specs_sync(session)
+        spec = specs.get(model)
+        if spec is None:
+            click.echo(
+                f"unknown or unrouted text model {model!r}; known: {sorted(specs)}",
+                err=True,
+            )
+            sys.exit(2)
+        rows = _study_candidates(
+            session,
+            patient_id=patient_uuid,
+            only_missing=only_missing,
+            store_table=spec.store_table,
+            model_id=spec.model_id,
+        )
+    task_name = spec.arq_task
+
+    scope = f"patient {patient_uuid}" if patient_uuid else "ALL studies"
+    click.echo(f"scope           : {scope}")
+    click.echo(f"model           : {model}")
+    click.echo(f"only-missing    : {only_missing}")
+    click.echo(f"study candidates: {len(rows)}")
+
+    if dry_run:
+        click.echo("DRY RUN — no jobs enqueued.")
+        return
+    if not rows:
+        click.echo("nothing to do")
+        return
+
+    n = asyncio.run(_enqueue_embed_text(task_name, "study", rows))
     click.echo(f"enqueued {task_name}: {n} jobs")
     click.echo("Run an Arq worker with the `ai` extra to process the queue.")
 

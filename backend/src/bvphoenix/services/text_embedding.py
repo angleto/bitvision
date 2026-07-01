@@ -85,6 +85,68 @@ def finding_embed_text(
     return text.strip()
 
 
+def study_embed_text(
+    *,
+    study_description: str | None,
+    modalities: list[str] | None,
+    body_parts: list[str] | None,
+) -> str:
+    """Coarse free-text for a study's whole-object semantic vector, composed
+    from its STRUCTURAL metadata: description + modalities + the distinct body
+    parts of its series. This is what gives EVERY study — including the public
+    OpenData studies that carry no report or finding — a dense-text vector for
+    the ``/search/hybrid`` ``text_dense`` arm. Blank when nothing is set (the
+    embed helper then no-ops). Order-preserving de-dupe on the list parts."""
+    parts: list[str] = []
+    if study_description:
+        parts.append(study_description)
+    if modalities:
+        parts.append(", ".join(dict.fromkeys(m for m in modalities if m)))
+    if body_parts:
+        parts.append(", ".join(dict.fromkeys(b for b in body_parts if b)))
+    return "; ".join(p for p in parts if p).strip()
+
+
+async def enqueue_study_embed(db: AsyncSession, study_id: uuid.UUID | str) -> None:
+    """Compose a study's coarse text (description + modalities + series body
+    parts) and enqueue its ``target_kind='study'`` vector on every active text
+    model. Best-effort: a failure never breaks the originating write; the
+    backfill CLI (``bvphoenix-backfill embed-studies``) is the catch-up path.
+    Idempotent (the worker upserts on ``(target_kind, target_id, model_id)``)."""
+    try:
+        from sqlalchemy import select
+
+        from bvphoenix.db.models import ImagingStudy, Series
+
+        study = (
+            await db.execute(select(ImagingStudy).where(ImagingStudy.id == study_id))
+        ).scalar_one_or_none()
+        if study is None:
+            return
+        body_parts = list(
+            (
+                await db.execute(
+                    select(Series.body_part_examined)
+                    .where(
+                        Series.study_id == study.id,
+                        Series.body_part_examined.isnot(None),
+                    )
+                    .distinct()
+                )
+            )
+            .scalars()
+            .all()
+        )
+        text_value = study_embed_text(
+            study_description=study.study_description,
+            modalities=list(study.modalities or []),
+            body_parts=body_parts,
+        )
+        await enqueue_text_embed(db, target_kind="study", target_id=study.id, text=text_value)
+    except Exception:  # pragma: no cover — best-effort, never break the write
+        logger.exception("study embed enqueue failed for %s", study_id)
+
+
 async def enqueue_text_embed(
     db: AsyncSession,
     *,

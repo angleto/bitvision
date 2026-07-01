@@ -19,6 +19,7 @@ def test_minilm_admits_coarse_targets():
     assert "finding" in ML_ALLOWED  # added in migration 0021
     assert "document" in ML_ALLOWED
     assert "patient" in ML_ALLOWED
+    assert "study" in ML_ALLOWED  # coarse study vector, migration 0041 (0ece383b)
 
 
 def test_bge_m3_admits_coarse_targets_including_finding():
@@ -28,3 +29,4 @@ def test_bge_m3_admits_coarse_targets_including_finding():
     assert "finding" in BGE_ALLOWED
     assert "document" in BGE_ALLOWED
     assert "patient" in BGE_ALLOWED
+    assert "study" in BGE_ALLOWED  # coarse study vector, migration 0041 (0ece383b)
