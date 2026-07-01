@@ -749,6 +749,8 @@
     "toolLens": "Lente",
     "clearAll": "Cancella tutto",
     "clearAllTitle": "Cancella tutte le misure",
+    "undo": "Annulla",
+    "redo": "Ripristina",
     "hintNone": "Click / trascina = crosshair · Scroll = slice · Ctrl+Scroll = zoom · Trascina-centrale = pan",
     "hintWl": "Trascina = W/L · Scroll = slice · Ctrl+Scroll = zoom · Trascina-centrale = pan",
     "hintPan": "Trascina = pan · Trascina-destro = zoom · Scroll = slice",

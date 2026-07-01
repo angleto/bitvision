@@ -81,6 +81,10 @@ export interface ViewerProbe {
   activeTool?: string | null;
   layout?: string | null;
   measurementCount?: number;
+  /** Depth of the annotation undo / redo stacks (task cde63ced) so an audit
+   *  can assert that Ctrl+Z / Ctrl+Shift+Z actually moved history. */
+  undoDepth?: number;
+  redoDepth?: number;
   /** Surface-level error currently shown to the user (the red card), or
    *  null. An audit treats a non-null value as a functional failure. */
   error?: string | null;

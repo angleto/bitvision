@@ -3185,6 +3185,50 @@ const CornerstoneMPRLayout = forwardRef<MPRLayoutHandle, ExtendedProps>(
           }
           engineRef.current?.renderViewports([vpAxial, vpSag, vpCor]);
         },
+        // Detached snapshot for the undo stack: JSON-clone so a later
+        // mutation / removal of the live annotation doesn't corrupt the
+        // stashed copy. Cornerstone annotations are plain serialisable data
+        // (uid / metadata / handles.points / cachedStats), the same shape the
+        // injector builds, so JSON round-trips cleanly and stays addAnnotation-
+        // compatible.
+        getAnnotation: (uid) => {
+          try {
+            const a = (csTools.annotation.state.getAnnotation as (u: string) => unknown)(uid);
+            return a ? JSON.parse(JSON.stringify(a)) : null;
+          } catch {
+            return null;
+          }
+        },
+        // Re-inject a stashed annotation (undo of a delete / redo of a draw).
+        restoreAnnotation: (annotation) => {
+          const frameOfRef = (annotation as { metadata?: { FrameOfReferenceUID?: string } })
+            ?.metadata?.FrameOfReferenceUID;
+          // addAnnotation's group selector is a FrameOfReferenceUID string OR a
+          // viewport element — never undefined. Prefer the stashed frame; fall
+          // back to a live pane element (same resolution updateAnnotationLabel uses).
+          const selector =
+            frameOfRef ?? axialDivRef.current ?? sagDivRef.current ?? corDivRef.current;
+          try {
+            if (selector) {
+              csTools.annotation.state.addAnnotation(
+                annotation as Parameters<typeof csTools.annotation.state.addAnnotation>[0],
+                selector,
+              );
+            }
+          } catch {
+            /* toolName not registered / already present — skip */
+          }
+          engineRef.current?.renderViewports([vpAxial, vpSag, vpCor]);
+          try {
+            (
+              csTools.utilities as unknown as {
+                triggerAnnotationRenderForViewportIds?: (ids: string[]) => void;
+              }
+            ).triggerAnnotationRenderForViewportIds?.([vpAxial, vpSag, vpCor]);
+          } catch {
+            /* render-trigger surface drifted across CS Tools versions — non-fatal */
+          }
+        },
         // Delete whatever annotation the operator has SELECTED (clicked). Reads
         // the Cornerstone selection model so a Del / button / shortcut can wipe
         // the active ROI without the caller having to know its UID. Returns the

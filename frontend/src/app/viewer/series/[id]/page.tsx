@@ -35,6 +35,7 @@ import type {
 } from "@/components/VolumeViewer";
 import ViewerToolPalette from "@/components/viewer/ViewerToolPalette";
 import type { Tool } from "@/components/viewer/toolTypes";
+import { type AnnotationCommand, createAnnotationHistory } from "@/lib/annotationHistory";
 import {
   ApiError,
   type AppSetting,
@@ -45,6 +46,7 @@ import {
   type Series,
   type Study,
   fetchVolume,
+  findingsApi,
   getStoredToken,
   markersApi,
   parseFloatVector,
@@ -405,6 +407,21 @@ export default function SeriesViewerPage() {
   const markerIdMapRef = useRef<Map<number, string>>(new Map());
   const prevMeasurementIdsRef = useRef<Set<number>>(new Set());
   const initialMarkersLoadedRef = useRef<boolean>(false);
+  // Undo/redo (task cde63ced), scoped to annotations CREATED this session
+  // (keyed on the stable Cornerstone annotationUID). Recording is pure (ref
+  // stacks); apply reuses the existing safe handle methods, so it never
+  // corrupts marker persistence. ``userUidsRef`` is the set of session-drawn
+  // uids so we never treat a persisted-loaded marker as undoable.
+  const historyRef = useRef(createAnnotationHistory());
+  const applyingHistoryUidsRef = useRef<Set<string>>(new Set());
+  const annotationSnapshotsRef = useRef<Map<string, unknown>>(new Map());
+  const userUidsRef = useRef<Set<string>>(new Set());
+  const [historyVersion, setHistoryVersion] = useState(0);
+  // markerId → FindingType.category, so the overlay/panels colour a marker by
+  // the CLASS of the finding it belongs to. Ref + version so a late findings
+  // load recolours without threading through every marker render.
+  const catByMarkerRef = useRef<Map<string, string>>(new Map());
+  const [catMapVersion, setCatMapVersion] = useState(0);
   // Bumped by the sync effect so MarkerListPanel re-fetches when the
   // user adds/removes measurements via the canvas.
   const [markerListRefreshKey, setMarkerListRefreshKey] = useState(0);
@@ -1039,7 +1056,126 @@ export default function SeriesViewerPage() {
     if (mutated) {
       prevMeasurementIdsRef.current = currentIds;
     }
+
+    // Undo/redo history (task cde63ced), scoped to session-drawn annotations
+    // and keyed on the stable Cornerstone annotationUID. ``added`` already
+    // excludes persisted-loaded markers (pre-added to syncedIdsRef), so a
+    // create here is a genuine user draw. Recording is side-effect-free; the
+    // apply path reuses the existing safe handle methods, so it cannot corrupt
+    // marker persistence. Covers create + delete (move/label are a later pass).
+    const handle = mprRef.current;
+    if (handle) {
+      let histChanged = false;
+      const curUids = new Set(
+        allMeasurements.map((m) => m.markerId).filter((u): u is string => !!u),
+      );
+      for (const uid of curUids) {
+        const snap = handle.getAnnotation?.(uid);
+        if (snap) annotationSnapshotsRef.current.set(uid, snap);
+      }
+      for (const m of added) {
+        if (!m.markerId || applyingHistoryUidsRef.current.has(m.markerId)) continue;
+        userUidsRef.current.add(m.markerId);
+        historyRef.current.push({
+          type: "create",
+          csId: m.markerId,
+          annotation: annotationSnapshotsRef.current.get(m.markerId) ?? null,
+        });
+        histChanged = true;
+      }
+      for (const uid of [...userUidsRef.current]) {
+        if (curUids.has(uid)) continue;
+        userUidsRef.current.delete(uid);
+        const snap = annotationSnapshotsRef.current.get(uid) ?? null;
+        annotationSnapshotsRef.current.delete(uid);
+        if (applyingHistoryUidsRef.current.has(uid)) continue;
+        historyRef.current.push({ type: "remove", csId: uid, annotation: snap });
+        histChanged = true;
+      }
+      if (histChanged) setHistoryVersion((v) => v + 1);
+    }
   }, [allMeasurements, studyPatientId, series?.study_id, mprCrosshair]);
+
+  // Apply an undo/redo command against Cornerstone, guarded by
+  // ``applyingHistoryUidsRef`` so the resulting allMeasurements change is not
+  // re-recorded as a fresh user command (task cde63ced).
+  const applyHistory = useCallback((cmd: AnnotationCommand, forward: boolean) => {
+    const h = mprRef.current;
+    if (!h) return;
+    const uid = cmd.csId;
+    applyingHistoryUidsRef.current.add(uid);
+    if (cmd.type === "label") {
+      h.updateAnnotationLabel(uid, forward ? cmd.nextLabel : cmd.prevLabel);
+    } else {
+      // undo(create)=remove, redo(create)=restore; remove is the mirror.
+      const restore = cmd.type === "create" ? forward : !forward;
+      if (restore) {
+        if (cmd.annotation) {
+          h.restoreAnnotation?.(cmd.annotation);
+          userUidsRef.current.add(uid);
+        }
+      } else {
+        h.removeAnnotation(uid);
+        userUidsRef.current.delete(uid);
+      }
+    }
+    setMarkerListRefreshKey((k) => k + 1);
+    setHistoryVersion((v) => v + 1);
+    // Release the guard after the resulting allMeasurements effect has run.
+    window.setTimeout(() => applyingHistoryUidsRef.current.delete(uid), 0);
+  }, []);
+
+  const undoAnnotation = useCallback(() => {
+    const cmd = historyRef.current.undo();
+    if (cmd) applyHistory(cmd, false);
+  }, [applyHistory]);
+  const redoAnnotation = useCallback(() => {
+    const cmd = historyRef.current.redo();
+    if (cmd) applyHistory(cmd, true);
+  }, [applyHistory]);
+
+  // markerId → finding-class map (task cde63ced): colour a marker by the CLASS
+  // of the finding it belongs to. Best-effort; a failure leaves markers on
+  // their geometry-kind colour. Refreshes with the marker list.
+  // biome-ignore lint/correctness/useExhaustiveDependencies: series.study_id is the reactive key; findingsApi is a stable module import.
+  useEffect(() => {
+    if (!studyPatientId || !series?.study_id) return;
+    let cancelled = false;
+    void (async () => {
+      try {
+        const [vocab, findings] = await Promise.all([
+          findingsApi.getVocab(),
+          findingsApi.list(studyPatientId, { study_id: series.study_id, limit: 500 }),
+        ]);
+        if (cancelled) return;
+        const catByType = new Map<string, string>();
+        for (const ft of vocab.finding_types) catByType.set(ft.key, ft.category);
+        const map = new Map<string, string>();
+        for (const f of findings) {
+          const cat = catByType.get(f.type);
+          if (!cat) continue;
+          for (const g of f.geometry ?? []) {
+            if (g.marker_id) map.set(g.marker_id, cat);
+          }
+        }
+        catByMarkerRef.current = map;
+        setCatMapVersion((v) => v + 1);
+      } catch {
+        /* markers keep their geometry-kind colour */
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [studyPatientId, series?.study_id, markerListRefreshKey]);
+
+  // Recolour existing overlay markers when the class map updates.
+  // biome-ignore lint/correctness/useExhaustiveDependencies: catMapVersion is the refresh trigger.
+  useEffect(() => {
+    setOverlayMarkers((prev) =>
+      prev.map((it) => ({ ...it, category: catByMarkerRef.current.get(it.id) ?? null })),
+    );
+  }, [catMapVersion]);
 
   useEffect(() => {
     if (!volumeLoading) {
@@ -1369,6 +1505,20 @@ export default function SeriesViewerPage() {
   );
 
   const hotkeyBindings: HotkeyBinding[] = [
+    {
+      key: "z",
+      ctrl: true,
+      shift: false,
+      description: "Undo annotation",
+      handler: () => undoAnnotation(),
+    },
+    {
+      key: "z",
+      ctrl: true,
+      shift: true,
+      description: "Redo annotation",
+      handler: () => redoAnnotation(),
+    },
     {
       key: "ArrowUp",
       description: "Previous slice",
@@ -2055,6 +2205,8 @@ export default function SeriesViewerPage() {
         activeTool: activeTool ?? null,
         layout: layout ? String(layout) : protocolId,
         measurementCount: allMeasurements.length,
+        undoDepth: historyRef.current.undoDepth(),
+        redoDepth: historyRef.current.redoDepth(),
         error: err,
       });
     };
@@ -3970,6 +4122,10 @@ export default function SeriesViewerPage() {
                           <ViewerToolPalette
                             activeTool={activeTool}
                             onChange={(t) => setActiveTool(t)}
+                            onUndo={undoAnnotation}
+                            onRedo={redoAnnotation}
+                            canUndo={historyVersion >= 0 && historyRef.current.canUndo()}
+                            canRedo={historyVersion >= 0 && historyRef.current.canRedo()}
                             onClearAll={() => {
                               // Drop the SVG overlays first so the next
                               // ANNOTATION_REMOVED → onMeasurementsChange pass
@@ -4135,7 +4291,12 @@ export default function SeriesViewerPage() {
                           // have no visual feedback on the canvas.
                           const items: MarkerOverlayItem[] = loaded
                             .filter((m) => !markerIsManagedByCornerstone(m))
-                            .map(markerToOverlayItem);
+                            .map((m) => ({
+                              ...markerToOverlayItem(m),
+                              // Colour by the CLASS of the finding this marker
+                              // belongs to (task cde63ced); null → kind colour.
+                              category: catByMarkerRef.current.get(m.id) ?? null,
+                            }));
                           setOverlayMarkers(items);
                         }}
                         onJumpTo={(voxel, markerId, sourceSeriesId) => {

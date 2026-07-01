@@ -56,10 +56,15 @@ import * as cs from "@cornerstonejs/core";
 import { useEffect, useState } from "react";
 
 import type { Marker } from "@/lib/api";
+import { overlayStroke } from "@/lib/findingColors";
 
 export interface MarkerOverlayItem {
   id: string;
   kind: string;
+  /** FindingType.category of the finding this marker is linked to (via
+   *  Finding.geometry.marker_id), when any. Drives the stroke colour so it
+   *  reflects the CLASS; ``null`` falls back to the geometry-kind colour. */
+  category?: string | null;
   // Source series id — the imageData lookup picks ``primaryImageData``
   // when this matches ``primarySeriesId``, otherwise ``fusionImageData``.
   targetSeriesId: string;
@@ -162,6 +167,7 @@ function pickImageData(
 interface ProjectedBox {
   id: string;
   kind: string;
+  category: string | null;
   label: string | null;
   focused: boolean;
   // Canvas-coord rectangle (already screen-space). null for shapes
@@ -304,6 +310,7 @@ export default function MarkerOverlay({
       projected.push({
         id: m.id,
         kind: m.kind,
+        category: m.category ?? null,
         label: m.label ?? null,
         focused,
         rect,
@@ -324,6 +331,7 @@ export default function MarkerOverlay({
     projected.push({
       id: m.id,
       kind: m.kind,
+      category: m.category ?? null,
       label: m.label ?? null,
       focused,
       rect: null,
@@ -354,12 +362,9 @@ export default function MarkerOverlay({
     >
       <title>Marker overlay</title>
       {projected.map((p) => {
-        const stroke =
-          p.kind === "bbox.lesion"
-            ? "#fb923c" // amber-400, matches the AI-attribution palette
-            : p.kind === "fiducial"
-              ? "#22d3ee" // cyan-400
-              : "#facc15"; // yellow-400 for text-overlay
+        // Class colour when the marker is linked to a finding; else the
+        // legacy geometry-kind colour (bbox.lesion / fiducial / text-overlay).
+        const stroke = overlayStroke({ category: p.category, kind: p.kind });
         const baseStrokeWidth = p.focused ? 3 : 1.5;
         const focusedClass = p.focused ? "bv-marker-focused" : undefined;
         if (p.rect) {
