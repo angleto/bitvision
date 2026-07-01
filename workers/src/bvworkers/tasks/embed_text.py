@@ -25,9 +25,8 @@ import asyncio
 import uuid
 
 from sqlalchemy import text
-from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
+from sqlalchemy.ext.asyncio import AsyncSession
 
-from bvworkers.config import get_settings
 from bvworkers.tasks.embed_series import EMBEDDING_DIM, _text_encoder
 
 MODEL_ID = "biomedclip-text-v1"
@@ -64,9 +63,7 @@ async def _fetch_text_from_db(db: AsyncSession, target_kind: str, tid: uuid.UUID
     as ``embed_series`` which talks to S3/Postgres without an HTTP hop.
     """
     if target_kind == "report":
-        row = await db.execute(
-            text("SELECT text FROM reports WHERE id = :tid"), {"tid": tid}
-        )
+        row = await db.execute(text("SELECT text FROM reports WHERE id = :tid"), {"tid": tid})
         res = row.first()
         return res[0] if res else None
 
@@ -124,11 +121,9 @@ async def embed_text_target(
             "allowed": sorted(ALLOWED_TARGET_KINDS),
         }
 
-    settings = get_settings()
-    engine = create_async_engine(settings.database_url, pool_pre_ping=True)
     tid = uuid.UUID(target_id)
 
-    async with AsyncSession(engine) as db:
+    async with AsyncSession(ctx["db_engine"]) as db:
         # Skip if we already have an up-to-date text embedding for this row.
         existing = await db.execute(
             text(
@@ -139,7 +134,6 @@ async def embed_text_target(
             {"kind": target_kind, "tid": tid, "model": MODEL_ID},
         )
         if existing.first():
-            await engine.dispose()
             return {
                 "status": "already_embedded",
                 "target_kind": target_kind,
@@ -151,7 +145,6 @@ async def embed_text_target(
             body = await _fetch_text_from_db(db, target_kind, tid)
 
         if not body or not body.strip():
-            await engine.dispose()
             return {
                 "status": "no_text",
                 "target_kind": target_kind,
@@ -163,10 +156,7 @@ async def embed_text_target(
         vector = await asyncio.to_thread(_compute_text_embedding, body)
 
         if len(vector) != EMBEDDING_DIM:
-            await engine.dispose()
-            raise RuntimeError(
-                f"text encoder returned dim={len(vector)}, expected {EMBEDDING_DIM}"
-            )
+            raise RuntimeError(f"text encoder returned dim={len(vector)}, expected {EMBEDDING_DIM}")
 
         vec_str = "[" + ",".join(str(v) for v in vector) + "]"
         await db.execute(
@@ -185,7 +175,6 @@ async def embed_text_target(
         )
         await db.commit()
 
-    await engine.dispose()
     return {
         "status": "embedded",
         "target_kind": target_kind,

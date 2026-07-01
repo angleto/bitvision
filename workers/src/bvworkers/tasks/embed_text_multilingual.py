@@ -21,9 +21,7 @@ import asyncio
 import uuid
 
 from sqlalchemy import text
-from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
-
-from bvworkers.config import get_settings
+from sqlalchemy.ext.asyncio import AsyncSession
 
 MODEL_NAME = "paraphrase-multilingual-MiniLM-L12-v2"
 MODEL_ID = "minilm-multi-v1"
@@ -102,9 +100,6 @@ async def embed_text_ml(
             "target_id": target_id,
         }
 
-    settings = get_settings()
-    engine = create_async_engine(settings.database_url, pool_pre_ping=True)
-
     tid = uuid.UUID(target_id)
 
     # CPU-bound encode → offload to a thread so we don't block the event loop.
@@ -113,7 +108,7 @@ async def embed_text_ml(
     # pgvector literal format: "[v1,v2,...,vN]"
     vec_str = "[" + ",".join(str(v) for v in vector) + "]"
 
-    async with AsyncSession(engine) as db:
+    async with AsyncSession(ctx["db_engine"]) as db:
         await db.execute(
             text(
                 "INSERT INTO text_embeddings "
@@ -126,7 +121,6 @@ async def embed_text_ml(
         )
         await db.commit()
 
-    await engine.dispose()
     return {
         "status": "embedded",
         "target_kind": target_kind,

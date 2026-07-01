@@ -25,9 +25,7 @@ import uuid
 from typing import Any
 
 from sqlalchemy import text
-from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
-
-from bvworkers.config import get_settings
+from sqlalchemy.ext.asyncio import AsyncSession
 
 MODEL_NAME = "BAAI/bge-m3"
 MODEL_ID = "bge-m3-v1"
@@ -107,9 +105,6 @@ async def embed_bge_m3_dense(
             "target_id": target_id,
         }
 
-    settings = get_settings()
-    engine = create_async_engine(settings.database_url, pool_pre_ping=True)
-
     tid = uuid.UUID(target_id)
 
     # CPU-bound encode → offload to a thread so we don't block the loop.
@@ -118,7 +113,7 @@ async def embed_bge_m3_dense(
     # pgvector literal format: "[v1,v2,...,vN]"
     vec_str = "[" + ",".join(str(v) for v in vector) + "]"
 
-    async with AsyncSession(engine) as db:
+    async with AsyncSession(ctx["db_engine"]) as db:
         await db.execute(
             text(
                 "INSERT INTO text_embeddings_bge_m3 "
@@ -131,7 +126,6 @@ async def embed_bge_m3_dense(
         )
         await db.commit()
 
-    await engine.dispose()
     return {
         "status": "embedded",
         "target_kind": target_kind,
@@ -183,10 +177,7 @@ async def embed_bge_m3_all(
 
     dense_str = "[" + ",".join(str(v) for v in full["dense"]) + "]"
 
-    settings = get_settings()
-    engine = create_async_engine(settings.database_url, pool_pre_ping=True)
-
-    async with AsyncSession(engine) as db:
+    async with AsyncSession(ctx["db_engine"]) as db:
         await db.execute(
             text(
                 "INSERT INTO text_embeddings_bge_m3 "
@@ -225,7 +216,6 @@ async def embed_bge_m3_all(
         )
         await db.commit()
 
-    await engine.dispose()
     return {
         "status": "embedded",
         "target_kind": target_kind,
