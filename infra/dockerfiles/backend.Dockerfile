@@ -16,15 +16,6 @@ COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /bin/
 # workspace root + both members. Without mcp/ uv sync fails with
 # "Failed to parse entry: bvmcp".
 COPY pyproject.toml uv.lock /app/
-# Cache-bust the source COPY per release. buildkit's registry cache
-# (cache-from + cache-to mode=max) mis-matched the ``COPY backend`` layer on a
-# pure content change: v4.4.105 added alembic migration 0042 but the layer
-# cache-hit and the image shipped stale source (the migration never reached the
-# image, so ``alembic upgrade head`` was a no-op). Keying a RUN on the release
-# VERSION forces a fresh COPY (and uv sync) on every tagged build, so committed
-# code always lands in the image. Proper follow-up: move to type=gha cache.
-ARG VERSION="dev"
-RUN echo "source-rev=${VERSION}"
 COPY backend /app/backend
 COPY mcp /app/mcp
 
