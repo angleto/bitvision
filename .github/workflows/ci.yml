@@ -75,7 +75,7 @@ jobs:
         run: |
           uv sync --extra dev
           uv run alembic upgrade head
-          uv run pytest tests/test_clinical_event_documents.py tests/integration/test_catalog_db.py -q
+          uv run pytest tests/test_clinical_event_documents.py tests/integration/test_catalog_db.py tests/test_hybrid_text_dense.py -q
 
   search-eval:
     name: Search relevance gate

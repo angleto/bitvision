@@ -15,6 +15,12 @@ same working set of studies the caller is allowed to see:
 3. **image** — BiomedCLIP text encoder on ``q`` → pgvector cosine
    similarity against series-level image embeddings
    (``model_id='biomedclip-v1'``, as written by the embed_series worker).
+4. **text_dense** — the active multilingual text model (MiniLM / BGE-M3)
+   encodes ``q`` → pgvector cosine similarity against the coarse
+   ``report_content`` + ``finding`` text vectors, projected to their study
+   (``services.study_text_search``). This is the semantic counterpart to the
+   lexical ``text`` arm: it matches across languages / paraphrase where no
+   description token overlaps, and needs no BiomedCLIP.
 
 Each list is fed into Reciprocal Rank Fusion
 (``services.rrf.rrf_fuse``) with the caller-supplied weights. The
@@ -46,6 +52,7 @@ from bvphoenix.db.session import get_db
 from bvphoenix.services.permissions import narrow_to_scope, visible_studies_filter
 from bvphoenix.services.rate_limit import SEARCH_LIMIT, limiter
 from bvphoenix.services.rrf import rrf_fuse, rrf_signal_contribution
+from bvphoenix.services.study_text_search import text_dense_study_ids
 from bvphoenix.services.thesaurus import expand_tsquery
 from bvphoenix.services.vector_search import tune_vector_query
 
@@ -76,6 +83,9 @@ class HybridSignalScores(BaseModel):
     tag: float
     text: float
     image: float
+    # Multilingual dense-text arm (report_content + finding vectors,
+    # study-projected). 0.0 when it contributed nothing to this study.
+    text_dense: float = 0.0
 
 
 class HybridSearchItem(BaseModel):
@@ -93,7 +103,11 @@ class HybridSearchOut(BaseModel):
 # ---- Weights parser --------------------------------------------------------
 
 
-DEFAULT_WEIGHTS = {"tag": 2.0, "text": 1.0, "image": 2.0}
+# ``text_dense`` (multilingual semantic text) defaults to 2 — on par with the
+# tag/image arms — so it meaningfully shapes the fusion where a user has report
+# / finding vectors. Absent from a legacy ``tag:2,text:1,image:2`` weight string
+# it simply inherits this default (backward-compatible).
+DEFAULT_WEIGHTS = {"tag": 2.0, "text": 1.0, "image": 2.0, "text_dense": 2.0}
 _ALLOWED_SIGNALS = frozenset(DEFAULT_WEIGHTS)
 
 
@@ -380,12 +394,17 @@ async def search_hybrid(
         "image",
         semantic_search_series(db, q=q, k=PER_SIGNAL_LIMIT, visible_ids_sq=visible_ids_sq),
     )
+    text_dense_ids = await _safe(
+        "text_dense",
+        text_dense_study_ids(db, q=q, k=PER_SIGNAL_LIMIT, visible_ids_sq=visible_ids_sq),
+    )
 
     fused = rrf_fuse(
         [
             (tag_ids, parsed_weights["tag"]),
             (text_ids, parsed_weights["text"]),
             (image_ids, parsed_weights["image"]),
+            (text_dense_ids, parsed_weights["text_dense"]),
         ],
         k=RRF_K,
     )
@@ -404,6 +423,7 @@ async def search_hybrid(
         "tag": {sid: i + 1 for i, sid in enumerate(tag_ids)},
         "text": {sid: i + 1 for i, sid in enumerate(text_ids)},
         "image": {sid: i + 1 for i, sid in enumerate(image_ids)},
+        "text_dense": {sid: i + 1 for i, sid in enumerate(text_dense_ids)},
     }
 
     items: list[HybridSearchItem] = []
@@ -421,7 +441,7 @@ async def search_hybrid(
                     ),
                     6,
                 )
-                for name in ("tag", "text", "image")
+                for name in ("tag", "text", "image", "text_dense")
             }
         )
         items.append(
