@@ -205,7 +205,7 @@ jobs:
       # done image-by-image so partial success is still useful.
       fail-fast: false
       matrix:
-        service: [backend, workers, frontend, mcp-http]
+        service: [backend, workers, frontend, mcp-http, inference-svc]
     steps:
       - uses: actions/checkout@v4
 
