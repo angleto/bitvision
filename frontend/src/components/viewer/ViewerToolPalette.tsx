@@ -14,6 +14,13 @@ export interface ViewerToolPaletteProps {
   onChange: (tool: Tool | null) => void;
   /** Optional "Clear all annotations" action. */
   onClearAll?: () => void;
+  /** Optional undo / redo of annotation edits (task cde63ced). Buttons render
+   *  only when the handler is supplied; each disables itself when its stack is
+   *  empty. Ctrl+Z / Ctrl+Shift+Z hit the same handlers. */
+  onUndo?: () => void;
+  onRedo?: () => void;
+  canUndo?: boolean;
+  canRedo?: boolean;
   /** Restrict to a subset of tools (e.g. the contrast grid's compact set). */
   tools?: readonly Tool[];
   /** Tighter buttons + no hint line, for a per-pane strip. */
@@ -24,6 +31,10 @@ export default function ViewerToolPalette({
   activeTool,
   onChange,
   onClearAll,
+  onUndo,
+  onRedo,
+  canUndo,
+  canRedo,
   tools,
   compact,
 }: ViewerToolPaletteProps) {
@@ -60,6 +71,32 @@ export default function ViewerToolPalette({
             </button>
           );
         })}
+        {onUndo && (
+          <button
+            type="button"
+            className="viewer-btn"
+            style={btnStyle}
+            onClick={onUndo}
+            disabled={canUndo === false}
+            aria-label={tv("undo")}
+            title={`${tv("undo")} (Ctrl+Z)`}
+          >
+            <span aria-hidden="true">↶</span>
+          </button>
+        )}
+        {onRedo && (
+          <button
+            type="button"
+            className="viewer-btn"
+            style={btnStyle}
+            onClick={onRedo}
+            disabled={canRedo === false}
+            aria-label={tv("redo")}
+            title={`${tv("redo")} (Ctrl+Shift+Z)`}
+          >
+            <span aria-hidden="true">↷</span>
+          </button>
+        )}
         {onClearAll && (
           <button
             type="button"

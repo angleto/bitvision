@@ -749,6 +749,8 @@
     "toolLens": "Lens",
     "clearAll": "Clear all",
     "clearAllTitle": "Clear all measurements",
+    "undo": "Undo",
+    "redo": "Redo",
     "hintNone": "Click / drag = crosshair · Scroll = slice · Ctrl+Scroll = zoom · Middle-drag = pan",
     "hintWl": "Drag = W/L · Scroll = slice · Ctrl+Scroll = zoom · Middle-drag = pan",
     "hintPan": "Drag = pan · Right-drag = zoom · Scroll = slice",

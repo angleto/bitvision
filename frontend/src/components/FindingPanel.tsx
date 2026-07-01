@@ -22,6 +22,7 @@ import {
   type FindingVocab,
   findingsApi,
 } from "@/lib/api";
+import { colorForCategory } from "@/lib/findingColors";
 
 interface Props {
   patientId: string;
@@ -109,6 +110,13 @@ export default function FindingPanel({
     for (const x of vocab?.anatomy_sites ?? []) m.set(x.key, x.display);
     return m;
   }, [vocab]);
+  // Finding type key → category, so each row can show a class colour chip
+  // matching the on-canvas annotation colour (task cde63ced).
+  const typeCategory = useMemo(() => {
+    const m = new Map<string, string>();
+    for (const x of vocab?.finding_types ?? []) m.set(x.key, x.category);
+    return m;
+  }, [vocab]);
 
   const resetForm = () => {
     setTypeKey("");
@@ -192,6 +200,19 @@ export default function FindingPanel({
                 fontSize: "0.78rem",
               }}
             >
+              <span
+                aria-hidden="true"
+                title={f.type}
+                style={{
+                  display: "inline-block",
+                  width: "0.7rem",
+                  height: "0.7rem",
+                  borderRadius: 2,
+                  flexShrink: 0,
+                  alignSelf: "center",
+                  background: colorForCategory(typeCategory.get(f.type)),
+                }}
+              />
               <span style={{ flex: 1 }}>
                 <strong>{typeDisplay.get(f.type) ?? f.type}</strong>
                 {f.anatomy && <> · {anatomyDisplay.get(f.anatomy) ?? f.anatomy}</>}
