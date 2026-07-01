@@ -32,7 +32,9 @@ export = [
     # open_clip builds BiomedCLIP's HuggingFace (PubMedBERT) text tower via
     # transformers; without it create_model_and_transforms raises
     # "Please pip install transformers to use pre-trained HuggingFace models".
-    "transformers>=4.40.0",
+    # Cap to the 4.x line open_clip 2.x targets (transformers 5.x dropped
+    # deprecated APIs open_clip 2.32 still calls).
+    "transformers>=4.40.0,<5",
 ]
 dev = [
     "pytest>=8.3.0",
