@@ -25,7 +25,14 @@ dependencies = [
 # .onnx graphs. Never installed in the runtime image layer.
 export = [
     "torch>=2.2.0",
-    "open_clip_torch>=2.24.0",
+    # Pin to the 2.x line: export_onnx.py targets the open_clip 2.x model
+    # API, and 3.x is an untested major here. BiomedCLIP (hf-hub) is fully
+    # supported on 2.x (matches the workers' open-clip-torch).
+    "open_clip_torch>=2.24.0,<3",
+    # open_clip builds BiomedCLIP's HuggingFace (PubMedBERT) text tower via
+    # transformers; without it create_model_and_transforms raises
+    # "Please pip install transformers to use pre-trained HuggingFace models".
+    "transformers>=4.40.0",
 ]
 dev = [
     "pytest>=8.3.0",
