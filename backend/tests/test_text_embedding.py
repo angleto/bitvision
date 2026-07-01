@@ -183,6 +183,7 @@ def test_study_embed_text_composition() -> None:
     # All-blank composes to empty (the embed helper then no-ops).
     assert te.study_embed_text(study_description=None, modalities=[], body_parts=None) == ""
     # Only structural metadata (no description) still yields a vector-worthy string.
-    assert te.study_embed_text(
-        study_description=None, modalities=["MR"], body_parts=["BRAIN"]
-    ) == "MR; BRAIN"
+    assert (
+        te.study_embed_text(study_description=None, modalities=["MR"], body_parts=["BRAIN"])
+        == "MR; BRAIN"
+    )
