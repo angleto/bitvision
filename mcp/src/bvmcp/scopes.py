@@ -421,6 +421,7 @@ TOOL_SCOPE: dict[str, str] = {
     "get_annotation_revisions": "annotations:read",
     "get_finding_vocab": "findings:read",
     "search_findings": "findings:read",
+    "find_similar_findings": "findings:read",
     "get_finding": "findings:read",
     "get_finding_revisions": "findings:read",
     "create_finding": "findings:write",

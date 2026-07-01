@@ -14,10 +14,13 @@ This module is the single home for the on-write coarse path:
   text model in the ``embedding_models`` registry (``spec.arq_task``). One
   call lands the target in the MiniLM store today and *additionally* in the
   BGE-M3 store the moment that model is activated — no call-site change.
-* :func:`patient_embed_text` / :func:`report_content_embed_text` compose the
-  coarse free-text for the two synchronous API write paths. (Documents have
-  no synchronous text — OCR is async — so the chunk worker enqueues their
-  coarse vector post-OCR; findings compose their text in ``api.findings``.)
+* :func:`patient_embed_text` / :func:`report_content_embed_text` /
+  :func:`finding_embed_text` compose the coarse free-text for the synchronous
+  API write paths. (Documents have no synchronous text — OCR is async — so the
+  chunk worker enqueues their coarse vector post-OCR.) ``finding_embed_text``
+  is the single source of truth shared by the on-write path
+  (``api.findings._enqueue_finding_embed``) and the catch-up backfill
+  (``bvphoenix-backfill embed-findings``), so a re-embed is byte-identical.
 
 Contract (mirrors ``api.findings._enqueue_finding_embed``): best-effort —
 a failure never breaks the originating write; the backfill CLI
@@ -56,6 +59,30 @@ def report_content_embed_text(rc: ReportContent) -> str:
     + recommendations. Blank fields are skipped; an all-blank row no-ops."""
     parts = [rc.title, rc.narrative_md, rc.findings_md, rc.recommendations_md]
     return "\n\n".join(p for p in parts if p)
+
+
+def finding_embed_text(
+    *,
+    type_display: str,
+    anatomy_display: str | None,
+    laterality: str | None,
+    morphology: list[str],
+    description: str | None,
+) -> str:
+    """Coarse free-text for a finding's whole-object semantic vector: the
+    coded type, anatomy (+ laterality), morphology descriptors and the
+    free-text description. Shared by the on-write path and the backfill CLI
+    so a re-embed is byte-identical. Blank when nothing is set — the embed
+    helper then no-ops."""
+    parts = [type_display]
+    if anatomy_display:
+        parts.append(anatomy_display + (f" {laterality}" if laterality else ""))
+    if morphology:
+        parts.append(", ".join(morphology))
+    text = "; ".join(p for p in parts if p)
+    if description:
+        text = f"{text}. {description}" if text else description
+    return text.strip()
 
 
 async def enqueue_text_embed(
