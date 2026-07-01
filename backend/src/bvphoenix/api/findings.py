@@ -54,6 +54,7 @@ from bvphoenix.api.markers import (
     _study_or_404,
 )
 from bvphoenix.api.pet_voi import load_pet_volume
+from bvphoenix.api.search import find_similar_studies
 from bvphoenix.api.studies._shared import (
     HotSpot,
     HotSpotsIn,
@@ -81,6 +82,7 @@ from bvphoenix.db.models import (
 from bvphoenix.db.session import get_db
 from bvphoenix.middleware.audit_dependency import AuditDep
 from bvphoenix.middleware.idempotency import IdempotencyContext, idempotent
+from bvphoenix.middleware.problem_details import problem
 from bvphoenix.services.etag import enforce_optional_if_match, format_etag
 from bvphoenix.services.measurements import (
     MissingSpacingError,
@@ -94,7 +96,7 @@ from bvphoenix.services.pet_voi import (
     compute_voi_threshold,
     parse_volume_blob,
 )
-from bvphoenix.services.text_embedding import enqueue_text_embed
+from bvphoenix.services.text_embedding import enqueue_text_embed, finding_embed_text
 
 router = APIRouter(tags=["findings"])
 
@@ -713,26 +715,6 @@ async def _apply_promoted_measurements(
     return changed
 
 
-def _finding_embed_text(
-    *,
-    type_display: str,
-    anatomy_display: str | None,
-    laterality: str | None,
-    morphology: list[str],
-    description: str | None,
-) -> str:
-    """Compose the natural-language string embedded for semantic search."""
-    parts = [type_display]
-    if anatomy_display:
-        parts.append(anatomy_display + (f" {laterality}" if laterality else ""))
-    if morphology:
-        parts.append(", ".join(morphology))
-    text = "; ".join(p for p in parts if p)
-    if description:
-        text = f"{text}. {description}" if text else description
-    return text.strip()
-
-
 async def _enqueue_finding_embed(db: AsyncSession, finding: Finding) -> None:
     """Best-effort: embed the finding's text under target_kind='finding' on
     every active text model (MiniLM today, and BGE-M3 once it is activated)
@@ -751,7 +733,7 @@ async def _enqueue_finding_embed(db: AsyncSession, finding: Finding) -> None:
                     select(AnatomySite.display).where(AnatomySite.id == finding.anatomy_site_id)
                 )
             ).scalar_one_or_none()
-        text_value = _finding_embed_text(
+        text_value = finding_embed_text(
             type_display=type_display,
             anatomy_display=anatomy_display,
             laterality=finding.laterality,
@@ -912,6 +894,146 @@ async def search_findings(
     return [
         _out(f, type_key=tk, anatomy_key=ak, geometry=geom.get(f.id, [])) for (f, tk, ak) in rows
     ]
+
+
+# ---------------------------------------------------------------------------
+# Visual cohort discovery (find findings on visually similar studies)
+# ---------------------------------------------------------------------------
+
+
+class SimilarFindingOut(BaseModel):
+    """A finding surfaced as visually similar to the anchor. ``score`` is the
+    BiomedCLIP cosine similarity (0..1) of the neighbour *series* to the anchor
+    finding's series; ``matched_series_id`` is that neighbour series. This is
+    retrieval, NOT a diagnosis: it ranks by imaging appearance, makes no
+    clinical claim, and never crosses the patient-visibility boundary."""
+
+    finding: FindingOut
+    score: float
+    matched_series_id: str
+
+
+async def find_similar_findings_core(
+    *,
+    db: AsyncSession,
+    user: User | None,
+    finding_id: uuid.UUID,
+    k: int = 10,
+    same_type: bool = False,
+    modality: str | None = None,
+    scope: str | None = None,
+) -> list[SimilarFindingOut]:
+    """Cohort-by-lesion discovery: given a finding, return other findings on
+    studies whose imaging is visually similar (BiomedCLIP series vectors).
+
+    Reuses the tested ``/similar-to`` ANN (:func:`find_similar_studies`): the
+    anchor finding's ``series_id`` is the query vector, neighbours are already
+    visibility-scoped there, and we map the neighbour studies to their live,
+    non-retracted findings. PHI-free, retrieval-not-diagnosis; an invisible or
+    cross-patient neighbour can never surface (the ANN is filtered to
+    ``visible_studies_filter`` before ranking, not trimmed after)."""
+    # Anchor must be a finding the caller may read (invisible / cross-patient /
+    # deleted -> 404), so the tool cannot be used to probe hidden findings.
+    visible_ids = (
+        (await visible_studies_filter(db, user)).with_only_columns(ImagingStudy.id).subquery()
+    )
+    anchor = (
+        await db.execute(
+            select(Finding).where(
+                Finding.id == finding_id,
+                Finding.deleted_at.is_(None),
+                Finding.study_id.in_(select(visible_ids.c.id)),
+            )
+        )
+    ).scalar_one_or_none()
+    if anchor is None:
+        raise HTTPException(status_code=404, detail="finding not found")
+    if anchor.series_id is None:
+        raise problem(
+            422,
+            "finding_not_localizable",
+            "This finding is not linked to a series, so it has no image to match on.",
+            title="Finding has no image to match",
+        )
+
+    # Neighbour studies by series-level BiomedCLIP similarity. Over-fetch
+    # studies so we can fill k findings even when some neighbours carry none.
+    # A series with no image vector yet raises 422 study_not_indexed (propagated
+    # verbatim: "not yet indexed for visual search").
+    neighbours = await find_similar_studies(
+        db=db,
+        user=user,
+        target_id=anchor.series_id,
+        k=max(k, 20),
+        modality=modality,
+        scope=scope,
+    )
+
+    out: list[SimilarFindingOut] = []
+    for n in neighbours:
+        study_uuid = n.study.id
+        if study_uuid == anchor.study_id:
+            # "Similar" means elsewhere — skip the anchor's own study.
+            continue
+        stmt = (
+            select(Finding, FindingType.key, AnatomySite.key)
+            .join(FindingType, FindingType.id == Finding.finding_type_id)
+            .outerjoin(AnatomySite, AnatomySite.id == Finding.anatomy_site_id)
+            .where(
+                Finding.study_id == study_uuid,
+                Finding.deleted_at.is_(None),
+                Finding.status != "retracted",
+            )
+            .order_by(Finding.created_at.desc())
+        )
+        if same_type:
+            stmt = stmt.where(Finding.finding_type_id == anchor.finding_type_id)
+        rows = (await db.execute(stmt)).all()
+        if not rows:
+            continue
+        geom = await _geometry_for(db, [r[0].id for r in rows])
+        for f, tk, ak in rows:
+            out.append(
+                SimilarFindingOut(
+                    finding=_out(f, type_key=tk, anatomy_key=ak, geometry=geom.get(f.id, [])),
+                    score=n.score,
+                    matched_series_id=n.matched_series_id,
+                )
+            )
+            if len(out) >= k:
+                return out
+    return out
+
+
+@router.get("/findings/{finding_id}/similar", response_model=list[SimilarFindingOut])
+async def similar_findings(
+    finding_id: uuid.UUID,
+    db: Annotated[AsyncSession, Depends(get_db)],
+    user: Annotated[User, Depends(require_user)],
+    k: int = Query(10, ge=1, le=100, description="Max findings to return."),
+    same_type: bool = Query(
+        False, description="Only return findings of the same finding type as the anchor."
+    ),
+    modality: str | None = Query(None, max_length=16),
+    scope: Literal["all", "public", "mine", "shared"] | None = Query(
+        None,
+        description="Visibility scope (UX narrowing on top of the auth boundary, as in /search).",
+    ),
+) -> list[SimilarFindingOut]:
+    """Cohort-by-lesion: findings on studies visually similar to this finding's
+    series (BiomedCLIP), best match first. Retrieval to aid discovery — it ranks
+    by imaging appearance and makes NO diagnostic claim. Visibility-scoped
+    (never cross-patient); 404 if the anchor is not visible, 422 if it has no
+    series or the series is not yet indexed for visual search."""
+    return await find_similar_findings_core(
+        db=db,
+        user=user,
+        finding_id=finding_id,
+        k=k,
+        same_type=same_type,
+        modality=modality,
+        scope=scope,
+    )
 
 
 # ---------------------------------------------------------------------------

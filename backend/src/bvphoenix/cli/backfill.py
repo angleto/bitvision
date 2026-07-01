@@ -44,6 +44,7 @@ from bvphoenix.services.embeddable import (
     embeddable_modality_clause,
     embeddable_sop_class_clause,
 )
+from bvphoenix.services.text_embedding import finding_embed_text
 from bvphoenix.services.text_models import load_text_model_specs_sync
 
 
@@ -653,6 +654,7 @@ def _chunk_candidates(
 
 async def _enqueue_embed_text(
     task_name: str,
+    target_kind: str,
     rows: list[tuple[uuid.UUID, str]],
 ) -> int:
     settings = get_settings()
@@ -660,7 +662,7 @@ async def _enqueue_embed_text(
     try:
         count = 0
         for cid, body in rows:
-            await redis.enqueue_job(task_name, "document_chunk", str(cid), body)
+            await redis.enqueue_job(task_name, target_kind, str(cid), body)
             count += 1
         return count
     finally:
@@ -762,7 +764,176 @@ def embed_text(
         click.echo("nothing to do")
         return
 
-    n = asyncio.run(_enqueue_embed_text(task_name, rows))
+    n = asyncio.run(_enqueue_embed_text(task_name, "document_chunk", rows))
+    click.echo(f"enqueued {task_name}: {n} jobs")
+    click.echo("Run an Arq worker with the `ai` extra to process the queue.")
+
+
+# Finding coarse-text backfill -----------------------------------------
+# The on-write path (api.findings._enqueue_finding_embed) fans a
+# target_kind='finding' text-embed job out to every active model when a
+# finding is created/updated, so newly-written findings land in MiniLM now
+# and BGE-M3 the moment it is activated. But findings written BEFORE a
+# model was activated never get its vector. This command is the catch-up:
+# it recomposes each finding's coarse text with the SAME
+# ``finding_embed_text`` the on-write path uses (single source of truth,
+# so a re-embed is byte-identical) and enqueues the model's task.
+
+
+def _finding_candidates(
+    session: Session,
+    *,
+    patient_id: uuid.UUID | None,
+    confirmed_only: bool,
+    only_missing: bool,
+    store_table: str,
+    model_id: str,
+) -> list[tuple[uuid.UUID, str]]:
+    where = ["f.deleted_at IS NULL"]
+    params: dict[str, object] = {}
+    if patient_id is not None:
+        where.append("f.patient_id = :pid")
+        params["pid"] = patient_id
+    if confirmed_only:
+        where.append("f.status = 'confirmed'")
+    if only_missing:
+        # ``store_table`` is interpolated (table names cannot be bind
+        # params); injection-safe — it is identifier-validated registry
+        # data (spec_from_registry), never raw user input.
+        where.append(
+            f"NOT EXISTS (SELECT 1 FROM {store_table} te "
+            "WHERE te.target_kind = 'finding' AND te.target_id = f.id "
+            "AND te.model_id = :model)"
+        )
+        params["model"] = model_id
+    clause = " WHERE " + " AND ".join(where)
+    sql = (
+        "SELECT f.id, ft.display, a.display, f.laterality, f.morphology_keys, f.description "
+        "FROM findings f "
+        "JOIN finding_types ft ON ft.id = f.finding_type_id "
+        "LEFT JOIN anatomy_sites a ON a.id = f.anatomy_site_id"
+        f"{clause} ORDER BY f.id"
+    )
+    rows = session.execute(text(sql), params).all()
+    out: list[tuple[uuid.UUID, str]] = []
+    for fid, type_display, anatomy_display, laterality, morphology, description in rows:
+        body = finding_embed_text(
+            type_display=type_display or "",
+            anatomy_display=anatomy_display,
+            laterality=laterality,
+            morphology=list(morphology or []),
+            description=description,
+        )
+        if body:  # skip blank compositions — the worker would no-op anyway
+            out.append((uuid.UUID(str(fid)), body))
+    return out
+
+
+@main.command("embed-findings")
+@click.option(
+    "--model",
+    "model",
+    required=True,
+    help=(
+        "Text embedding model name (a routed, active row of the "
+        "embedding_models registry, e.g. minilm-multi-v1 | bge-m3-v1)."
+    ),
+)
+@click.option(
+    "--patient",
+    "patient",
+    default=None,
+    help="Patient UUID. Mutually exclusive with --all.",
+)
+@click.option(
+    "--all",
+    "all_patients",
+    is_flag=True,
+    default=False,
+    help="Backfill finding embeddings for every patient. Use with care.",
+)
+@click.option(
+    "--confirmed-only",
+    is_flag=True,
+    default=False,
+    help="Only findings with status='confirmed' (default: every non-deleted finding).",
+)
+@click.option(
+    "--only-missing/--all-findings",
+    "only_missing",
+    default=True,
+    show_default=True,
+    help="Only findings lacking a vector for the chosen model (default), or re-embed all.",
+)
+@click.option(
+    "--dry-run",
+    is_flag=True,
+    help="Count candidate findings and print the plan without enqueueing.",
+)
+def embed_findings(
+    model: str,
+    patient: str | None,
+    all_patients: bool,
+    confirmed_only: bool,
+    only_missing: bool,
+    dry_run: bool,
+) -> None:
+    """Enqueue coarse text-embedding jobs (target_kind='finding') for the
+    chosen model over pre-existing findings.
+
+    Complements the on-write fan-out: use it after activating a new text
+    model (e.g. bge-m3-v1) to give the historical corpus its vector so
+    find_similar / semantic search see every finding. Routes to the model's
+    Arq task + pgvector store from its registry row; idempotent (ON CONFLICT
+    upsert). Requires an Arq worker with the ``ai`` extra running.
+    """
+    if (patient is None) == (not all_patients):
+        click.echo("specify exactly one of --patient <id> or --all", err=True)
+        sys.exit(2)
+
+    patient_uuid: uuid.UUID | None = None
+    if patient is not None:
+        try:
+            patient_uuid = uuid.UUID(patient)
+        except ValueError:
+            click.echo(f"--patient must be a UUID, got {patient!r}", err=True)
+            sys.exit(2)
+
+    engine = _engine()
+    with Session(engine) as session:
+        specs = load_text_model_specs_sync(session)
+        spec = specs.get(model)
+        if spec is None:
+            click.echo(
+                f"unknown or unrouted text model {model!r}; known: {sorted(specs)}",
+                err=True,
+            )
+            sys.exit(2)
+        rows = _finding_candidates(
+            session,
+            patient_id=patient_uuid,
+            confirmed_only=confirmed_only,
+            only_missing=only_missing,
+            store_table=spec.store_table,
+            model_id=spec.model_id,
+        )
+    task_name = spec.arq_task
+
+    scope = f"patient {patient_uuid}" if patient_uuid else "ALL patients"
+    click.echo(f"scope             : {scope}")
+    click.echo(f"model             : {model}")
+    click.echo(f"confirmed-only    : {confirmed_only}")
+    click.echo(f"only-missing      : {only_missing}")
+    click.echo(f"finding candidates: {len(rows)}")
+
+    if dry_run:
+        click.echo("DRY RUN — no jobs enqueued.")
+        return
+    if not rows:
+        click.echo("nothing to do")
+        return
+
+    n = asyncio.run(_enqueue_embed_text(task_name, "finding", rows))
     click.echo(f"enqueued {task_name}: {n} jobs")
     click.echo("Run an Arq worker with the `ai` extra to process the queue.")
 

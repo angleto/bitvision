@@ -52,6 +52,35 @@ def test_findings_dispatch_tools_and_scopes_consistent() -> None:
     assert TOOL_SCOPE["delete_finding"] == "findings:write"
 
 
+def test_find_similar_findings_registered_and_read_scoped() -> None:
+    assert "find_similar_findings" in {t.name for t in findings_tools.TOOLS}
+    assert "find_similar_findings" in findings_tools._DISPATCH
+    assert TOOL_SCOPE["find_similar_findings"] == "findings:read"
+    tool = next(t for t in findings_tools.TOOLS if t.name == "find_similar_findings")
+    assert tool.annotations.readOnlyHint is True
+
+
+async def test_find_similar_findings_forwards_params() -> None:
+    fid = "f-9"
+    payload = [{"finding": {"id": "f-10"}, "score": 0.93, "matched_series_id": "s-2"}]
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.method == "GET"
+        assert request.url.path == f"/api/findings/{fid}/similar"
+        assert request.url.params["k"] == "5"
+        assert request.url.params["same_type"] == "true"
+        assert request.url.params["modality"] == "CT"
+        _assert_auth(request)
+        return _json_response(payload)
+
+    with mock_backend(handler):
+        result = await findings_tools.handle(
+            "find_similar_findings",
+            {"finding_id": fid, "k": 5, "same_type": True, "modality": "CT"},
+        )
+    assert json.loads(result) == payload
+
+
 async def test_get_finding_vocab() -> None:
     payload = {"finding_types": [], "anatomy_sites": [], "morphology_terms": []}
 

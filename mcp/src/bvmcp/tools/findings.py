@@ -138,6 +138,47 @@ TOOLS: list[Tool] = [
         },
     ),
     Tool(
+        name="find_similar_findings",
+        annotations=ToolAnnotations(
+            title="Find visually similar findings",
+            readOnlyHint=True,
+            idempotentHint=True,
+            openWorldHint=False,
+        ),
+        description=(
+            "Cohort-by-lesion discovery: given a finding, return other "
+            "findings on studies whose imaging is visually similar (BiomedCLIP "
+            "series embeddings), best match first — the core value of a "
+            "biobank: 'show me comparable lesions across the corpus'. "
+            "RETRIEVAL, NOT DIAGNOSIS: ranks by imaging appearance, makes no "
+            "clinical claim. Visibility-scoped (never cross-patient). Each "
+            "result carries a ``score`` (0..1 series similarity) and the "
+            "``matched_series_id``. Pass ``same_type=true`` to restrict to the "
+            "anchor's finding type, ``modality`` to filter, ``k`` to cap "
+            "results. 422 when the finding has no series or its series is not "
+            "yet indexed for visual search."
+        ),
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "finding_id": {"type": "string"},
+                "k": {"type": "integer", "default": 10, "minimum": 1, "maximum": 100},
+                "same_type": {
+                    "type": "boolean",
+                    "default": False,
+                    "description": "Only findings of the same type as the anchor.",
+                },
+                "modality": {"type": "string"},
+                "scope": {
+                    "type": "string",
+                    "enum": ["all", "public", "mine", "shared"],
+                    "description": "Visibility narrowing (never widens the auth boundary).",
+                },
+            },
+            "required": ["finding_id"],
+        },
+    ),
+    Tool(
         name="get_finding",
         annotations=ToolAnnotations(
             title="Get finding",
@@ -550,6 +591,22 @@ async def _get_finding(args: dict[str, Any]) -> str:
     return json.dumps(payload, indent=2, ensure_ascii=False)
 
 
+async def _find_similar_findings(args: dict[str, Any]) -> str:
+    params: dict[str, Any] = {}
+    for k in ("k", "modality", "scope"):
+        if args.get(k) is not None:
+            params[k] = args[k]
+    if args.get("same_type"):
+        params["same_type"] = "true"
+    try:
+        payload = await api_get(
+            f"/api/findings/{args['finding_id']}/similar", params=params or None
+        )
+    except httpx.HTTPStatusError as exc:
+        return format_http_error(exc)
+    return json.dumps(payload, indent=2, ensure_ascii=False)
+
+
 async def _get_finding_revisions(args: dict[str, Any]) -> str:
     params = {"limit": int(args.get("limit", 200))}
     try:
@@ -709,6 +766,7 @@ async def _create_findings_from_hot_spots(args: dict[str, Any]) -> str:
 _DISPATCH = {
     "get_finding_vocab": _get_finding_vocab,
     "search_findings": _search_findings,
+    "find_similar_findings": _find_similar_findings,
     "get_finding": _get_finding,
     "get_finding_revisions": _get_finding_revisions,
     "create_finding": _create_finding,
