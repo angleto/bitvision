@@ -168,3 +168,21 @@ async def test_enqueue_uses_real_registry(db_session, monkeypatch):
     assert "embed_bge_m3_all" in tasks  # bge-m3-v1 active + routed
     assert all(args == ("finding", str(tid), "lesione epatica") for _t, args in fake.jobs)
     assert fake.closed is True
+
+
+def test_study_embed_text_composition() -> None:
+    # description + de-duped modalities + de-duped series body parts (0ece383b).
+    assert (
+        te.study_embed_text(
+            study_description="TC torace",
+            modalities=["CT", "CT"],
+            body_parts=["CHEST", "CHEST", "ABDOMEN"],
+        )
+        == "TC torace; CT; CHEST, ABDOMEN"
+    )
+    # All-blank composes to empty (the embed helper then no-ops).
+    assert te.study_embed_text(study_description=None, modalities=[], body_parts=None) == ""
+    # Only structural metadata (no description) still yields a vector-worthy string.
+    assert te.study_embed_text(
+        study_description=None, modalities=["MR"], body_parts=["BRAIN"]
+    ) == "MR; BRAIN"

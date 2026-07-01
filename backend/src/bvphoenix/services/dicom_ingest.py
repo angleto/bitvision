@@ -368,6 +368,15 @@ class DicomIngestor:
             await self._db.flush()
             study.clinical_event_id = event.id
 
+        # Coarse dense-text vector for the /search/hybrid text_dense arm.
+        # Best-effort + idempotent; enqueue only for studies with a patient
+        # (orphans get theirs when assigned, via ensure_imaging_event).
+        from bvphoenix.services.text_embedding import enqueue_study_embed
+
+        for study in self._study_cache.values():
+            if study.patient_id is not None:
+                await enqueue_study_embed(self._db, study.id)
+
     async def bulk_ingest_blobs(
         self,
         blobs: list[bytes],
@@ -610,24 +619,30 @@ async def ensure_imaging_event(db: AsyncSession, study: ImagingStudy) -> Clinica
     """
     if study.patient_id is None:
         return None
+    event: ClinicalEvent | None = None
     if study.clinical_event_id is not None:
-        existing = (
+        event = (
             await db.execute(
                 select(ClinicalEvent).where(ClinicalEvent.id == study.clinical_event_id)
             )
         ).scalar_one_or_none()
-        if existing is not None:
-            return existing
-    event = ClinicalEvent(
-        patient_id=study.patient_id,
-        kind="imaging_study",
-        event_date=study.study_date,
-        title=study.study_description or "Imaging study",
-        source="imaging_ingest",
-    )
-    db.add(event)
-    await db.flush()
-    study.clinical_event_id = event.id
+    if event is None:
+        event = ClinicalEvent(
+            patient_id=study.patient_id,
+            kind="imaging_study",
+            event_date=study.study_date,
+            title=study.study_description or "Imaging study",
+            source="imaging_ingest",
+        )
+        db.add(event)
+        await db.flush()
+        study.clinical_event_id = event.id
+
+    # The study now has a patient — give it its coarse dense-text vector for
+    # the text_dense search arm (best-effort, idempotent upsert).
+    from bvphoenix.services.text_embedding import enqueue_study_embed
+
+    await enqueue_study_embed(db, study.id)
     return event
 
 

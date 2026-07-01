@@ -40,6 +40,7 @@ ALLOWED_TARGET_KINDS: frozenset[str] = frozenset(
         "patient",
         "document_chunk",
         "finding",
+        "study",
     }
 )
 

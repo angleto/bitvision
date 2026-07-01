@@ -67,8 +67,8 @@ class TextEmbeddingBgeM3(Base):
 
     __table_args__ = (
         CheckConstraint(
-            "target_kind IN ('series','report','annotation','consultation',"
-            "'document','patient','document_chunk')",
+            "target_kind IN ('series','report','report_content','annotation',"
+            "'consultation','document','patient','document_chunk','finding','study')",
             name="ck_text_embeddings_bge_m3_target_kind",
         ),
         CheckConstraint(

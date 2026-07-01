@@ -53,7 +53,7 @@ class TextEmbedding(Base):
     __table_args__ = (
         CheckConstraint(
             "target_kind IN ('series','report','annotation','consultation',"
-            "'document','patient','document_chunk','finding')",
+            "'document','patient','document_chunk','finding','study')",
             name="ck_text_embeddings_target_kind",
         ),
         CheckConstraint(

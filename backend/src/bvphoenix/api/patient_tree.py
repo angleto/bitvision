@@ -2046,6 +2046,12 @@ async def rename_tree_item(
         doc.title = new_name
 
     await db.commit()
+    if body.item_kind == "study":
+        # Renaming a study rewrites its description → refresh the coarse
+        # dense-text vector so the text_dense search arm stays in sync.
+        from bvphoenix.services.text_embedding import enqueue_study_embed
+
+        await enqueue_study_embed(db, body.item_id)
     await audit.log(
         action=f"tree_{body.item_kind}_rename",
         actor_subject_id=user.subject_id,

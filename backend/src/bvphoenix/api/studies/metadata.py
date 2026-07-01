@@ -59,6 +59,13 @@ async def patch_study_metadata(
     await db.commit()
     await db.refresh(study)
 
+    if "study_description" in fields:
+        # Description feeds the coarse dense-text vector — refresh it so the
+        # text_dense search arm stays in sync (best-effort, idempotent upsert).
+        from bvphoenix.services.text_embedding import enqueue_study_embed
+
+        await enqueue_study_embed(db, study.id)
+
     await audit.log(
         action="study_metadata_update",
         actor_subject_id=user.subject_id,

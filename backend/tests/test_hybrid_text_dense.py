@@ -195,3 +195,68 @@ async def test_legacy_weight_string_still_parses(
         app.dependency_overrides.clear()
     assert resp.status_code == 200, resp.text
     assert resp.json()["weights_used"]["text_dense"] == 2.0
+
+
+# ---------------------------------------------------------------------------
+# 0ece383b — study-level coarse vector (the coverage that lights up the arm)
+# ---------------------------------------------------------------------------
+
+
+@pytest_asyncio.fixture
+async def study_vec_fixture(db_session, make_user, make_study):
+    """owner1 with a private study carrying ONLY a target_kind='study' vector
+    (no report_content / finding), plus owner2 with a private study carrying
+    the same vector — the leak guard."""
+    seeded: list[uuid.UUID] = []
+
+    async def _study_with_vec(owner):
+        study, _series = await make_study(owner, is_public=False)
+        db_session.add(
+            TextEmbedding(
+                target_kind="study",
+                target_id=study.id,
+                model_id=_TEXT_MODEL_ID,
+                vector=list(_MATCH_VEC),
+            )
+        )
+        seeded.append(study.id)
+        await db_session.flush()
+        return study
+
+    owner1 = await make_user()
+    owner2 = await make_user()
+    study1 = await _study_with_vec(owner1)
+    study2 = await _study_with_vec(owner2)
+    await db_session.commit()
+
+    yield {"owner1": owner1, "study1": study1, "study2": study2}
+
+    for tid in seeded:
+        await db_session.execute(
+            TextEmbedding.__table__.delete().where(TextEmbedding.target_id == tid)
+        )
+    await db_session.commit()
+    app.dependency_overrides.clear()
+
+
+async def test_text_dense_arm_surfaces_study_via_study_vector(
+    study_vec_fixture, db_session, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    async def fake_encode(_model_id: str, _q: str):
+        return list(_MATCH_VEC)
+
+    monkeypatch.setattr(study_text_search, "_embed_active_query", fake_encode)
+    client = await _client_for(db_session, study_vec_fixture["owner1"])
+    try:
+        resp = await client.get("/api/search/hybrid", params={"q": _NONSENSE_Q, "k": 20})
+    finally:
+        await client.aclose()
+        app.dependency_overrides.clear()
+
+    assert resp.status_code == 200, resp.text
+    by_id = {item["study"]["id"]: item for item in resp.json()["items"]}
+    sid1 = str(study_vec_fixture["study1"].id)
+    assert sid1 in by_id, "owner's study should surface via its target_kind='study' vector"
+    assert by_id[sid1]["signals"]["text_dense"] > 0.0
+    # The other owner's private study must NOT leak, despite the same vector.
+    assert str(study_vec_fixture["study2"].id) not in by_id
