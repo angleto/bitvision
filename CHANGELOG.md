@@ -5,6 +5,30 @@ project follows semantic versioning; pre-release suffixes (`alpha`,
 `beta`) gate Kubernetes deployments via the GHCR image tag (without
 the leading `v`, see deployment guide).
 
+## 4.4.102 (2026-07-01)
+
+### Search: multilingual dense-text arm in hybrid search
+
+* `/api/search/hybrid` gains a 4th signal, `text_dense`, fused via RRF beside
+  the existing `tag` / `text` (lexical) / `image` (BiomedCLIP) arms. It encodes
+  the query with the active registry text model (MiniLM / BGE-M3, the same
+  encoder the per-patient chunk search uses — in-process, no BiomedCLIP), runs
+  an ANN over the coarse whole-object text vectors that map to a study
+  (`report_content` → study via its clinical_event; `finding` → `Finding.study_id`),
+  and projects the hits to a study ranking. Unlike the lexical `text` arm this
+  is semantic and multilingual: "neoplasia epatica" can rank a study whose
+  report reads "hepatic tumour" with no shared token — recall the IT/EN
+  thesaurus alone can't reach.
+* Visibility is enforced in the projection (each candidate study is intersected
+  with the caller-visible set), so the arm can never surface a study the caller
+  couldn't already read. It degrades to an empty contribution (never raises) when
+  the registry has no routed text model, the encoder can't load, or the store is
+  unprovisioned — mirroring the other arms' fail-soft behaviour.
+* Backward-compatible: `text_dense` defaults to weight 2, so existing
+  `tag:2,text:1,image:2` weight strings still parse and inherit it. No migration,
+  no new worker, no backfill — it projects from the coarse text vectors already
+  written on the report_content / finding write paths. Backend image only.
+
 ## 4.4.101 (2026-07-01)
 
 ### Search: activate BiomedCLIP image search in prod (inference-svc)
