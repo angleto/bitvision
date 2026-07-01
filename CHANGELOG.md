@@ -5,6 +5,28 @@ project follows semantic versioning; pre-release suffixes (`alpha`,
 `beta`) gate Kubernetes deployments via the GHCR image tag (without
 the leading `v`, see deployment guide).
 
+## 4.4.101 (2026-07-01)
+
+### Search: activate BiomedCLIP image search in prod (inference-svc)
+
+* Semantic image search (`/api/search/semantic?model=biomedclip`) and the
+  `image` arm of `/api/search/hybrid` returned nothing in prod: the backend
+  image deliberately omits `open-clip` (BiomedCLIP runs only in the arq
+  workers), so the in-process query encoder raised 503 / silently produced no
+  image signal. Meanwhile 32,572 series image vectors (`biomedclip-v1`) were
+  already indexed and idle.
+* Fix is the architecturally-intended one (search-overhaul Phase E), not a
+  regression: **build and deploy the already-written `inference-svc`** — a
+  lean CPU ONNX BiomedCLIP dual-encoder (`POST /encode`, no torch/open-clip
+  at runtime) — and point the backend at it via `BVP_INFERENCE_SVC_URL`.
+  `embed_query_biomedclip` and the hybrid image arm already prefer this
+  out-of-process encoder and fall back transparently, so **no backend code
+  change**: this release only adds `inference-svc` to the CI image matrix so
+  the image is built + mirrored to the Scaleway registry. The service holds
+  no secrets, no patient data, and never touches S3/DB (storage isolation).
+* Deploy side (bvphoenix-deploy): apply `inference-svc.yaml` and set
+  `BVP_INFERENCE_SVC_URL=http://bvphoenix-inference-svc:80` on the backend.
+
 ## 4.4.100 (2026-07-01)
 
 ### Public dataset catalog (browsable + citable OpenData commons)
