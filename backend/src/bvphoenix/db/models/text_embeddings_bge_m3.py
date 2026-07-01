@@ -114,8 +114,8 @@ class TextEmbeddingBgeM3Sparse(Base):
 
     __table_args__ = (
         CheckConstraint(
-            "target_kind IN ('series','report','annotation','consultation',"
-            "'document','patient','document_chunk')",
+            "target_kind IN ('series','report','report_content','annotation',"
+            "'consultation','document','patient','document_chunk','finding','study')",
             name="ck_text_embeddings_bge_m3_sparse_target_kind",
         ),
         CheckConstraint(
@@ -160,8 +160,8 @@ class TextEmbeddingBgeM3Colbert(Base):
 
     __table_args__ = (
         CheckConstraint(
-            "target_kind IN ('series','report','annotation','consultation',"
-            "'document','patient','document_chunk')",
+            "target_kind IN ('series','report','report_content','annotation',"
+            "'consultation','document','patient','document_chunk','finding','study')",
             name="ck_text_embeddings_bge_m3_colbert_target_kind",
         ),
         CheckConstraint(

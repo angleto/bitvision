@@ -5,17 +5,19 @@ project follows semantic versioning; pre-release suffixes (`alpha`,
 `beta`) gate Kubernetes deployments via the GHCR image tag (without
 the leading `v`, see deployment guide).
 
-## 4.4.106 (2026-07-01)
+## 4.4.107 (2026-07-01)
 
-### Build: force a fresh source COPY per release (stale-migration fix)
+### Fix: actually ship migration 0042 (bge-m3 sparse+colbert CHECK)
 
-* v4.4.105 shipped a backend image **without** its own migration 0042: buildkit's
-  registry cache mis-matched the `COPY backend` layer on a pure content change,
-  so `alembic upgrade head` was a silent no-op and the bge-m3 sparse/colbert CHECK
-  never widened. `backend.Dockerfile` now keys a `RUN` on the release `VERSION`
-  before `COPY backend`, forcing a clean source copy (and `uv sync`) on every
-  tagged build so committed code always reaches the image. This release carries
-  migration 0042 for real.
+* Migration 0042 (widen the bge-m3 sparse + colbert `target_kind` CHECK, see
+  4.4.105) was inadvertently **left uncommitted** in 4.4.105 / 4.4.106 — its
+  `git add`/`commit` were in the same shell call as a later step that was
+  declined, so they never ran. The 4.4.105/.106 backend images therefore
+  legitimately lacked 0042 (the build cache was correct; there was no buildkit
+  bug), and `alembic upgrade head` was a no-op. This release commits 0042 (+ the
+  model CHECK strings) so it reaches the image and applies.
+* Reverts the 4.4.106 per-release source-COPY cache-bust: it was based on that
+  wrong diagnosis and needlessly re-ran `uv sync` on every tagged build.
 
 ## 4.4.105 (2026-07-01)
 
