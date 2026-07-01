@@ -24,7 +24,11 @@ dependencies = [
 # Heavy deps used ONLY by scripts/export_onnx.py to materialise the
 # .onnx graphs. Never installed in the runtime image layer.
 export = [
-    "torch>=2.2.0",
+    # Cap <2.6: export_onnx.py targets the classic TorchScript ONNX
+    # exporter (explicit input_names / dynamic_axes / opset, which engine.py
+    # relies on for pixel_values / input_ids). torch >=2.9 flips the default
+    # to the dynamo exporter (needs onnxscript, different graph/input naming).
+    "torch>=2.2.0,<2.6",
     # Pin to the 2.x line: export_onnx.py targets the open_clip 2.x model
     # API, and 3.x is an untested major here. BiomedCLIP (hf-hub) is fully
     # supported on 2.x (matches the workers' open-clip-torch).
@@ -35,6 +39,10 @@ export = [
     # Cap to the 4.x line open_clip 2.x targets (transformers 5.x dropped
     # deprecated APIs open_clip 2.32 still calls).
     "transformers>=4.40.0,<5",
+    # torch's classic ONNX exporter serialises the graph via the `onnx`
+    # package (distinct from the runtime's onnxruntime). Without it the
+    # export raises OnnxExporterError("Module onnx is not installed!").
+    "onnx>=1.16.0",
 ]
 dev = [
     "pytest>=8.3.0",
