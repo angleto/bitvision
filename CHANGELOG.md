@@ -5,6 +5,31 @@ project follows semantic versioning; pre-release suffixes (`alpha`,
 `beta`) gate Kubernetes deployments via the GHCR image tag (without
 the leading `v`, see deployment guide).
 
+## 4.4.103 (2026-07-01)
+
+### Search: find_similar_findings + study-level dense-text coverage
+
+* **find_similar_findings** (task c390b2a5) — cohort-by-lesion visual discovery,
+  the core value of a biobank. New `GET /api/findings/{id}/similar` + MCP tool
+  (`findings:read`, read-only): given a finding, return findings on studies whose
+  imaging is visually similar via the existing BiomedCLIP series vectors, reusing
+  the tested `/similar-to` ANN. Visibility-scoped (never cross-patient), excludes
+  the anchor's own study and soft-deleted/retracted findings; PHI-free,
+  retrieval-not-diagnosis. `bvphoenix-backfill embed-findings` gives pre-existing
+  findings their coarse text vector after a new text model is activated.
+* **Study-level dense-text coverage** (task 0ece383b) — the `text_dense` arm
+  projected only `report_content` / `finding` vectors, which real exams (DICOM SR,
+  few app findings) rarely have, so in prod it contributed ~0. Every study now
+  carries a coarse `study` vector composed from its structural metadata
+  (description + modalities + series body parts): migration `0041` admits
+  `target_kind='study'` on both text stores, `study_text_search` reads it directly
+  (visibility-intersected), on-write hooks (ingest finalize / patient assignment /
+  study rename + metadata edit) keep it fresh, and `bvphoenix-backfill embed-studies`
+  (`--all`, incl. public OpenData that had no dense text) is the catch-up.
+* Backend + workers images. Requires the `0041` migration and, to populate the new
+  vectors, the `embed-studies` / `embed-findings` backfill Jobs (Arq worker with
+  the `ai` extra computes them).
+
 ## 4.4.102 (2026-07-01)
 
 ### Search: multilingual dense-text arm in hybrid search
