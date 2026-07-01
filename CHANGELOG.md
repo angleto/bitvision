@@ -5,6 +5,24 @@ project follows semantic versioning; pre-release suffixes (`alpha`,
 `beta`) gate Kubernetes deployments via the GHCR image tag (without
 the leading `v`, see deployment guide).
 
+## 4.4.104 (2026-07-01)
+
+### Workers: shared bounded DB engine for the embed tasks (connection-leak fix)
+
+* The BGE-M3 / MiniLM / BiomedCLIP-text embed tasks created a fresh async engine
+  (and pool) *per job* and disposed it *outside* the `async with`, so an error
+  (a `TooManyConnectionsError` under load) skipped dispose and leaked the engine
+  + its connection — and every arq retry leaked again. The 4.4.103 study-vector
+  backfill (`embed-studies --all`, 12k jobs) drove HPA to 4 workers whose per-job
+  pools exhausted Postgres `max_connections`, so the jobs then failed 100% and
+  thrashed (the app stayed healthy on its established pool throughout).
+* Fix: one bounded engine per worker created in arq `startup`
+  (`pool_size=5, max_overflow=0, pool_pre_ping, pool_recycle`) and disposed in
+  `shutdown`; the embed tasks use `ctx["db_engine"]`. Caps each worker to
+  `pool_size` connections regardless of `max_jobs`, and removes the leak-on-error
+  (no per-job dispose to skip). Workers image only. One-shot low-volume tasks keep
+  their per-job engine (they don't flood).
+
 ## 4.4.103 (2026-07-01)
 
 ### Search: find_similar_findings + study-level dense-text coverage
