@@ -7,6 +7,7 @@ from urllib.parse import parse_qs, urlparse
 
 from arq.connections import RedisSettings
 from arq.cron import cron
+from sqlalchemy.ext.asyncio import create_async_engine
 
 from bvworkers.config import get_settings
 from bvworkers.tasks import registry
@@ -39,10 +40,26 @@ def _redis_settings(dsn: str) -> RedisSettings:
 async def startup(ctx: dict) -> None:  # type: ignore[type-arg]
     """Per-worker startup — database pool, S3 client, model loading go here."""
     ctx["settings"] = _settings
+    # ONE bounded DB engine per worker process, shared by the high-volume
+    # embed tasks (embed_bge_m3 / embed_text_ml / embed_text). The older
+    # pattern created a fresh engine (and pool) PER JOB and disposed it only
+    # on the happy path, so a backfill flood leaked a connection on every
+    # error and exhausted Postgres. A single bounded pool caps this worker
+    # to ``pool_size`` connections regardless of ``max_jobs``.
+    ctx["db_engine"] = create_async_engine(
+        _settings.database_url,
+        pool_pre_ping=True,
+        pool_size=5,
+        max_overflow=0,
+        pool_recycle=1800,
+    )
 
 
 async def shutdown(ctx: dict) -> None:  # type: ignore[type-arg]
     """Per-worker teardown."""
+    engine = ctx.get("db_engine")
+    if engine is not None:
+        await engine.dispose()
     return None
 
 
