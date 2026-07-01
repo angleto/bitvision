@@ -5,6 +5,19 @@ project follows semantic versioning; pre-release suffixes (`alpha`,
 `beta`) gate Kubernetes deployments via the GHCR image tag (without
 the leading `v`, see deployment guide).
 
+## 4.4.105 (2026-07-01)
+
+### Fix: bge-m3 sparse + colbert CHECK for coarse target kinds (completes 0ece383b)
+
+* `embed_bge_m3_all` writes DENSE + SPARSE + ColBERT in one transaction, but
+  migrations 0026 / 0041 widened only the **dense** store's `target_kind` CHECK.
+  So a bge-m3 embed of `report_content` / `finding` / `study` failed the sparse
+  CHECK and rolled the whole transaction back (0 vectors). Latent since 0026
+  (those kinds are sparse in the corpus); the study-vector backfill is the first
+  high-volume bge-m3 write to expose it.
+* Migration **0042** widens the sparse + colbert stores' `target_kind` CHECK to
+  the same full set as the dense store. Backend image (migration) only.
+
 ## 4.4.104 (2026-07-01)
 
 ### Workers: shared bounded DB engine for the embed tasks (connection-leak fix)
