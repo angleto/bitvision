@@ -566,11 +566,37 @@ async def delete_segmentation(
 
     settings = get_settings()
     storage = get_s3_storage()
-    await asyncio.to_thread(
-        storage.delete_object,
-        bucket=settings.s3_bucket_derivatives,
-        key=_seg_key(series_id, label),
+
+    # Delete the ORM row(s) too, not just the S3 object: a mask-only delete
+    # left the ``Segmentation`` row orphaned, pointing at a now-missing blob, so
+    # the viewer kept listing a segmentation whose bytes 404. Delete each row's
+    # actual ``s3_key`` (the interactive path stores masks under the standard
+    # ``_seg_key`` prefix, but honour the stored key so an uploaded mask at a
+    # different key is also cleaned) then drop the rows. Idempotent: no rows +
+    # best-effort object delete still returns 204.
+    rows = list(
+        (
+            await db.execute(
+                select(Segmentation).where(
+                    Segmentation.series_id == series_id,
+                    Segmentation.label == label,
+                )
+            )
+        )
+        .scalars()
+        .all()
     )
+    keys = {r.s3_key for r in rows} or {_seg_key(series_id, label)}
+    for key in keys:
+        await asyncio.to_thread(
+            storage.delete_object,
+            bucket=settings.s3_bucket_derivatives,
+            key=key,
+        )
+    for row in rows:
+        await db.delete(row)
+    if rows:
+        await db.commit()
     return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 

@@ -5,6 +5,18 @@ project follows semantic versioning; pre-release suffixes (`alpha`,
 `beta`) gate Kubernetes deployments via the GHCR image tag (without
 the leading `v`, see deployment guide).
 
+## 4.4.111 (2026-07-02)
+
+### Fix: DELETE segmentation now removes the ORM row, not just the mask
+
+* `DELETE /series/{id}/segmentations/{label}` deleted the S3 object but left the
+  `Segmentation` ORM row behind, so the viewer kept listing a segmentation whose
+  bytes then 404. Every segmentation delete leaked an orphan row.
+* The endpoint now deletes the matching rows for `(series_id, label)` and each
+  row's actual stored `s3_key` (so an uploaded mask at a non-default key is
+  cleaned too), then commits. Still idempotent (missing label → 204). Covered by
+  `test_segmentation_delete`.
+
 ## 4.4.110 (2026-07-02)
 
 ### Viewer: stop persisting empty phantom measurements (completes cde63ced)
