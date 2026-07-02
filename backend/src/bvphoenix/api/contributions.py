@@ -411,7 +411,9 @@ async def render_instance(
     )
 
 
-@router.get("/{submission_id}/instances/{instance_id}/detected-boxes", response_model=DetectedBoxesOut)
+@router.get(
+    "/{submission_id}/instances/{instance_id}/detected-boxes", response_model=DetectedBoxesOut
+)
 async def detected_boxes(
     submission_id: uuid.UUID,
     instance_id: str,
