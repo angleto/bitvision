@@ -5,6 +5,22 @@ project follows semantic versioning; pre-release suffixes (`alpha`,
 `beta`) gate Kubernetes deployments via the GHCR image tag (without
 the leading `v`, see deployment guide).
 
+## 4.4.108 (2026-07-02)
+
+### Viewer: MedSAM-2 click-to-segment tool UI (3af7a33d)
+
+* New `segment` tool in the series viewer (hotkey `s`): a Primary click on an
+  MPR pane resolves the pane axis + clicked voxel IJK and calls the existing
+  `interactivePredict` backend; the returned mask is persisted under the given
+  label and rendered through the existing `setSegmentationMask` overlay path.
+* The coordinate core is a pure, unit-tested helper
+  (`lib/interactiveSegment.ts`): axial/coronal/sagittal → `{axis, slice_idx,
+  point}` derived from the worker slice shapes, with out-of-bounds click
+  rejection and friendly 502/504 errors ("MedSAM worker unavailable" /
+  timeout). Frontend image only.
+* NOTE: the prod workers image does not ship `sam2` yet, so the tool surfaces
+  the "worker unavailable" error until the seg worker lands (tracked next).
+
 ## 4.4.107 (2026-07-01)
 
 ### Fix: actually ship migration 0042 (bge-m3 sparse+colbert CHECK)
