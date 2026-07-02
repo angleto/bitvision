@@ -61,6 +61,7 @@ import { makeSampler, sampleDisk, worldToIjk } from "@/lib/cornerstoneTools/volu
 import { buildLocalVolume } from "@/lib/cornerstoneVolume";
 import { resolveFusionOrder } from "@/lib/fusionVolumeOrder";
 import { LAYOUT_DIMS } from "@/lib/hangingProtocols";
+import { ijkClickToPredict, ijkInBounds } from "@/lib/interactiveSegment";
 import { extractBidirectionalMm } from "@/lib/measurements";
 import {
   type EdgeLetters,
@@ -225,6 +226,18 @@ interface ExtendedProps extends MPRLayoutProps {
     isPet: boolean;
     suvFactor: number | null;
     stats: { count: number; mean: number; std: number; min: number; max: number };
+  }) => void;
+  /** Interactive click-to-segment (MedSAM-2, task 3af7a33d). When the
+   *  ``segment`` tool is active, a primary click in an MPR pane resolves the
+   *  clicked voxel + pane axis into the backend's (axis, slice_idx, point)
+   *  contract and hands it up; the parent calls ``interactivePredict`` and
+   *  displays the returned mask (same split as ``onLensPin`` — the layout owns
+   *  the geometry, the parent owns the API + state). */
+  onSegmentPredict?: (params: {
+    axis: 0 | 1 | 2;
+    sliceIdx: number;
+    point: [number, number];
+    paneAxis: Axis;
   }) => void;
 }
 
@@ -402,6 +415,7 @@ const CornerstoneMPRLayout = forwardRef<MPRLayoutHandle, ExtendedProps>(
       focusedMarkerId,
       onOverlayMarkerClick,
       onLensPin,
+      onSegmentPredict,
     },
     ref,
   ) {
@@ -2588,6 +2602,71 @@ const CornerstoneMPRLayout = forwardRef<MPRLayoutHandle, ExtendedProps>(
       suvFactorBw,
       onLensPin,
     ]);
+
+    // Interactive click-to-segment listener (MedSAM-2, task 3af7a33d).
+    // Active only while ``activeTool === "segment"``. A primary click in an
+    // MPR pane is captured (capture phase, so the crosshair / passive tool
+    // doesn't also act), converted canvas -> world -> voxel IJK with the same
+    // sampler the lens/probe use, mapped to the backend's (axis, slice_idx,
+    // point) contract by ``ijkClickToPredict``, and handed up via
+    // ``onSegmentPredict``. Clicks off the volume are ignored. The parent owns
+    // the ``interactivePredict`` round-trip + mask display (same split as the
+    // lens pin).
+    // biome-ignore lint/correctness/useExhaustiveDependencies: viewer lifecycle effect — sampling closure intentionally captures snapshot deps.
+    useEffect(() => {
+      if (activeTool !== "segment") return;
+      if (!toolGroupReady) return;
+      if (!onSegmentPredict) return;
+      const engine = engineRef.current;
+      if (!engine) return;
+      const primary = makeSampler(
+        cs.cache.getVolume(volumeId) as unknown as Parameters<typeof makeSampler>[0],
+      );
+      if (!primary) return;
+      const dims = primary.dims as [number, number, number];
+
+      const wire = (ref: React.RefObject<HTMLDivElement | null>, vpId: string, axis: Axis) => {
+        const el = ref.current;
+        if (!el) return null;
+        const vp = engine.getViewport(vpId) as
+          | (cs.Types.IVolumeViewport & {
+              canvasToWorld: (canvasPos: cs.Types.Point2) => cs.Types.Point3;
+            })
+          | undefined;
+        if (!vp) return null;
+        const onDown = (e: MouseEvent) => {
+          if (e.button !== 0) return; // primary button only
+          const rect = el.getBoundingClientRect();
+          const cx = e.clientX - rect.left;
+          const cy = e.clientY - rect.top;
+          let world: cs.Types.Point3;
+          try {
+            world = vp.canvasToWorld([cx, cy]);
+          } catch {
+            return;
+          }
+          const ijk = worldToIjk(primary, world);
+          if (!ijk || !ijkInBounds(ijk, dims)) return; // clicked off the volume
+          // Intercept before Cornerstone's crosshair acts on the same click.
+          e.preventDefault();
+          e.stopPropagation();
+          const { axis: predAxis, slice_idx, point } = ijkClickToPredict(axis, ijk);
+          onSegmentPredict({ axis: predAxis, sliceIdx: slice_idx, point, paneAxis: axis });
+        };
+        el.addEventListener("mousedown", onDown, { capture: true });
+        return () =>
+          el.removeEventListener("mousedown", onDown, { capture: true } as EventListenerOptions);
+      };
+
+      const offs = [
+        wire(axialDivRef, vpAxial, "axial"),
+        wire(sagDivRef, vpSag, "sagittal"),
+        wire(corDivRef, vpCor, "coronal"),
+      ];
+      return () => {
+        for (const off of offs) off?.();
+      };
+    }, [activeTool, toolGroupReady, volumeId, onSegmentPredict]);
 
     // Keep the rendering canvases aspect-correct when the layout
     // changes (e.g. user toggles 1x1 ↔ 1x2 ↔ 2x2). Without an

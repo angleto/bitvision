@@ -18,6 +18,7 @@ export type Tool =
   | "measure-text"
   | "measure-probe"
   | "measure-lens"
+  | "segment"
   | "bbox"
   | "text";
 
@@ -38,6 +39,7 @@ export const TOOL_BUTTONS: readonly [Tool, string][] = [
   ["measure-text", "toolText"],
   ["measure-probe", "toolProbe"],
   ["measure-lens", "toolLens"],
+  ["segment", "toolSegment"],
 ];
 
 // Glyph icons for tools that read better as a symbol than a word — the pan
@@ -65,6 +67,7 @@ export const TOOL_HINT_KEYS: Record<string, string> = {
   "measure-text": "hintText",
   "measure-probe": "hintProbe",
   "measure-lens": "hintLens",
+  segment: "hintSegment",
 };
 
 // The subset a radiologist needs for a multiphase contrast read in a tight

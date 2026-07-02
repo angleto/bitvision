@@ -52,6 +52,7 @@ import {
   parseFloatVector,
   patientsApi,
   request,
+  segmentationsApi,
   settingsApi,
   studiesApi,
 } from "@/lib/api";
@@ -355,6 +356,12 @@ export default function SeriesViewerPage() {
   // ``activeTool === null`` as "Primary mouse drives the crosshair";
   // W/L, Pan and the measure tools are opt-in via the toolbar.
   const [activeTool, setActiveTool] = useState<Tool | null>(null);
+  // Interactive click-to-segment (MedSAM-2, task 3af7a33d): busy spinner while
+  // the ~3-10s CPU inference runs, a friendly error string, and a bump counter
+  // that tells SegmentationImporter to re-list once a new mask is persisted.
+  const [segBusy, setSegBusy] = useState(false);
+  const [segError, setSegError] = useState<string | null>(null);
+  const [segReload, setSegReload] = useState(0);
   const [cineActive, setCineActive] = useState(false);
   const [cineSpeed, setCineSpeed] = useState(5);
   const [allMeasurements, setAllMeasurements] = useState<
@@ -1673,6 +1680,12 @@ export default function SeriesViewerPage() {
       handler: () => setActiveTool((cur) => (cur === "measure-lens" ? null : "measure-lens")),
       disabled: !volume,
     },
+    {
+      key: "s",
+      description: "Toggle click-to-segment (MedSAM)",
+      handler: () => setActiveTool((cur) => (cur === "segment" ? null : "segment")),
+      disabled: !volume,
+    },
   ];
 
   useHotkeys(hotkeyBindings);
@@ -2077,9 +2090,23 @@ export default function SeriesViewerPage() {
           }}
         />
       )}
+      {volume && (segBusy || segError) && (
+        <output
+          className="card"
+          style={{
+            display: "block",
+            marginBottom: "0.5rem",
+            fontSize: "0.75rem",
+            color: segError ? "var(--bv-danger, #d9534f)" : "var(--bv-fg-muted, #888)",
+          }}
+        >
+          {segBusy ? tv("segmentRunning") : segError}
+        </output>
+      )}
       {volume && (
         <SegmentationImporter
           seriesId={params.id}
+          reloadSignal={segReload}
           onMaskLoaded={(data, color) => {
             volumeViewerRef.current?.setSegmentationMask({ data, color });
           }}
@@ -2673,6 +2700,45 @@ export default function SeriesViewerPage() {
                     // ``pending`` flag stays true so the report composer
                     // can flag it.
                     console.warn("lens-pin server confirm failed", err);
+                  }
+                }}
+                onSegmentPredict={async ({ axis, sliceIdx, point }) => {
+                  // MedSAM-2 click-to-segment (task 3af7a33d). Persist under a
+                  // generated label so the backend embeds the 2D mask into a
+                  // full-volume mask; then fetch + display it via the existing
+                  // setSegmentationMask path (shown in the 3D pane, consistent
+                  // with how imported/auto segmentations render).
+                  if (segBusy) return; // one prediction at a time
+                  const label = `interactive-${Date.now()}`;
+                  setSegBusy(true);
+                  setSegError(null);
+                  try {
+                    const res = await segmentationsApi.interactivePredict(params.id, {
+                      axis,
+                      slice_idx: sliceIdx,
+                      points: [point],
+                      label,
+                    });
+                    const persisted = res.persisted_label ?? label;
+                    const bytes = await segmentationsApi.fetchMask(params.id, persisted);
+                    volumeViewerRef.current?.setSegmentationMask({
+                      data: bytes,
+                      color: [1, 0.3, 0.3],
+                    });
+                    setSegReload((n) => n + 1); // re-list in SegmentationImporter
+                    updateViewerProbe({
+                      notes: [`segment predict axis=${axis} slice=${sliceIdx} -> ${persisted}`],
+                    });
+                  } catch (e) {
+                    const msg =
+                      e instanceof ApiError && e.status === 502
+                        ? tv("segmentUnavailable")
+                        : e instanceof ApiError && e.status === 504
+                          ? tv("segmentTimeout")
+                          : tv("segmentFailed");
+                    setSegError(msg);
+                  } finally {
+                    setSegBusy(false);
                   }
                 }}
               />
