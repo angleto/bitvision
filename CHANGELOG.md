@@ -5,6 +5,31 @@ project follows semantic versioning; pre-release suffixes (`alpha`,
 `beta`) gate Kubernetes deployments via the GHCR image tag (without
 the leading `v`, see deployment guide).
 
+## 4.4.113 (2026-07-02)
+
+### Anonymizer M6c: review-UI ground-truth PHI box labeling (task 3d8038e0)
+
+The reviewer can now draw the burned-in-PHI ground-truth boxes on a staged
+contribution instance — the answer key the automatic pixel redaction's recall
+is scored against (the recall-monitoring loop of the anonymizer EPIC).
+
+* Backend: a per-instance `gt_boxes` store on `submissions` (migration 0043),
+  keyed by instance_id in the exact `GtBox {x,y,w,h,text,category}` schema of
+  `pixel_deid_eval` (so labels round-trip to `answer_key.json` + feed
+  `score_redaction`). New endpoints under `/contributions/{id}/instances/{iid}`:
+  `render.png` (native-resolution PNG of the original *or* redacted frame — the
+  labeling surface, admin-gated + no-store), `detected-boxes` (the auto-redaction
+  masks, to prefill), `PUT/GET gt-boxes` (If-Match, boxes clipped to bounds +
+  category validated), and `gt-score` (recall of the auto-redaction vs the GT).
+* Frontend: a box-drawing editor in `/contributions/review` — SVG overlay in
+  intrinsic-pixel space (no scaling math leaks into the labels), category picker
+  + colour, original/redacted toggle, save, and a per-instance recall readout.
+* MCP parity: `get_contribution_gt_boxes` / `save_contribution_gt_boxes` /
+  `score_contribution_gt` under a new `contributions:label` scope (sensitive,
+  agent-capable — labeling is curation, not the human-only publish).
+* NOTE: the curated private real-PHI fixture set + recall monitoring on it (the
+  other half of 3d8038e0) still needs the owner's private dataset bucket + IAM.
+
 ## 4.4.112 (2026-07-02)
 
 ### Viewer: don't surface CrosshairsTool annotations as phantom measurements

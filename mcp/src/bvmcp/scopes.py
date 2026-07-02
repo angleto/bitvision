@@ -127,6 +127,15 @@ SCOPE_CATALOG: tuple[ScopeDef, ...] = (
         sensitive=True,
         human_only=True,
     ),
+    ScopeDef(
+        "contributions:label",
+        "Read + write the ground-truth burned-in-PHI boxes on a staged "
+        "contribution instance (the answer key the automatic pixel redaction's "
+        "recall is scored against) and read that recall. A curation write, not "
+        "the irreversible publish — agent-capable, but SENSITIVE because a GT box "
+        "may carry the PHI text it marks.",
+        sensitive=True,
+    ),
     # --- Public dataset catalog (OpenData commons, read-only) -----------------
     ScopeDef(
         "catalog:read",
@@ -691,6 +700,9 @@ TOOL_SCOPE: dict[str, str] = {
     "list_contribution_queue": "contributions:read",
     "get_contribution": "contributions:read",
     "reject_contribution": "contributions:review",
+    "get_contribution_gt_boxes": "contributions:label",
+    "save_contribution_gt_boxes": "contributions:label",
+    "score_contribution_gt": "contributions:label",
     # --- Public dataset catalog (OpenData commons, read-only) --------
     "list_public_datasets": "catalog:read",
     "get_public_dataset": "catalog:read",

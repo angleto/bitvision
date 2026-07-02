@@ -468,7 +468,11 @@
     "colHighRisk": "High-risk pixels",
     "colReview": "Review",
     "publish": "Publish",
-    "reject": "Reject"
+    "reject": "Reject",
+    "labelBoxes": "Label PHI boxes",
+    "labelBoxesClose": "Close labeling",
+    "saveBoxes": "Save GT boxes",
+    "scoreBoxes": "Score recall"
   },
   "settingsHub": {
     "title": "Settings",
