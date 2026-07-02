@@ -1717,113 +1717,122 @@ const CornerstoneMPRLayout = forwardRef<MPRLayoutHandle, ExtendedProps>(
             label?: string;
           };
         }>;
-        const out = groups.map((a, i) => {
-          const stats = a.data?.cachedStats ? Object.values(a.data.cachedStats)[0] : undefined;
-          // BidirectionalTool (RECIST) reports both axes in patient mm.
-          const { longAxisMm, shortAxisMm } = extractBidirectionalMm(stats);
-          let value: string;
-          if (shortAxisMm !== undefined && longAxisMm !== undefined) {
-            // Bidirectional: surface "long × short mm" so the canvas label
-            // and markers panel read as a RECIST measurement.
-            value = `${longAxisMm.toFixed(1)} × ${shortAxisMm.toFixed(1)} mm`;
-          } else if (stats?.length !== undefined) {
-            value = `${stats.length.toFixed(1)} mm`;
-          } else if (
-            stats?.mean !== undefined &&
-            suvFactorBw !== undefined &&
-            suvFactorBw !== null
-          ) {
-            // SUV-enriched ROI label: pixel mean is in the volume's
-            // raw scale (Bq/mL after RescaleSlope for PT BQML); SUV
-            // = pixel × suvFactorBw. We surface both raw + SUV so
-            // the user knows what they're looking at.
-            const suvMean = stats.mean * suvFactorBw;
-            const suvMax = stats.max !== undefined ? stats.max * suvFactorBw : undefined;
-            value = `SUVmean ${suvMean.toFixed(2)}${
-              suvMax !== undefined ? ` / SUVmax ${suvMax.toFixed(2)}` : ""
-            }${stats.area !== undefined ? ` · ${stats.area.toFixed(0)} mm²` : ""}`;
-          } else if (stats?.mean !== undefined) {
-            value = `mean ${stats.mean.toFixed(1)}${
-              stats.max !== undefined ? ` / max ${stats.max.toFixed(1)}` : ""
-            }${stats.area !== undefined ? ` · ${stats.area.toFixed(0)} mm²` : ""}`;
-          } else if (stats?.area !== undefined) {
-            value = `${stats.area.toFixed(0)} mm²`;
-          } else {
-            value = a.data?.label ?? "";
-          }
-          const worldPoints = (a.data?.handles?.points ?? []).map(
-            ([x, y, z]) => [x, y, z] as [number, number, number],
-          );
-          // Convert world coords → voxel indices so the legacy
-          // persistence layer can store ``geometry.points`` as
-          // ``[i, j, k]`` triples (its existing schema). Without
-          // this the markers persist with empty 2D points and
-          // ``MarkerListPanel`` shows them in the "across slices"
-          // bucket with no jump-to.
-          const voxelPoints: Array<[number, number, number]> = [];
-          if (imageData && worldPoints.length > 0) {
-            for (const wp of worldPoints) {
-              try {
-                const idx = imageData.worldToIndex(wp) as cs.Types.Point3;
-                voxelPoints.push([Math.round(idx[0]), Math.round(idx[1]), Math.round(idx[2])]);
-              } catch {
-                /* skip */
+        const out = groups
+          // Only real MEASUREMENT annotations. ``getAllAnnotations`` also
+          // returns the CrosshairsTool / reference-line annotations (one per
+          // pane), whose toolName is not in ``csToLegacy``; without this filter
+          // they fell through the ``?? toolName.toLowerCase()`` fallback and
+          // surfaced as empty ``measurement.distance`` rows (3 phantom entries
+          // that inflated measurementCount and, before the sync guards, were
+          // POSTed on every load). A measurement tool is exactly a csToLegacy key.
+          .filter((a) => a.metadata.toolName in csToLegacy)
+          .map((a, i) => {
+            const stats = a.data?.cachedStats ? Object.values(a.data.cachedStats)[0] : undefined;
+            // BidirectionalTool (RECIST) reports both axes in patient mm.
+            const { longAxisMm, shortAxisMm } = extractBidirectionalMm(stats);
+            let value: string;
+            if (shortAxisMm !== undefined && longAxisMm !== undefined) {
+              // Bidirectional: surface "long × short mm" so the canvas label
+              // and markers panel read as a RECIST measurement.
+              value = `${longAxisMm.toFixed(1)} × ${shortAxisMm.toFixed(1)} mm`;
+            } else if (stats?.length !== undefined) {
+              value = `${stats.length.toFixed(1)} mm`;
+            } else if (
+              stats?.mean !== undefined &&
+              suvFactorBw !== undefined &&
+              suvFactorBw !== null
+            ) {
+              // SUV-enriched ROI label: pixel mean is in the volume's
+              // raw scale (Bq/mL after RescaleSlope for PT BQML); SUV
+              // = pixel × suvFactorBw. We surface both raw + SUV so
+              // the user knows what they're looking at.
+              const suvMean = stats.mean * suvFactorBw;
+              const suvMax = stats.max !== undefined ? stats.max * suvFactorBw : undefined;
+              value = `SUVmean ${suvMean.toFixed(2)}${
+                suvMax !== undefined ? ` / SUVmax ${suvMax.toFixed(2)}` : ""
+              }${stats.area !== undefined ? ` · ${stats.area.toFixed(0)} mm²` : ""}`;
+            } else if (stats?.mean !== undefined) {
+              value = `mean ${stats.mean.toFixed(1)}${
+                stats.max !== undefined ? ` / max ${stats.max.toFixed(1)}` : ""
+              }${stats.area !== undefined ? ` · ${stats.area.toFixed(0)} mm²` : ""}`;
+            } else if (stats?.area !== undefined) {
+              value = `${stats.area.toFixed(0)} mm²`;
+            } else {
+              value = a.data?.label ?? "";
+            }
+            const worldPoints = (a.data?.handles?.points ?? []).map(
+              ([x, y, z]) => [x, y, z] as [number, number, number],
+            );
+            // Convert world coords → voxel indices so the legacy
+            // persistence layer can store ``geometry.points`` as
+            // ``[i, j, k]`` triples (its existing schema). Without
+            // this the markers persist with empty 2D points and
+            // ``MarkerListPanel`` shows them in the "across slices"
+            // bucket with no jump-to.
+            const voxelPoints: Array<[number, number, number]> = [];
+            if (imageData && worldPoints.length > 0) {
+              for (const wp of worldPoints) {
+                try {
+                  const idx = imageData.worldToIndex(wp) as cs.Types.Point3;
+                  voxelPoints.push([Math.round(idx[0]), Math.round(idx[1]), Math.round(idx[2])]);
+                } catch {
+                  /* skip */
+                }
               }
             }
-          }
-          // Centroid Z = anchor slice for the legacy slice-fade
-          // renderer + the "row in slice N" grouping in the panel.
-          let sliceIndex: number | undefined;
-          if (voxelPoints.length > 0) {
-            let sumZ = 0;
-            for (const vp of voxelPoints) sumZ += vp[2];
-            sliceIndex = Math.round(sumZ / voxelPoints.length);
-          }
-          const legacyTool = csToLegacy[a.metadata.toolName] ?? a.metadata.toolName.toLowerCase();
-          // ``points`` in the legacy (canvas) shape are 2D ``{x,y}``
-          // pairs anchored to a slice. Emit a 2D projection of each
-          // voxel so jump-to + the slice-fade renderer have
-          // something to work with; the canonical 3D source of
-          // truth stays in ``worldPoints`` for round-trip.
-          const points2d = voxelPoints.map(([x, y]) => ({ x, y }));
-          // Server-side SUV stats are stashed onto cachedStats by the
-          // ``/roi-stats`` fetch effect (PERCIST 1.0 bw factor). They
-          // only exist on PT series with a usable suv_factor_bw; on
-          // CT / MR / unusable PT they stay undefined and the
-          // PERCIST helper falls back to the manual paste inputs.
-          const suv =
-            stats?.bvSuvMean !== undefined ||
-            stats?.bvSuvSd !== undefined ||
-            stats?.bvSuvMax !== undefined ||
-            stats?.bvSuvPeak !== undefined
-              ? {
-                  mean: stats.bvSuvMean,
-                  sd: stats.bvSuvSd,
-                  max: stats.bvSuvMax,
-                  peak: stats.bvSuvPeak,
-                }
-              : undefined;
-          return {
-            id: i,
-            tool: legacyTool,
-            csToolName: a.metadata.toolName,
-            value,
-            // Optional user-supplied label, surfaced separately from
-            // ``value`` (the auto-computed measurement string). The
-            // viewer page persists this as the marker's ``body`` and
-            // the layout's ``getTextLines`` overrides render it on
-            // the canvas alongside the value.
-            label: a.data?.label ?? undefined,
-            points: points2d,
-            worldPoints,
-            frameOfReferenceUID: a.metadata.FrameOfReferenceUID,
-            sliceIndex,
-            markerId: a.annotationUID,
-            suv,
-            longAxisMm,
-            shortAxisMm,
-          };
-        });
+            // Centroid Z = anchor slice for the legacy slice-fade
+            // renderer + the "row in slice N" grouping in the panel.
+            let sliceIndex: number | undefined;
+            if (voxelPoints.length > 0) {
+              let sumZ = 0;
+              for (const vp of voxelPoints) sumZ += vp[2];
+              sliceIndex = Math.round(sumZ / voxelPoints.length);
+            }
+            const legacyTool = csToLegacy[a.metadata.toolName] ?? a.metadata.toolName.toLowerCase();
+            // ``points`` in the legacy (canvas) shape are 2D ``{x,y}``
+            // pairs anchored to a slice. Emit a 2D projection of each
+            // voxel so jump-to + the slice-fade renderer have
+            // something to work with; the canonical 3D source of
+            // truth stays in ``worldPoints`` for round-trip.
+            const points2d = voxelPoints.map(([x, y]) => ({ x, y }));
+            // Server-side SUV stats are stashed onto cachedStats by the
+            // ``/roi-stats`` fetch effect (PERCIST 1.0 bw factor). They
+            // only exist on PT series with a usable suv_factor_bw; on
+            // CT / MR / unusable PT they stay undefined and the
+            // PERCIST helper falls back to the manual paste inputs.
+            const suv =
+              stats?.bvSuvMean !== undefined ||
+              stats?.bvSuvSd !== undefined ||
+              stats?.bvSuvMax !== undefined ||
+              stats?.bvSuvPeak !== undefined
+                ? {
+                    mean: stats.bvSuvMean,
+                    sd: stats.bvSuvSd,
+                    max: stats.bvSuvMax,
+                    peak: stats.bvSuvPeak,
+                  }
+                : undefined;
+            return {
+              id: i,
+              tool: legacyTool,
+              csToolName: a.metadata.toolName,
+              value,
+              // Optional user-supplied label, surfaced separately from
+              // ``value`` (the auto-computed measurement string). The
+              // viewer page persists this as the marker's ``body`` and
+              // the layout's ``getTextLines`` overrides render it on
+              // the canvas alongside the value.
+              label: a.data?.label ?? undefined,
+              points: points2d,
+              worldPoints,
+              frameOfReferenceUID: a.metadata.FrameOfReferenceUID,
+              sliceIndex,
+              markerId: a.annotationUID,
+              suv,
+              longAxisMm,
+              shortAxisMm,
+            };
+          });
         onMeasurementsChange?.(out);
       };
       const evt = cs.eventTarget;
