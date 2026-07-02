@@ -21,6 +21,10 @@ interface Props {
   seriesId: string;
   onMaskLoaded: (mask: Uint8Array, color: [number, number, number], label: string) => void;
   onMaskCleared: () => void;
+  /** Bump to force a re-list — e.g. after the interactive segment tool
+   *  (task 3af7a33d) persists a new mask, so it appears here without a
+   *  manual refresh. */
+  reloadSignal?: number;
 }
 
 // Keep `label` in the callback signature so callers that want to name
@@ -41,7 +45,12 @@ function colorForIndex(i: number): [number, number, number] {
   return DEFAULT_COLORS[i % DEFAULT_COLORS.length];
 }
 
-export default function SegmentationImporter({ seriesId, onMaskLoaded, onMaskCleared }: Props) {
+export default function SegmentationImporter({
+  seriesId,
+  onMaskLoaded,
+  onMaskCleared,
+  reloadSignal,
+}: Props) {
   const modal = useModal();
   const tSeg = useTranslations("segmentationImporter");
   const [items, setItems] = useState<SegmentationItem[]>([]);
@@ -66,6 +75,13 @@ export default function SegmentationImporter({ seriesId, onMaskLoaded, onMaskCle
   useEffect(() => {
     refresh();
   }, [refresh]);
+
+  // Re-list when the parent bumps reloadSignal (a new mask was persisted,
+  // e.g. by the interactive segment tool).
+  useEffect(() => {
+    if (reloadSignal === undefined) return;
+    refresh();
+  }, [reloadSignal, refresh]);
 
   const handleFile = useCallback(
     (f: File | null) => {
