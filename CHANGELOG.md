@@ -5,6 +5,18 @@ project follows semantic versioning; pre-release suffixes (`alpha`,
 `beta`) gate Kubernetes deployments via the GHCR image tag (without
 the leading `v`, see deployment guide).
 
+## 4.4.112 (2026-07-02)
+
+### Viewer: don't surface CrosshairsTool annotations as phantom measurements
+
+* `onMeasurementsChange` mapped every annotation from `getAllAnnotations()`,
+  including the CrosshairsTool / reference-line annotations (one per pane). Their
+  toolName isn't in `csToLegacy`, so they fell through the `toolName.toLowerCase()`
+  fallback and surfaced as empty `measurement.distance` rows — 3 phantom entries
+  that inflated `measurementCount` (and, before the 4.4.110 sync guards, were
+  POSTed on every load). Now only annotations from real measurement tools (the
+  `csToLegacy` keys) are emitted. Closes the cde63ced follow-up.
+
 ## 4.4.111 (2026-07-02)
 
 ### Fix: DELETE segmentation now removes the ORM row, not just the mask
