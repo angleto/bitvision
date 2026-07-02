@@ -70,18 +70,15 @@ ai = [
 # ``torch``, so we don't co-pin it with the ``ai`` extra (versions can
 # drift). Enable with ``uv sync --extra seg`` on the worker host.
 #
-# Interactive segmentation (MedSAM / SAM-2) is deliberately NOT
-# included here: there's no stable PyPI release under a single name
-# (different forks publish as ``sam2``, ``segment-anything-2``,
-# ``medsam``, ...). Install the one you actually want manually:
-#
-#   uv pip install --no-deps git+https://github.com/facebookresearch/sam2.git
-#   # or, when MedSAM-2 is published on PyPI:
-#   uv pip install medsam
-#
-# The interactive worker task imports ``sam2`` lazily and surfaces a
-# clear "not installed" error when missing, so the rest of the
-# platform keeps working without it.
+# Interactive segmentation (SAM-2, click-to-segment) is NOT a uv extra:
+# there is no PyPI release, so it is installed from a pinned upstream
+# commit in workers.Dockerfile (``--no-deps``, CPU-only, SAM2_BUILD_CUDA=0)
+# alongside the baked Apache-2.0 SAM-2.1 hiera-tiny checkpoint. The default
+# engine is that Apache checkpoint; MedSAM-2 (cc-by-sa-4.0, research/education
+# ONLY — not a commercial grant) is an operator opt-in via BVP_MEDSAM_CKPT /
+# BVP_MEDSAM_CFG pointing at a mounted checkpoint + 512px config. The worker
+# task imports ``sam2`` lazily and surfaces a clear "not installed" error when
+# absent, so the rest of the platform keeps working without it.
 seg = [
     "totalsegmentator>=2.4.0",
 ]

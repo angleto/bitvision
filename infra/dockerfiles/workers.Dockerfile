@@ -59,6 +59,46 @@ RUN --mount=type=cache,target=/root/.cache/uv \
 RUN --mount=type=cache,target=/root/.cache/uv \
     /app/.venv/bin/python -c "import FlagEmbedding, open_clip, sentence_transformers"
 
+# Interactive click-to-segment engine: SAM-2 (Segment Anything 2), CPU-only.
+#   * There is no PyPI release, so pin an exact upstream commit.
+#   * ``SAM2_BUILD_CUDA=0`` skips the optional CUDA extension (the nodes are
+#     CPU-only); ``SAM2_BUILD_ALLOW_ERRORS=1`` keeps a missing ext non-fatal.
+#   * ``--no-deps`` (mirrors FlagEmbedding above): sam2 pins torch>=2.5.1 /
+#     torchvision, and letting the resolver see that would REINSTALL torch and
+#     bloat/skew the ARM image. torch/torchvision/numpy/tqdm/pillow already come
+#     from the ``ai`` extra; only hydra-core + iopath are genuinely new, added
+#     explicitly. ``--no-build-isolation`` reuses the venv's torch/setuptools
+#     for the (extension-free) build instead of fetching a second torch.
+ENV SAM2_BUILD_CUDA=0 SAM2_BUILD_ALLOW_ERRORS=1
+# Installed from the GitHub archive TARBALL, not ``git+…``: the slim builder
+# has no ``git`` binary (which uv would need for a git URL), and a commit-SHA
+# tarball pins the exact revision just as tightly. No ``name @`` prefix either
+# — the sdist's metadata name is ``sam-2`` (hyphen) and uv rejects a
+# ``sam2 @ …`` spec as a name mismatch; letting uv read the name from the
+# built metadata avoids that.
+RUN --mount=type=cache,target=/root/.cache/uv \
+    uv pip install --python /app/.venv/bin/python setuptools wheel && \
+    uv pip install --python /app/.venv/bin/python --no-deps --no-build-isolation \
+      "https://github.com/facebookresearch/sam2/archive/2b90b9f5ceec907a1c18123530e92e794ad901a4.tar.gz" && \
+    uv pip install --python /app/.venv/bin/python hydra-core iopath
+
+# Bake the Apache-2.0 SAM-2.1 hiera-tiny checkpoint (~149 MB) from Meta's
+# stable CDN (NOT HuggingFace — this path has no 429 flake). Unlike the big
+# embedding models (which live in the model-sync bucket keyed on the HF hub
+# layout), this single small checkpoint is baked so the feature is fully
+# self-contained and works OFFLINE at runtime — no bucket seeding, no per-node
+# cache re-sync. The default engine is deliberately the Apache checkpoint;
+# MedSAM-2 (research/education-only license) is an operator opt-in via
+# BVP_MEDSAM_CKPT/BVP_MEDSAM_CFG. The config yaml ships inside the sam2 package.
+RUN mkdir -p /app/models/sam2 && \
+    /app/.venv/bin/python -c "import urllib.request; urllib.request.urlretrieve('https://dl.fbaipublicfiles.com/segment_anything_2/092824/sam2.1_hiera_tiny.pt', '/app/models/sam2/sam2.1_hiera_tiny.pt')" && \
+    /app/.venv/bin/python -c "import os; assert os.path.getsize('/app/models/sam2/sam2.1_hiera_tiny.pt') > 100_000_000, 'sam2 checkpoint truncated'"
+
+# Import + config-resolution smoke test: a broken sam2 install (or a moved
+# config path in a future pin bump) must be a BUILD failure, not a prod 502 on
+# the first click. Import only — no weights loaded, no inference run here.
+RUN /app/.venv/bin/python -c "import sam2, hydra, iopath; from sam2.build_sam import build_sam2; from sam2.sam2_image_predictor import SAM2ImagePredictor"
+
 # ---
 
 FROM python:3.12-slim
