@@ -468,7 +468,11 @@
     "colHighRisk": "Pixel ad alto rischio",
     "colReview": "Revisione",
     "publish": "Pubblica",
-    "reject": "Rifiuta"
+    "reject": "Rifiuta",
+    "labelBoxes": "Etichetta box PHI",
+    "labelBoxesClose": "Chiudi etichettatura",
+    "saveBoxes": "Salva box GT",
+    "scoreBoxes": "Calcola recall"
   },
   "settingsHub": {
     "title": "Impostazioni",

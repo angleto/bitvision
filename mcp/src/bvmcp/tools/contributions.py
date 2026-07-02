@@ -19,7 +19,7 @@ import json
 
 from mcp.types import Tool
 
-from bvmcp.tools.client import api_get, api_post_with_headers
+from bvmcp.tools.client import api_get, api_post_with_headers, api_put
 
 TOOLS = [
     Tool(
@@ -81,6 +81,73 @@ TOOLS = [
             "required": ["submission_id", "etag", "reason"],
         },
     ),
+    Tool(
+        name="get_contribution_gt_boxes",
+        description=(
+            "Read the reviewer's ground-truth burned-in-PHI boxes for one staged "
+            "instance (the answer key the automatic pixel redaction is scored "
+            "against). Boxes are {x, y, w, h, text, category} in intrinsic pixels."
+        ),
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "submission_id": {"type": "string", "description": "Submission UUID"},
+                "instance_id": {"type": "string", "description": "SOPInstanceUID of the instance"},
+            },
+            "required": ["submission_id", "instance_id"],
+        },
+    ),
+    Tool(
+        name="save_contribution_gt_boxes",
+        description=(
+            "Set the ground-truth PHI boxes for one staged instance (replaces the "
+            "existing set). Requires the submission etag (If-Match); the write "
+            "bumps it. Boxes are clipped to the image bounds; category is one of "
+            "name|codice_fiscale|date|address|phone|email|mrn|other|unknown. This "
+            "is curation, NOT publishing — accepting a contribution stays "
+            "human-only in the GUI."
+        ),
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "submission_id": {"type": "string", "description": "Submission UUID"},
+                "instance_id": {"type": "string", "description": "SOPInstanceUID of the instance"},
+                "etag": {"type": "string", "description": "Current submission etag (If-Match)"},
+                "boxes": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "x": {"type": "integer", "minimum": 0},
+                            "y": {"type": "integer", "minimum": 0},
+                            "w": {"type": "integer", "minimum": 1},
+                            "h": {"type": "integer", "minimum": 1},
+                            "text": {"type": "string"},
+                            "category": {"type": "string"},
+                        },
+                        "required": ["x", "y", "w", "h"],
+                    },
+                },
+            },
+            "required": ["submission_id", "instance_id", "etag", "boxes"],
+        },
+    ),
+    Tool(
+        name="score_contribution_gt",
+        description=(
+            "Recall of the automatic pixel redaction against the reviewer's GT "
+            "boxes for one instance: the fraction of GT PHI boxes the auto-masks "
+            "cover by >= 80%. A miss means residual PHI the pipeline would ship."
+        ),
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "submission_id": {"type": "string", "description": "Submission UUID"},
+                "instance_id": {"type": "string", "description": "SOPInstanceUID of the instance"},
+            },
+            "required": ["submission_id", "instance_id"],
+        },
+    ),
 ]
 
 
@@ -102,6 +169,23 @@ async def handle(name: str, arguments: dict) -> str:
             if_match=arguments["etag"],
         )
         return json.dumps(body, indent=2)
+
+    if name == "get_contribution_gt_boxes":
+        sid, iid = arguments["submission_id"], arguments["instance_id"]
+        return json.dumps(await api_get(f"/contributions/{sid}/instances/{iid}/gt-boxes"), indent=2)
+
+    if name == "save_contribution_gt_boxes":
+        sid, iid = arguments["submission_id"], arguments["instance_id"]
+        body, _ = await api_put(
+            f"/contributions/{sid}/instances/{iid}/gt-boxes",
+            json={"boxes": arguments["boxes"]},
+            if_match=arguments["etag"],
+        )
+        return json.dumps(body, indent=2)
+
+    if name == "score_contribution_gt":
+        sid, iid = arguments["submission_id"], arguments["instance_id"]
+        return json.dumps(await api_get(f"/contributions/{sid}/instances/{iid}/gt-score"), indent=2)
 
     raise ValueError(f"unknown tool: {name}")
 

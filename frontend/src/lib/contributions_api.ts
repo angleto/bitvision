@@ -3,13 +3,63 @@
 // (the engine bumps the submission etag on every transition); accept is
 // admin-only + human-only server-side.
 
-import { request } from "@/lib/api";
+import { API_BASE_URL, request } from "@/lib/api";
 
 export interface ContributionInstance {
   instance_id: string | null;
   name: string | null;
   pixel_phi_risk: string | null;
 }
+
+// Ground-truth PHI box (M6c). Matches the backend GtBox schema exactly:
+// intrinsic pixel XYWH, top-left origin. `category` is a PhiCategory string.
+export interface GtBox {
+  x: number;
+  y: number;
+  w: number;
+  h: number;
+  text: string;
+  category: string;
+}
+
+export interface GtBoxesResult {
+  instance_id: string;
+  boxes: GtBox[];
+  etag: string;
+}
+
+export interface DetectedBoxesResult {
+  instance_id: string;
+  width: number;
+  height: number;
+  risk_level: string;
+  residual_suspect: boolean;
+  boxes: Array<{ x: number; y: number; w: number; h: number; text: string; conf: number }>;
+}
+
+export interface GtScoreResult {
+  instance_id: string;
+  recall: number;
+  covered: number;
+  total: number;
+  missed: string[];
+  risk_level: string;
+}
+
+// The PHI categories the backend accepts (services.pixel_deid_eval). Kept in
+// sync with api/contributions.PHI_CATEGORIES.
+export const PHI_CATEGORIES = [
+  "name",
+  "codice_fiscale",
+  "date",
+  "address",
+  "phone",
+  "email",
+  "mrn",
+  "other",
+  "unknown",
+] as const;
+export type PhiCategory = (typeof PHI_CATEGORIES)[number];
 
 export interface ContributionSubmission {
   id: string;
@@ -54,4 +104,30 @@ export const contributionsApi = {
       json: { reason },
       headers: { "If-Match": etag },
     }),
+
+  // --- M6c box-labeling: render + detected boxes + GT store + recall score ---
+  // The rendered instance is served as a PNG; it exposes burned-in PHI to the
+  // authorised reviewer (no-store, admin-gated). `variant=original` is the
+  // labeling surface; `variant=redacted` shows the automatic redaction.
+  renderUrl: (submissionId: string, instanceId: string, variant: "original" | "redacted") =>
+    `${API_BASE_URL}/api/contributions/${submissionId}/instances/${encodeURIComponent(
+      instanceId,
+    )}/render.png?variant=${variant}`,
+  detectedBoxes: (submissionId: string, instanceId: string) =>
+    request<DetectedBoxesResult>(
+      `/api/contributions/${submissionId}/instances/${encodeURIComponent(instanceId)}/detected-boxes`,
+    ),
+  getGtBoxes: (submissionId: string, instanceId: string) =>
+    request<GtBoxesResult>(
+      `/api/contributions/${submissionId}/instances/${encodeURIComponent(instanceId)}/gt-boxes`,
+    ),
+  saveGtBoxes: (submissionId: string, instanceId: string, boxes: GtBox[], etag: string) =>
+    request<GtBoxesResult>(
+      `/api/contributions/${submissionId}/instances/${encodeURIComponent(instanceId)}/gt-boxes`,
+      { method: "PUT", json: { boxes }, headers: { "If-Match": etag } },
+    ),
+  gtScore: (submissionId: string, instanceId: string) =>
+    request<GtScoreResult>(
+      `/api/contributions/${submissionId}/instances/${encodeURIComponent(instanceId)}/gt-score`,
+    ),
 };

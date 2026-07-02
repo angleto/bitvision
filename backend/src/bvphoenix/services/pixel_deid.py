@@ -282,6 +282,38 @@ def _frame_to_ocr_image(frame: np.ndarray, photometric: str) -> Image.Image:
     return Image.fromarray(np.clip(a, 0, 255).astype(np.uint8), mode="L")
 
 
+def render_instance_png(src: bytes, *, frame: int = 0) -> tuple[bytes, int, int]:
+    """Render one frame of a DICOM instance to a PNG at NATIVE pixel resolution.
+
+    Returns ``(png_bytes, width, height)``. The image is windowed exactly like
+    the OCR path (:func:`_frame_to_ocr_image`, MONOCHROME1-aware) so a box drawn
+    on this render is in the same intrinsic-pixel coordinate space
+    (``Rows``×``Columns``, top-left origin) as the redaction boxes — the M6c
+    box-labeling GT and the detected boxes are directly comparable, no scaling.
+    Colour (RGB) frames are kept in colour so a reviewer can read tinted banners.
+
+    This decodes the ORIGINAL pixels (burned-in PHI visible) — it is the
+    reviewer's labeling surface and MUST be served only to an authorised
+    reviewer, audited, no-store. Header PHI never reaches the PNG (a raster has
+    no DICOM header).
+    """
+    ds = pydicom.dcmread(io.BytesIO(src))
+    arr = np.asarray(ds.pixel_array)
+    frames = _frames_view(arr, ds)
+    if not frames:
+        raise ValueError("no pixel frames")
+    idx = max(0, min(frame, len(frames) - 1))
+    f = frames[idx]
+    if f.ndim == 3 and f.shape[-1] >= 3:
+        img = Image.fromarray(np.ascontiguousarray(f[..., :3]).astype(np.uint8), mode="RGB")
+    else:
+        photometric = str(getattr(ds, "PhotometricInterpretation", "") or "").upper()
+        img = _frame_to_ocr_image(f, photometric)
+    out = io.BytesIO()
+    img.save(out, format="PNG")
+    return out.getvalue(), int(img.width), int(img.height)
+
+
 def detect_text_boxes(
     img: Image.Image, *, languages: str = "eng", min_conf: float = 30.0
 ) -> list[TextBox]:
@@ -579,4 +611,5 @@ __all__ = [
     "mark_visual_features_removed",
     "redact_frames",
     "reencode_pixel_data",
+    "render_instance_png",
 ]

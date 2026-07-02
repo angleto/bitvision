@@ -69,6 +69,13 @@ class Submission(Base, ReviewableItemMixin, TimestampMixin, UpdatedAtMixin):
     manifest: Mapped[dict | None] = mapped_column(JSONB)
     staged_prefix: Mapped[str | None] = mapped_column(String(1024))
     promoted_refs: Mapped[dict | None] = mapped_column(JSONB)
+    # Reviewer-authored ground-truth burned-in-PHI boxes, keyed by instance_id:
+    # {instance_id: [{x, y, w, h, text, category}]} — the GtBox schema of
+    # services.pixel_deid_eval (intrinsic pixel XYWH, top-left origin). The answer
+    # key the automatic pixel redaction's recall is scored against (M6c). Distinct
+    # from the ingress ``manifest`` (which the check pipeline authors); this is the
+    # human labeling surface.
+    gt_boxes: Mapped[dict | None] = mapped_column(JSONB)
 
     __table_args__ = (
         CheckConstraint(

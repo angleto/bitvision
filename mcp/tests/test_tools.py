@@ -618,6 +618,7 @@ EXPECTED_TOOL_NAMES = {
     # --- Findings — structured, coded clinical reperti (P3) ---
     "get_finding_vocab",
     "search_findings",
+    "find_similar_findings",
     "get_finding",
     "get_finding_revisions",
     "create_finding",
@@ -868,6 +869,9 @@ EXPECTED_TOOL_NAMES = {
     "list_contribution_queue",
     "get_contribution",
     "reject_contribution",
+    "get_contribution_gt_boxes",
+    "save_contribution_gt_boxes",
+    "score_contribution_gt",
     # --- Public dataset catalog (OpenData commons; catalog:read scope).
     # Backend api/catalog.py. Read-only, aggregate/citation data, no PHI.
     "list_public_datasets",

@@ -10,6 +10,7 @@ import { useCallback, useEffect, useState } from "react";
 
 import { ApiError } from "@/lib/api";
 import { type ContributionSubmission, contributionsApi } from "@/lib/contributions_api";
+import GtBoxEditor from "./GtBoxEditor";
 
 const STATUS_FILTERS = ["needs_review", "blocked", "promoted", "rejected", "failed"];
 
@@ -20,6 +21,11 @@ export default function ContributionsReviewPage(): React.JSX.Element {
   const [err, setErr] = useState<string | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
   const [reasons, setReasons] = useState<Record<string, string>>({});
+  // The submission being box-labeled, and the live per-submission etag (a GT-box
+  // save bumps it, so accept/reject must use the latest value not the stale row).
+  const [labeling, setLabeling] = useState<string | null>(null);
+  const [etags, setEtags] = useState<Record<string, string>>({});
+  const etagOf = useCallback((s: ContributionSubmission) => etags[s.id] ?? s.etag, [etags]);
 
   const refresh = useCallback(async () => {
     setErr(null);
@@ -44,8 +50,9 @@ export default function ContributionsReviewPage(): React.JSX.Element {
       setBusy(sub.id);
       setErr(null);
       try {
-        if (action === "accept") await contributionsApi.accept(sub.id, sub.etag, reason);
-        else await contributionsApi.reject(sub.id, sub.etag, reason);
+        const etag = etags[sub.id] ?? sub.etag;
+        if (action === "accept") await contributionsApi.accept(sub.id, etag, reason);
+        else await contributionsApi.reject(sub.id, etag, reason);
         await refresh();
       } catch (e) {
         setErr(e instanceof ApiError ? e.message : t("actionFailed"));
@@ -53,7 +60,7 @@ export default function ContributionsReviewPage(): React.JSX.Element {
         setBusy(null);
       }
     },
-    [reasons, refresh, t],
+    [reasons, refresh, t, etags],
   );
 
   const highRisk = (s: ContributionSubmission) =>
@@ -134,6 +141,13 @@ export default function ContributionsReviewPage(): React.JSX.Element {
                           >
                             {t("reject")}
                           </button>
+                          <button
+                            type="button"
+                            aria-expanded={labeling === s.id}
+                            onClick={() => setLabeling((v) => (v === s.id ? null : s.id))}
+                          >
+                            {labeling === s.id ? t("labelBoxesClose") : t("labelBoxes")}
+                          </button>
                         </div>
                       </div>
                     ) : (
@@ -146,6 +160,42 @@ export default function ContributionsReviewPage(): React.JSX.Element {
           </tbody>
         </table>
       )}
+
+      {/* Box-labeling panel (M6c): draw ground-truth PHI boxes per instance so
+          the automatic pixel redaction's recall can be scored. Below the table
+          so the wide image editor is not cramped in a cell. */}
+      {labeling &&
+        (() => {
+          const s = rows.find((r) => r.id === labeling);
+          if (!s) return null;
+          return (
+            <section style={{ marginTop: 24, borderTop: "2px solid #ddd", paddingTop: 12 }}>
+              <h2 style={{ fontSize: "1rem" }}>
+                {t("labelBoxes")} — {s.instance_count} {t("colInstances")}
+              </h2>
+              {s.instances.map((inst) =>
+                inst.instance_id ? (
+                  <details key={inst.instance_id} style={{ marginBottom: 8 }}>
+                    <summary>
+                      {inst.name ?? inst.instance_id}
+                      {inst.pixel_phi_risk === "high" && (
+                        <span style={{ color: "crimson" }}> · high risk</span>
+                      )}
+                    </summary>
+                    <GtBoxEditor
+                      submissionId={s.id}
+                      instanceId={inst.instance_id}
+                      etag={etagOf(s)}
+                      onEtag={(e) => setEtags((m) => ({ ...m, [s.id]: e }))}
+                      labelSave={t("saveBoxes")}
+                      labelScore={t("scoreBoxes")}
+                    />
+                  </details>
+                ) : null,
+              )}
+            </section>
+          );
+        })()}
     </main>
   );
 }
