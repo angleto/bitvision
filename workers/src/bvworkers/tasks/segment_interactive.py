@@ -15,8 +15,10 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import struct
 import uuid
+from collections.abc import Mapping
 from typing import Any
 
 import boto3
@@ -31,40 +33,69 @@ logger = logging.getLogger(__name__)
 HEADER_STRUCT = struct.Struct("<3I 3f 2f")
 
 
+# Default: the Apache-2.0 SAM-2.1 hiera-tiny checkpoint baked into the
+# workers image (see workers.Dockerfile) with the config that ships
+# inside the ``sam2`` package. This is the commercially-usable engine.
+#
+# MedSAM-2 (wanglab/MedSAM2) weights are more accurate on medical CT/MR
+# but are licensed cc-by-sa-4.0 AND "research and education purposes
+# only" — NOT a commercial grant. They are therefore an explicit,
+# operator-provided opt-in: mount the ``.pt`` and its 512px config and
+# point ``BVP_MEDSAM_CKPT`` / ``BVP_MEDSAM_CFG`` at them. We never ship
+# them as the default.
+_DEFAULT_SAM2_CKPT = "/app/models/sam2/sam2.1_hiera_tiny.pt"
+_DEFAULT_SAM2_CFG = "configs/sam2.1/sam2.1_hiera_t.yaml"
+
+
 # Lazily-loaded model handle. ``None`` until the first prediction
 # call. Subsequent calls reuse the same instance.
 _MODEL: Any = None
 
 
+def resolve_sam2_spec(env: Mapping[str, str]) -> tuple[str, str]:
+    """Pure resolver (config_name, ckpt_path) for ``build_sam2``.
+
+    ``build_sam2(config_file, ckpt_path)`` wants a hydra *config name*
+    resolved against the ``sam2`` package's search path (e.g.
+    ``configs/sam2.1/sam2.1_hiera_t.yaml``) and a *filesystem path* to
+    the checkpoint — NOT a HuggingFace model id (the previous default
+    ``facebook/sam2-hiera-tiny`` conflated the two and never loaded).
+
+    Precedence: an operator-provided ``BVP_MEDSAM_CKPT`` (research
+    MedSAM-2 opt-in) wins, paired with ``BVP_MEDSAM_CFG``; otherwise the
+    baked Apache-2.0 SAM-2.1 default.
+    """
+    ckpt = env.get("BVP_MEDSAM_CKPT") or _DEFAULT_SAM2_CKPT
+    cfg = env.get("BVP_MEDSAM_CFG") or _DEFAULT_SAM2_CFG
+    return cfg, ckpt
+
+
 def _ensure_model() -> Any:
-    """Load MedSAM-2 weights on first use. Falls back to a runtime
-    error with a clear hint when the optional dependency isn't
-    installed (the platform extra is ``seg``)."""
+    """Load the SAM-2 image predictor on first use. Raises a runtime
+    error with a clear hint when the optional ``sam2`` dependency isn't
+    installed or the checkpoint is missing."""
     global _MODEL
     if _MODEL is not None:
         return _MODEL
     try:
-        # ``segment_anything_2`` ships predictor classes plus a model
-        # registry. MedSAM-2 weights are released as a checkpoint
-        # compatible with SAM-2's ``build_sam2`` factory; users either
-        # provide a path via ``BVP_MEDSAM_CKPT`` or rely on the
-        # default which falls back to vanilla SAM-2 (still usable on
-        # contrast-enhanced CT, just less precise on muscle / fat).
-        import os
-
         from sam2.build_sam import build_sam2  # type: ignore[import-not-found]
         from sam2.sam2_image_predictor import (  # type: ignore[import-not-found]
             SAM2ImagePredictor,
         )
-
-        ckpt = os.environ.get("BVP_MEDSAM_CKPT", "facebook/sam2-hiera-tiny")
-        cfg = os.environ.get("BVP_MEDSAM_CFG", "sam2_hiera_t.yaml")
-        sam2 = build_sam2(cfg, ckpt, device="cpu")
-        _MODEL = SAM2ImagePredictor(sam2)
     except ImportError as exc:  # pragma: no cover — extra not installed
         raise RuntimeError(
-            "segment-anything-2 not installed; run ``uv sync --extra seg`` on the worker host"
+            "sam2 not installed on the worker host (interactive segmentation "
+            "unavailable); build the workers image with the sam2 install step"
         ) from exc
+
+    cfg, ckpt = resolve_sam2_spec(os.environ)
+    if not os.path.exists(ckpt):  # pragma: no cover — checkpoint packaging error
+        raise RuntimeError(
+            f"SAM-2 checkpoint not found at {ckpt!r}; set BVP_MEDSAM_CKPT or "
+            "rebuild the workers image with the baked checkpoint"
+        )
+    sam2 = build_sam2(cfg, ckpt, device="cpu")
+    _MODEL = SAM2ImagePredictor(sam2)
     return _MODEL
 
 
@@ -89,7 +120,7 @@ def _fetch_volume_header_and_slice(
     """Stream a single 2D slice out of the packed volume without
     materialising the full array. We pre-fetch the 32-byte header,
     derive offsets, then issue a Range request for just the slice's
-    voxels. Saves bandwidth on large CTs (~10× faster than pulling
+    voxels. Saves bandwidth on large CTs (~10x faster than pulling
     the whole 500 MiB volume for a 256 KiB slice)."""
     head = s3.get_object(Bucket=bucket, Key=key, Range=f"bytes=0-{HEADER_STRUCT.size - 1}")[
         "Body"
