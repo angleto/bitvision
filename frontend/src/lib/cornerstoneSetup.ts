@@ -93,3 +93,25 @@ export function purgeCornerstoneCache(): void {
     /* swallow: stripped CS build without purgeCache is best-effort */
   }
 }
+
+// Cornerstone's annotation state is a PROCESS-GLOBAL singleton that
+// ``purgeCornerstoneCache`` (which only clears the image cache) does NOT
+// touch. Left alone, annotations drawn in one viewer visit survive an in-app
+// route change and re-surface in the next viewer's ``onMeasurementsChange``
+// with fresh array-index ids — the diff-sync then re-POSTs them as duplicate
+// markers (observed: 100+ accumulated dupes on a study). Clear the global
+// annotation state when LEAVING a viewer so each visit starts from the
+// server-persisted markers only. Best-effort: a stripped tools build may not
+// expose the helper.
+export function clearCornerstoneAnnotations(): void {
+  try {
+    const state = (
+      csTools.annotation as {
+        state?: { removeAllAnnotations?: () => void };
+      }
+    ).state;
+    state?.removeAllAnnotations?.();
+  } catch {
+    /* best-effort */
+  }
+}

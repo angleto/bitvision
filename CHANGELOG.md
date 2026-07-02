@@ -5,6 +5,38 @@ project follows semantic versioning; pre-release suffixes (`alpha`,
 `beta`) gate Kubernetes deployments via the GHCR image tag (without
 the leading `v`, see deployment guide).
 
+## 4.4.109 (2026-07-02)
+
+### Workers: install SAM-2 so click-to-segment actually works (3af7a33d)
+
+* The interactive-predict worker imported `sam2` but nothing installed it, and
+  `_ensure_model` passed a HuggingFace model id where `build_sam2` expects a
+  local checkpoint **path** — so the viewer's segment tool always 502'd.
+* The workers image now installs SAM-2 (pinned commit tarball, `--no-deps` so
+  the resolver never reinstalls torch, `SAM2_BUILD_CUDA=0` for the CPU nodes)
+  and bakes the **Apache-2.0** `sam2.1-hiera-tiny` checkpoint (~149 MB) from
+  Meta's stable CDN — fully offline at runtime, no model-sync bucket re-sync.
+* The default engine is the Apache checkpoint; **MedSAM-2** (cc-by-sa-4.0,
+  research/education-only license — not a commercial grant) is an operator
+  opt-in via `BVP_MEDSAM_CKPT` / `BVP_MEDSAM_CFG`. The loader core is a pure,
+  unit-tested `resolve_sam2_spec`. Validated locally: `build_sam2` + a CPU
+  predict returns a mask (score 0.98).
+
+### Viewer: stop re-POSTing loaded markers as duplicates + fix undo/redo (cde63ced)
+
+* The measurement diff-sync keyed dedup on a local `id` that is really a
+  Cornerstone **array index** (unstable), while the reconcile pre-registered
+  loaded markers under a *synthetic* id — two disjoint id-spaces. A persisted
+  marker re-emitted by the canvas therefore slipped past the guards and was
+  re-created on the server on **every page load** (a study had accumulated 100+
+  duplicate markers), and was also recorded as a phantom "create" in the
+  annotation undo history, so Ctrl+Z / the Undo button undid nothing visible.
+* Fix: exclude from the "added" set any measurement whose stable `markerId` is
+  already a known server marker (a genuine draw's annotationUID never is), and
+  clear Cornerstone's process-global annotation state on viewer unmount so
+  annotations can't leak across an in-app navigation and re-POST. Undo/redo now
+  operates only on annotations actually drawn this session.
+
 ## 4.4.108 (2026-07-02)
 
 ### Viewer: MedSAM-2 click-to-segment tool UI (3af7a33d)

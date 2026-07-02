@@ -57,7 +57,7 @@ import {
   studiesApi,
 } from "@/lib/api";
 import { useAuth } from "@/lib/auth-context";
-import { purgeCornerstoneCache } from "@/lib/cornerstoneSetup";
+import { clearCornerstoneAnnotations, purgeCornerstoneCache } from "@/lib/cornerstoneSetup";
 import { type HangingProtocol, type LayoutId, pickDefaultProtocol } from "@/lib/hangingProtocols";
 import {
   type HotkeyBinding,
@@ -258,6 +258,11 @@ export default function SeriesViewerPage() {
   useEffect(() => {
     return () => {
       purgeCornerstoneCache();
+      // Also drop the process-global annotation state so annotations from this
+      // visit don't leak into the next viewer and get re-POSTed as duplicate
+      // markers (task cde63ced follow-up: the diff-sync keys on an unstable
+      // array-index id, so a leaked annotation re-enters as "new").
+      clearCornerstoneAnnotations();
     };
   }, [params.id]);
   const { user } = useAuth();
@@ -989,8 +994,22 @@ export default function SeriesViewerPage() {
     if (!initialMarkersLoadedRef.current) return;
     const currentIds = new Set(allMeasurements.map((m) => m.id));
     const previousIds = prevMeasurementIdsRef.current;
+    // Local ``id`` is an ARRAY INDEX (see CornerstoneMPRLayout onMeasurementsChange
+    // ``id: i``), so it is NOT stable across list changes: a persisted marker that
+    // the reconcile seeded with a synthetic id can re-enter here with a fresh index
+    // and slip past the id-keyed guards. The STABLE key is ``markerId`` (the server
+    // uuid for a loaded marker, the Cornerstone annotationUID for a fresh draw).
+    // Exclude anything whose markerId is already a known server marker so a page
+    // load can't re-POST loaded markers as duplicates (this study had accumulated
+    // 100+ such dupes) nor record them as undoable "creates" in the annotation
+    // history (task cde63ced). A genuine draw's annotationUID is never a server id,
+    // so real user draws still persist + become undoable.
+    const knownServerIds = new Set(markerIdMapRef.current.values());
     const added = allMeasurements.filter(
-      (m) => !previousIds.has(m.id) && !syncedIdsRef.current.has(m.id),
+      (m) =>
+        !previousIds.has(m.id) &&
+        !syncedIdsRef.current.has(m.id) &&
+        !(m.markerId != null && knownServerIds.has(m.markerId)),
     );
     const removedIds: number[] = [];
     for (const id of previousIds) {
