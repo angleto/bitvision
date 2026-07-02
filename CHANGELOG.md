@@ -5,6 +5,22 @@ project follows semantic versioning; pre-release suffixes (`alpha`,
 `beta`) gate Kubernetes deployments via the GHCR image tag (without
 the leading `v`, see deployment guide).
 
+## 4.4.110 (2026-07-02)
+
+### Viewer: stop persisting empty phantom measurements (completes cde63ced)
+
+* Prod verification of 4.4.109 showed the marker duplication was NOT loaded
+  markers being re-created but **point-less phantom** `measurement.distance`
+  rows (`"points": []`) POSTed on every viewer load. Because they carry no
+  points the reconcile seed skips them (it requires `pts.length > 0`), so they
+  never enter `markerIdMapRef` and the markerId guard from 4.4.109 could not
+  catch them — they self-replicated (a study had accumulated 145 empty rows).
+* Fix: the diff-sync now also excludes any measurement with zero points from
+  the "added" set, so an empty annotation is never POSTed nor recorded in the
+  undo history. No real measurement has zero points (a fresh draw only reaches
+  the sync on ANNOTATION_COMPLETED with its handles set). The accumulated empty
+  rows were purged out-of-band.
+
 ## 4.4.109 (2026-07-02)
 
 ### Workers: install SAM-2 so click-to-segment actually works (3af7a33d)

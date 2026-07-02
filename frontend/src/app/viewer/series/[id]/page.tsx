@@ -1000,16 +1000,25 @@ export default function SeriesViewerPage() {
     // and slip past the id-keyed guards. The STABLE key is ``markerId`` (the server
     // uuid for a loaded marker, the Cornerstone annotationUID for a fresh draw).
     // Exclude anything whose markerId is already a known server marker so a page
-    // load can't re-POST loaded markers as duplicates (this study had accumulated
-    // 100+ such dupes) nor record them as undoable "creates" in the annotation
-    // history (task cde63ced). A genuine draw's annotationUID is never a server id,
-    // so real user draws still persist + become undoable.
+    // load can't re-POST loaded markers as duplicates nor record them as undoable
+    // "creates" in the annotation history (task cde63ced). A genuine draw's
+    // annotationUID is never a server id, so real user draws still persist.
+    //
+    // ALSO exclude point-less measurements: an annotation whose 2D projection is
+    // empty (``points: []``) is not a persistable measurement. Observed in prod,
+    // these phantom ``measurement.distance`` rows were POSTed on every load and,
+    // being empty, were skipped by the reconcile seed (which requires
+    // ``pts.length > 0``) so they never entered ``markerIdMapRef`` — the markerId
+    // guard alone could not catch them and they self-replicated (140+ empty dupes
+    // on one study). No real measurement has zero points; a fresh draw only
+    // reaches here on ANNOTATION_COMPLETED, with its handles set.
     const knownServerIds = new Set(markerIdMapRef.current.values());
     const added = allMeasurements.filter(
       (m) =>
         !previousIds.has(m.id) &&
         !syncedIdsRef.current.has(m.id) &&
-        !(m.markerId != null && knownServerIds.has(m.markerId)),
+        !(m.markerId != null && knownServerIds.has(m.markerId)) &&
+        (m.points?.length ?? 0) > 0,
     );
     const removedIds: number[] = [];
     for (const id of previousIds) {
