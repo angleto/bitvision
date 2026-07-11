@@ -32,3 +32,15 @@ boxes if present). Recall on the public corpus is **tracked, not gated** — TCI
 pixel labels are noisy and no automated pipeline reaches 100% (MIDI-B 2024-25);
 the synthetic set is the hard gate, the human-review quarantine (M1) is the
 safety floor.
+
+## 4. Header-engine corpus (same collection, HARD gate, marker-gated)
+The Pseudo-PHI collection also plants synthetic PHI in the **headers**, with a
+ground-truth answer key — the golden corpus of the PS3.15 header engine
+(`services/deid/`). Fetch with `bvphoenix-fetch-deid-header-corpus` (the
+answer-key spreadsheet is downloaded manually from the collection page and
+converted to `answer_key_header.json`); point `BVP_DEID_HEADER_CORPUS` at the
+dir and `test_deid_header_corpus.py` runs a **hard** gate (header ground truth
+is exact): no answer-key value or original UID may survive
+`deidentify_dicom_bytes`. Same CC BY 4.0 attribution as §2; optional private
+sync under `s3://bvphoenix-datasets/deid-header/public/`. This corpus must
+never enter the OpenData library.
