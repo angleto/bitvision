@@ -341,6 +341,13 @@ class Instance(TimestampMixin, Base):
     # (M4+); NULL at ingest.
     pixel_deid_method: Mapped[dict | None] = mapped_column(JSONB)
     pixel_deid_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    # Where the human-approved (redacted + CID 7050-stamped) bytes live, set at
+    # contribution promote for in-place tiers (t3). NULL with
+    # ``pixel_deid_status='approved'`` means the stored ``s3_key`` bytes are
+    # themselves the verified-clean blob (public t4 clone, clean at rest). The
+    # egress gates substitute this blob for the raw high-risk bytes.
+    pixel_clean_s3_bucket: Mapped[str | None] = mapped_column(String(128))
+    pixel_clean_s3_key: Mapped[str | None] = mapped_column(String(1024))
 
     __table_args__ = (
         UniqueConstraint(

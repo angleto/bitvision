@@ -38,6 +38,7 @@ from bvphoenix.services.etag import enforce_if_match_value
 from bvphoenix.services.pixel_deid import PixelDeidResult, clean_pixel_data, render_instance_png
 from bvphoenix.services.pixel_deid_eval import GtBox, RedactionScore, score_redaction
 from bvphoenix.services.public_contribution.profile import PROFILE_NAME, PUBLIC_CONTRIBUTION_PROFILE
+from bvphoenix.services.public_contribution.promotion import purge_submission_staged
 from bvphoenix.services.public_contribution.staging import create_submission
 from bvphoenix.services.review_queue import ReviewDecisionError, ReviewTransitionError
 from bvphoenix.services.review_queue import engine as review_engine
@@ -104,8 +105,12 @@ class SubmissionOut(BaseModel):
     instance_count: int
     # Per-instance ids + name + pixel risk for the review UI. S3 bucket/key are
     # deliberately NOT included (storage isolation) — preview goes through the
-    # backend by instance_id.
+    # backend by instance_id. ``staged`` flags a persisted redacted rendition
+    # (what the preview serves and what publishing would ship).
     instances: list[dict]
+    # Promotion outcome (public clone ids / skipped components) — synthetic and
+    # public identifiers only, set after accept.
+    promoted_refs: dict | None
     created_at: datetime | None
     reviewed_at: datetime | None
     review_note: str | None
@@ -128,10 +133,12 @@ class SubmissionOut(BaseModel):
                 {
                     "instance_id": i.get("instance_id"),
                     "name": i.get("name"),
-                    "pixel_phi_risk": i.get("pixel_phi_risk"),
+                    "pixel_phi_risk": i.get("risk_level") or i.get("pixel_phi_risk"),
+                    "staged": bool(i.get("staged_redacted_key")),
                 }
                 for i in raw_instances
             ],
+            promoted_refs=sub.promoted_refs,
             created_at=getattr(sub, "created_at", None),
             reviewed_at=sub.reviewed_at,
             review_note=sub.review_note,
@@ -235,6 +242,33 @@ async def offer_submission(
             status_code=403, detail="only the study owner can offer it for contribution"
         )
 
+    # One live-or-published submission per (study, tier). Re-offering a study
+    # that is already in review or promoted at this tier would, on the t4 clone
+    # path, dedup against the existing clone (DicomIngestor keys on the
+    # deterministic scrubbed UID): the second submission's reviewed bytes would
+    # never ship yet its provenance would be stamped — a false attestation.
+    # Re-publishing an improved redaction is a separate, future flow (reject or
+    # withdraw the existing submission first). A rejected/expired prior
+    # submission does NOT block a fresh offer.
+    existing = (
+        await db.execute(
+            select(Submission.id).where(
+                Submission.source_study_id == body.study_id,
+                Submission.target_tier == body.target_tier,
+                Submission.status.notin_(("rejected", "expired", "failed")),
+            )
+        )
+    ).first()
+    if existing is not None:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "contribution.already_offered",
+                "message": f"study already has a {body.target_tier} submission in progress "
+                "or promoted; reject/withdraw it before re-offering",
+            },
+        )
+
     sub = await create_submission(
         db,
         study_id=body.study_id,
@@ -313,6 +347,24 @@ async def preview_instance(
     if entry is None or not entry.get("s3_key"):
         raise HTTPException(status_code=404, detail="instance not found in submission")
     storage = get_s3_storage()
+
+    # Staged rendition first: the check pass persisted the exact redacted
+    # bytes that publishing would ship — the reviewer must see THOSE, not a
+    # fresh recompute that could drift from them. Falls back to on-the-fly when
+    # the staged blob is absent (pre-staging submission) or purged (terminal).
+    served = await _read_staged_or_none(entry)
+    if served is not None:
+        return Response(
+            content=served,
+            media_type="application/dicom",
+            headers={
+                "x-deidentified": "true",
+                "x-pixel-redacted": "true",
+                "x-staged": "true",
+                "cache-control": "no-store",
+            },
+        )
+
     raw = await asyncio.to_thread(
         storage.get_object_bytes, bucket=entry["s3_bucket"], key=entry["s3_key"]
     )
@@ -340,6 +392,25 @@ async def preview_instance(
 
 
 # ---- GT box labeling (M6c): render + detected boxes + GT store + score ------
+
+
+async def _read_staged_or_none(entry: dict) -> bytes | None:
+    """Read an instance's persisted staged (redacted) blob, or None when there
+    is no staged rendition OR it has already been purged (a rejected/promoted
+    submission's blobs are deleted post-decision). Callers fall back to the
+    on-the-fly recompute from the source, which always exists, so the reviewer
+    surface keeps working on a terminal submission."""
+    staged_key = entry.get("staged_redacted_key")
+    if not staged_key:
+        return None
+    storage = get_s3_storage()
+    try:
+        return await asyncio.to_thread(
+            storage.get_object_bytes, bucket=get_settings().s3_bucket_raw, key=staged_key
+        )
+    except Exception:
+        # Purged (terminal submission) or transient: fall back to on-the-fly.
+        return None
 
 
 def _instance_entry(sub: Submission, instance_id: str) -> dict:
@@ -383,17 +454,23 @@ async def render_instance(
     _require_admin(user)
     sub = await _load(db, submission_id)
     entry = _instance_entry(sub, instance_id)
-    raw = await _fetch_instance_raw(entry)
+    staged = await _read_staged_or_none(entry) if variant == "redacted" else None
+    if staged is not None:
+        # Render the persisted staged rendition — what publishing would ship.
+        def _render() -> tuple[bytes, int, int]:
+            return render_instance_png(staged, frame=frame)
+    else:
+        raw = await _fetch_instance_raw(entry)
 
-    def _render() -> tuple[bytes, int, int]:
-        blob = raw
-        if variant == "redacted":
-            try:
-                blob = deidentify_dicom_bytes(raw)
-            except Exception:
-                blob = raw
-            blob = clean_pixel_data(blob).out_bytes
-        return render_instance_png(blob, frame=frame)
+        def _render() -> tuple[bytes, int, int]:
+            blob = raw
+            if variant == "redacted":
+                try:
+                    blob = deidentify_dicom_bytes(raw)
+                except Exception:
+                    blob = raw
+                blob = clean_pixel_data(blob).out_bytes
+            return render_instance_png(blob, frame=frame)
 
     try:
         png, width, height = await asyncio.to_thread(_render)
@@ -427,6 +504,23 @@ async def detected_boxes(
     sub = await _load(db, submission_id)
     entry = _instance_entry(sub, instance_id)
     raw = await _fetch_instance_raw(entry)
+
+    # Persisted staged redactions first: these are the masks of the rendition
+    # that would actually ship. Recompute only when there is no staged audit
+    # (pre-staging submissions) or the box list was capped in the manifest.
+    if entry.get("staged_redacted_key") and not entry.get("staged_redactions_truncated"):
+        try:
+            _png, width, height = await asyncio.to_thread(render_instance_png, raw)
+        except Exception as exc:
+            raise HTTPException(status_code=422, detail=f"cannot analyse instance: {exc}") from exc
+        return DetectedBoxesOut(
+            instance_id=instance_id,
+            width=width,
+            height=height,
+            risk_level=str(entry.get("risk_level") or entry.get("pixel_phi_risk") or "high"),
+            residual_suspect=bool(entry.get("staged_residual", True)),
+            boxes=list(entry.get("staged_redactions") or []),
+        )
 
     def _detect() -> tuple[int, int, PixelDeidResult]:
         try:
@@ -551,6 +645,21 @@ async def gt_score(
         )
         for b in gt_raw
     ]
+    # Score against the persisted staged masks when available — the recall
+    # number then describes exactly what publishing would ship.
+    if entry.get("staged_redacted_key") and not entry.get("staged_redactions_truncated"):
+        masked = [(m["x"], m["y"], m["w"], m["h"]) for m in (entry.get("staged_redactions") or [])]
+        s = score_redaction(gt, masked, coverage=coverage)
+        risk_level = str(entry.get("risk_level") or entry.get("pixel_phi_risk") or "high")
+        return GtScoreOut(
+            instance_id=instance_id,
+            recall=s.recall,
+            covered=s.covered,
+            total=s.total,
+            missed=s.missed,
+            risk_level=risk_level,
+        )
+
     raw = await _fetch_instance_raw(entry)
 
     def _score() -> tuple[str, RedactionScore]:
@@ -646,6 +755,17 @@ async def reject_submission(
         await db.rollback()
         raise _map_decision_errors(exc) from exc
     await db.commit()
+
+    # Purge the staged redacted blobs AFTER the commit — never inside the
+    # decision transaction (an S3 delete can't be un-done if the commit fails,
+    # which would strand the submission with dangling staged keys). Best-effort;
+    # the contribution_maintenance sweep re-purges any staged blob a crash here
+    # leaves behind on a terminal submission.
+    try:
+        await purge_submission_staged(sub)
+    except Exception:  # pragma: no cover - the maintenance sweep is the safety net
+        logger.exception("post-reject staged purge failed for %s", sub.id)
+
     return DecisionOut(submission=SubmissionOut.from_row(sub))
 
 

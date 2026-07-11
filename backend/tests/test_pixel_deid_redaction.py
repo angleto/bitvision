@@ -37,6 +37,18 @@ _needs_ocr = pytest.mark.skipif(not _HAS_TESSERACT, reason="tesseract binary not
 _CT = "1.2.840.10008.5.1.4.1.1.2"
 
 
+def test_ocr_gate_not_silently_skipped():
+    """CI arms ``BVP_REQUIRE_OCR=1`` after installing tesseract: if the binary
+    ever goes missing there, this FAILS instead of letting the recall==1.0
+    gate above evaporate into a skip. Local runs without the flag skip."""
+    if os.environ.get("BVP_REQUIRE_OCR") != "1":
+        pytest.skip("BVP_REQUIRE_OCR unset (local run)")
+    assert _HAS_TESSERACT, (
+        "BVP_REQUIRE_OCR=1 but tesseract is not installed - "
+        "the pixel-PHI recall gate would silently skip"
+    )
+
+
 # --- M4 recall gate (OCR end-to-end) ---------------------------------------
 
 

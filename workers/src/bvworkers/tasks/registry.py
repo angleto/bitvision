@@ -42,7 +42,7 @@ from bvworkers.tasks.pack_volume import pack_volume
 from bvworkers.tasks.ping import ping
 from bvworkers.tasks.prefetch_series import prefetch_series
 from bvworkers.tasks.propagate_lesion import propagate_lesion
-from bvworkers.tasks.public_contribution import promote_submission
+from bvworkers.tasks.public_contribution import contribution_maintenance, promote_submission
 from bvworkers.tasks.purge_documents import purge_expired_documents
 from bvworkers.tasks.reconcile_embeddings import reconcile_missing_embeddings
 from bvworkers.tasks.registration import register_series
@@ -97,4 +97,5 @@ FUNCTIONS = [
     promote_inbox_item,
     inbox_maintenance,
     promote_submission,
+    contribution_maintenance,
 ]

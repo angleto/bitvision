@@ -130,31 +130,56 @@ def _stream_cohort_sync(
             if cancel.is_set():
                 raise _ExportCancelledError
             is_dicom = item["kind"] == "dicom"
-            body = _fetch_blob_bytes(storage, item["bucket"], item["key"], deidentify=is_dicom)
-            # Burned-in-pixel PHI gate: ``deidentify`` above scrubs the DICOM
-            # *header* but leaves pixels untouched, so an instance with PHI
-            # burned into the image (ultrasound banners, secondary capture,
-            # dose-report screenshots) would otherwise ship to the public /
-            # licensed cohort. ``high``-risk instances are ALWAYS EXCLUDED.
-            #
-            # ``low``-risk (recognizable-visual-feature: head/face CT/MR/PT) is
-            # excluded too WHEN de-facing is enabled — this is an automated
-            # egress with no human-review step, and a face can be surface-
-            # rendered from the volume, so it must not ship un-defaced. With
-            # de-facing off (default) face-risk ships as today (no regression).
-            # Excluded instances are recorded so the drop is never silent.
-            if is_dicom:
-                risk = classify_pixel_risk_bytes(body)
-                if risk.is_high or (deface_on and risk.level == "low"):
+            if is_dicom and item.get("clean_key"):
+                # Human-approved redaction (contribution accept): ship the
+                # verified-clean blob EXACTLY as reviewed. No re-scrub (it was
+                # header-scrubbed at staging and CID 7050-stamped at accept)
+                # and no re-classify (``classify_pixel_risk`` distrusts
+                # ``BurnedInAnnotation=NO`` by design, so it would re-flag it).
+                # A missing blob is recorded and skipped — never fall back to
+                # the raw high-risk bytes.
+                body = _fetch_blob_bytes(
+                    storage,
+                    item.get("clean_bucket") or item["bucket"],
+                    item["clean_key"],
+                    deidentify=False,
+                )
+                if not body:
                     skipped.append(
                         {
                             "study_id": item.get("study_id"),
                             "name": item["name"],
-                            "risk": risk.level,
+                            "risk": "clean_blob_unavailable",
                         }
                     )
                     progress_q[0] += 1
                     continue
+            else:
+                body = _fetch_blob_bytes(storage, item["bucket"], item["key"], deidentify=is_dicom)
+                # Burned-in-pixel PHI gate: ``deidentify`` above scrubs the DICOM
+                # *header* but leaves pixels untouched, so an instance with PHI
+                # burned into the image (ultrasound banners, secondary capture,
+                # dose-report screenshots) would otherwise ship to the public /
+                # licensed cohort. ``high``-risk instances are ALWAYS EXCLUDED.
+                #
+                # ``low``-risk (recognizable-visual-feature: head/face CT/MR/PT) is
+                # excluded too WHEN de-facing is enabled — this is an automated
+                # egress with no human-review step, and a face can be surface-
+                # rendered from the volume, so it must not ship un-defaced. With
+                # de-facing off (default) face-risk ships as today (no regression).
+                # Excluded instances are recorded so the drop is never silent.
+                if is_dicom:
+                    risk = classify_pixel_risk_bytes(body)
+                    if risk.is_high or (deface_on and risk.level == "low"):
+                        skipped.append(
+                            {
+                                "study_id": item.get("study_id"),
+                                "name": item["name"],
+                                "risk": risk.level,
+                            }
+                        )
+                        progress_q[0] += 1
+                        continue
             sid = item.get("study_id")
             if sid is not None:
                 stat = per_study.setdefault(sid, {"size": 0, "hash": hashlib.sha256()})
@@ -235,11 +260,25 @@ def _stream_cohort_volumes_sync(
             datasets: list[pydicom.Dataset] = []
             risk_hit: str | None = None
             for d in s["dicom"]:
-                body = _fetch_blob_bytes(storage, d["bucket"], d["key"], deidentify=True)
-                risk = classify_pixel_risk_bytes(body)
-                if risk.is_high or (deface_on and risk.level == "low"):
-                    risk_hit = risk.level
-                    break
+                if d.get("clean_key"):
+                    # Human-approved redacted slice: ship exactly what the
+                    # reviewer saw (see the raw-bundle core above). A missing
+                    # blob drops the series — never substitute raw bytes.
+                    body = _fetch_blob_bytes(
+                        storage,
+                        d.get("clean_bucket") or d["bucket"],
+                        d["clean_key"],
+                        deidentify=False,
+                    )
+                    if not body:
+                        risk_hit = "clean_blob_unavailable"
+                        break
+                else:
+                    body = _fetch_blob_bytes(storage, d["bucket"], d["key"], deidentify=True)
+                    risk = classify_pixel_risk_bytes(body)
+                    if risk.is_high or (deface_on and risk.level == "low"):
+                        risk_hit = risk.level
+                        break
                 datasets.append(pydicom.dcmread(io.BytesIO(body)))
             if risk_hit is not None or not datasets:
                 skipped.append({"study_id": sid, "name": name, "risk": risk_hit or "no_image"})
