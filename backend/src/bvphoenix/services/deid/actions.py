@@ -1,11 +1,14 @@
 """Execute the resolved PS3.15 action map over a dataset, in place.
 
-Per element: private tags are removed (unless safe-listed); the explicit
-keyword→action map wins; otherwise a VR-based default applies (UID-VR → remap
-except structural UIDs, date/time-VR → shift, everything else → keep).
-Sequences are recursed so nested PHI (e.g. RequestAttributesSequence) is
-scrubbed identically. Any element that throws on transform is removed rather
-than left with its original value.
+Per element: private tags are removed (unless safe-listed); the full-table
+tag→action map wins; then the repeating-group mask rules (curve data 50xx,
+overlay data/comments 60xx — these have NO pydicom keyword at runtime, which is
+exactly why matching is by tag, not keyword); otherwise a VR-based default
+applies (UID-VR → remap except structural UIDs, date/time-VR → shift, un-tabled
+PN → remove, free-narrative text → clean, everything else → keep). Sequences
+are recursed so nested PHI (e.g. RequestAttributesSequence) is scrubbed
+identically. Any element that throws on transform is removed rather than left
+with its original value.
 """
 
 from __future__ import annotations
@@ -18,6 +21,7 @@ from bvphoenix.services.deid.profile_table import (
     KEEP_UID_KEYWORDS,
     Action,
     ProfileOptions,
+    ResolvedActions,
 )
 
 _DATE_VRS = frozenset({"DA", "DT", "TM"})
@@ -31,7 +35,7 @@ _FREETEXT_CLEAN_VRS = frozenset({"ST", "LT", "UT"})
 def scrub_dataset(
     ds: Dataset,
     *,
-    actions: dict[str, Action],
+    actions: ResolvedActions,
     operators: DeidOperators,
     options: ProfileOptions,
 ) -> None:
@@ -57,10 +61,11 @@ def scrub_dataset(
             del ds[tag]
             continue
 
-        kw = elem.keyword or ""
-        action = actions.get(kw) if kw else None
+        action = actions.by_tag.get(int(tag))
         if action is None:
-            action = _vr_default(elem.VR, kw)
+            action = actions.repeater_action(tag.group, tag.element)
+        if action is None:
+            action = _vr_default(elem.VR, elem.keyword or "")
 
         if action == Action.REMOVE:
             del ds[tag]

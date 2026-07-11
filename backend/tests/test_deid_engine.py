@@ -120,12 +120,22 @@ def test_forged_deid_markers_do_not_bypass_scrub():
 
 
 def test_untabled_person_name_is_removed():
-    # A PN-VR tag absent from the table (ConsultingPhysicianName) must be removed
-    # by the deny-by-default VR rule, not kept.
+    # A PN-VR tag absent from the full E.1-1 table (EvaluatorName, NDE domain)
+    # must be removed by the deny-by-default VR rule, not kept.
+    ds = _make()
+    ds.EvaluatorName = "Bianchi^Luca"
+    out = _scrub_read(ds)
+    assert "EvaluatorName" not in out
+
+
+def test_tabled_person_name_z_is_emptied():
+    # ConsultingPhysicianName is an E.1-1 row with action Z: the tag survives
+    # (Type 2 conformance) with an EMPTY value — never the original name.
     ds = _make()
     ds.ConsultingPhysicianName = "Bianchi^Luca"
     out = _scrub_read(ds)
-    assert "ConsultingPhysicianName" not in out
+    assert "ConsultingPhysicianName" in out
+    assert str(out.ConsultingPhysicianName) == ""
 
 
 def test_file_meta_ae_title_scrubbed():
@@ -159,14 +169,32 @@ def test_private_tags_removed():
 
 
 def test_nested_sequence_phi_scrubbed():
+    # ReferencedImageSequence is a KEPT sequence (E.1-1 X/Z/U*: retain, remap
+    # nested UIDs): the recursion must scrub PHI inside its items.
     ds = _make()
     item = Dataset()
     item.PatientID = "MRN-NESTED"
     item.PatientName = "Nested^Person"
+    item.ReferencedSOPClassUID = "1.2.840.10008.5.1.4.1.1.2"
+    item.ReferencedSOPInstanceUID = "1.2.3.4.5.6.7.8"
+    ds.ReferencedImageSequence = [item]
+    out = _scrub_read(ds)
+    nested = out.ReferencedImageSequence[0]
+    assert str(nested.PatientID).startswith("ANON")  # recursion pseudonymised it
+    # nested instance UID remapped, class UID (structural) kept
+    assert str(nested.ReferencedSOPInstanceUID) != "1.2.3.4.5.6.7.8"
+    assert str(nested.ReferencedSOPClassUID) == "1.2.840.10008.5.1.4.1.1.2"
+
+
+def test_request_attributes_sequence_removed():
+    # E.1-1 marks RequestAttributesSequence X: the whole sequence goes (the
+    # curated engine used to keep+recurse it; the full table is stricter).
+    ds = _make()
+    item = Dataset()
+    item.RequestedProcedureID = "RP-1"
     ds.RequestAttributesSequence = [item]
     out = _scrub_read(ds)
-    nested = out.RequestAttributesSequence[0]
-    assert str(nested.PatientID).startswith("ANON")  # recursion pseudonymised it
+    assert "RequestAttributesSequence" not in out
 
 
 def test_verify_catches_phi_leaked_into_untabled_tag():

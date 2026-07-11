@@ -323,7 +323,7 @@ class Settings(BaseSettings):
     deid_org_root_uid: str = Field(default="1.2.826.0.1.3680043.10.9999")
     # Bumped whenever the engine's semantics/options change; invalidates the
     # per-study deidentified_at stamp so stale scrubs are re-run.
-    deid_method_version: str = Field(default="phoenix-deid-2")
+    deid_method_version: str = Field(default="phoenix-deid-3")
     deid_safe_private_version: str = Field(default="v1")
     # "shift" = Retain Longitudinal Temporal Information (Modified Dates option);
     # "remove" = empty all dates.
