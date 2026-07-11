@@ -872,6 +872,7 @@ EXPECTED_TOOL_NAMES = {
     "get_contribution_gt_boxes",
     "save_contribution_gt_boxes",
     "score_contribution_gt",
+    "get_deid_recall_runs",
     # --- Public dataset catalog (OpenData commons; catalog:read scope).
     # Backend api/catalog.py. Read-only, aggregate/citation data, no PHI.
     "list_public_datasets",
