@@ -30,9 +30,17 @@ jobs:
   backend-test:
     name: Backend lint + test
     runs-on: ubuntu-latest
+    env:
+      # The synthetic pixel-PHI recall gate (test_pixel_deid_redaction) is
+      # OCR-backed and silently skips without the tesseract binary. This flag
+      # arms a guard test that FAILS when tesseract is missing, so the gate
+      # can never skip unnoticed on CI again.
+      BVP_REQUIRE_OCR: "1"
     steps:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v5
+      - name: Install tesseract (pixel-PHI recall gate)
+        run: sudo apt-get update -q && sudo apt-get install -y -q tesseract-ocr
       - working-directory: backend
         run: |
           uv sync --extra dev

@@ -1308,11 +1308,40 @@ async def download_instance(
         # re-scrub. A version mismatch (engine upgraded, or never stamped) falls
         # through to the on-the-fly scrub so the upgrade is always honoured.
         from bvphoenix.config import get_settings
+        from bvphoenix.services.pixel_egress import pixel_gate_needed, resolve_public_pixel_bytes
 
         current_version = get_settings().deid_method_version
         raw = await asyncio.to_thread(
             storage.get_object_bytes, bucket=instance.s3_bucket, key=instance.s3_key
         )
+        pixel_header = "none"
+        if pixel_gate_needed(study):
+            # Burned-in-pixel gate (public tiers only): the header scrub below
+            # never touches pixels, so a public high-risk instance may serve
+            # only its human-approved redacted rendition — or nothing.
+            gate = await asyncio.to_thread(resolve_public_pixel_bytes, storage, instance, raw)
+            if gate.bytes_out is None:
+                raise HTTPException(
+                    status_code=404, detail="instance withheld pending pixel-PHI review"
+                )
+            if gate.substituted:
+                # The verified-clean blob was header-scrubbed at staging and
+                # stamped (CID 7050) at accept — re-scrubbing would clobber
+                # the provenance. Serve it as-is.
+                filename = f"{instance.sop_instance_uid}.dcm"
+                return Response(
+                    content=gate.bytes_out,
+                    media_type="application/dicom",
+                    headers={
+                        "content-disposition": _content_disposition(
+                            filename, disposition="attachment"
+                        ),
+                        "x-deidentified": "true",
+                        "x-pixel-redacted": "verified",
+                        "cache-control": "no-store",
+                    },
+                )
+            pixel_header = "verified" if instance.pixel_deid_status == "approved" else "none"
         if study.deidentified_at is not None and study.deid_method_version == current_version:
             served, deid_header = raw, "stored"
         else:
@@ -1325,6 +1354,7 @@ async def download_instance(
             headers={
                 "content-disposition": _content_disposition(filename, disposition="attachment"),
                 "x-deidentified": deid_header,
+                "x-pixel-redacted": pixel_header,
                 "cache-control": "no-store",
             },
         )

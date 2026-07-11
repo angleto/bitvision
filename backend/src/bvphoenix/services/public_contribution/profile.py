@@ -26,10 +26,7 @@ from bvphoenix.services.public_contribution.checks import (
     HeaderDeidCheck,
     PixelPhiCheck,
 )
-from bvphoenix.services.public_contribution.promotion import (
-    promote_submission,
-    purge_submission_staged,
-)
+from bvphoenix.services.public_contribution.promotion import promote_submission
 from bvphoenix.services.review_queue import (
     DecisionPolicy,
     ReviewProfile,
@@ -101,8 +98,13 @@ async def _on_accept(db: AsyncSession, item: ReviewableItem, actor: ReviewActor)
 async def _on_reject(
     db: AsyncSession, item: ReviewableItem, actor: ReviewActor, reason: str | None
 ) -> None:
+    # Deliberately does NOT purge staged S3 blobs: this hook runs INSIDE the
+    # decision transaction, and an S3 delete cannot be rolled back if the
+    # commit later fails — which would strand the submission with dangling
+    # staged keys (preview 500s, a subsequent accept fails PromotionIntegrity
+    # forever). The purge is a post-commit tail in the API endpoint, with the
+    # contribution_maintenance sweep as the safety net for a lost purge.
     assert isinstance(item, Submission)
-    await purge_submission_staged(item)
 
 
 PUBLIC_CONTRIBUTION_PROFILE = register_profile(

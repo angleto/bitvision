@@ -142,6 +142,16 @@ CRON_JOBS = [
         minute={0, 5, 10, 15, 20, 25, 30, 35, 40, 45, 50, 55},
         run_at_startup=True,
     ),
+    # Public-contribution recovery sweep: re-queue stale auto-check runs and
+    # re-enqueue lost promotions (an ``accepted`` submission whose promote
+    # enqueue was dropped would otherwise stick forever). Low traffic — every
+    # 30 minutes is plenty, and the odd minutes stay clear of the 5-minute
+    # crons above.
+    cron(
+        "bvworkers.tasks.public_contribution.contribution_maintenance",
+        minute={16, 46},
+        run_at_startup=False,
+    ),
 ]
 
 

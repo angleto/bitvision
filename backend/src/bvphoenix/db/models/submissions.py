@@ -63,9 +63,13 @@ class Submission(Base, ReviewableItemMixin, TimestampMixin, UpdatedAtMixin):
         ForeignKey("patients.id", ondelete="SET NULL"),
     )
     # Per-instance manifest: [{study_id, series_id, instance_id, s3_bucket,
-    # s3_key, pixel_phi_risk, staged_redacted_key?}]. Auto-check results live in
-    # the mixin's ``auto_checks``; the staged redacted previews under
-    # ``staged_prefix``.
+    # s3_key, pixel_phi_risk}] written at staging, plus — for pixel-gated
+    # components, written by ``PixelPhiCheck`` — the staged-redaction audit:
+    # {risk_level, staged_redacted_key, staged_sha256, staged_residual,
+    # staged_reason?, staged_redactions (capped), staged_redactions_truncated,
+    # staged_deid_version, face_deid_applied, face_deid_reason}. Auto-check
+    # results live in the mixin's ``auto_checks``; the staged redacted blobs
+    # under ``staged_prefix`` (purged on reject / after promote).
     manifest: Mapped[dict | None] = mapped_column(JSONB)
     staged_prefix: Mapped[str | None] = mapped_column(String(1024))
     promoted_refs: Mapped[dict | None] = mapped_column(JSONB)

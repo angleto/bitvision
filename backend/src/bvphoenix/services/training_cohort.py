@@ -385,15 +385,21 @@ async def cohort_blob_plan(
     async for study_id, syn, k, _series, instances, seg_rows in _iter_cohort_series(db, study_syn):
         for j, inst in enumerate(instances, start=1):
             if inst.s3_bucket and inst.s3_key:
-                work.append(
-                    {
-                        "kind": "dicom",
-                        "name": f"{syn}/series-{k:02d}/img-{j:04d}.dcm",
-                        "bucket": inst.s3_bucket,
-                        "key": inst.s3_key,
-                        "study_id": study_id,
-                    }
-                )
+                item: dict[str, Any] = {
+                    "kind": "dicom",
+                    "name": f"{syn}/series-{k:02d}/img-{j:04d}.dcm",
+                    "bucket": inst.s3_bucket,
+                    "key": inst.s3_key,
+                    "study_id": study_id,
+                }
+                # Human-approved redaction (contribution accept): the export
+                # ships the verified-clean blob instead of skipping the
+                # instance at the burned-in-PHI gate. A NULL pointer with
+                # ``approved`` means the stored bytes are clean at rest.
+                if inst.pixel_deid_status == "approved":
+                    item["clean_bucket"] = inst.pixel_clean_s3_bucket or inst.s3_bucket
+                    item["clean_key"] = inst.pixel_clean_s3_key or inst.s3_key
+                work.append(item)
         for seg in seg_rows:
             if seg.s3_bucket and seg.s3_key:
                 work.append(
@@ -426,11 +432,18 @@ async def cohort_series_plan(
     """
     plan: list[dict[str, Any]] = []
     async for study_id, syn, k, _series, instances, seg_rows in _iter_cohort_series(db, study_syn):
-        dicom = [
-            {"bucket": inst.s3_bucket, "key": inst.s3_key}
-            for inst in instances
-            if inst.s3_bucket and inst.s3_key
-        ]
+        dicom: list[dict[str, Any]] = []
+        for inst in instances:
+            if not (inst.s3_bucket and inst.s3_key):
+                continue
+            d: dict[str, Any] = {"bucket": inst.s3_bucket, "key": inst.s3_key}
+            # Same verified-clean substitution as cohort_blob_plan: a slice
+            # with a human-approved redaction ships that rendition instead of
+            # dropping the whole series at the pixel gate.
+            if inst.pixel_deid_status == "approved":
+                d["clean_bucket"] = inst.pixel_clean_s3_bucket or inst.s3_bucket
+                d["clean_key"] = inst.pixel_clean_s3_key or inst.s3_key
+            dicom.append(d)
         if not dicom:
             continue
         masks = [

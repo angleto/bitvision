@@ -46,10 +46,16 @@ from bvphoenix.db.session import get_db
 from bvphoenix.middleware.audit_dependency import AuditDep
 from bvphoenix.services import dicomweb as dw
 from bvphoenix.services.deidentify import deidentify_dicom_bytes, should_deidentify
+from bvphoenix.services.face_deid import get_defacer
 from bvphoenix.services.permissions import (
     DOWNLOAD_DICOM,
     can,
     visible_studies_filter,
+)
+from bvphoenix.services.pixel_egress import (
+    instance_gate_plan,
+    pixel_gate_needed,
+    resolve_public_pixel_bytes,
 )
 from bvphoenix.storage import get_s3_storage
 
@@ -520,8 +526,46 @@ async def _instance_rows(
     return [(inst, series_uid) for inst, series_uid in (await db.execute(q)).all()]
 
 
+# A gated row ready to stream: (instance, series_uid, substituted).
+# ``substituted`` marks a verified-clean rendition (the ``pixel_clean_s3_*``
+# pointer) that must ship as-is: it was header-scrubbed at staging and CID
+# 7050-stamped at accept — re-scrubbing would clobber the provenance.
+_StreamRow = tuple[Instance, str, bool]
+
+
+async def _pixel_gate_rows(
+    study: ImagingStudy, rows: list[tuple[Instance, str]]
+) -> list[_StreamRow]:
+    """Apply the public burned-in-pixel gate to a retrieve's instance list.
+
+    Withheld instances (gated high-risk without a human-approved redaction)
+    are dropped from the multipart — fail-closed. Non-public studies pass
+    through untouched. Legacy rows with NULL persisted risk are classified
+    from their bytes here (decision only — the generator re-fetches at stream
+    time, so no payload stays buffered across the whole multipart)."""
+    if not pixel_gate_needed(study):
+        return [(inst, suid, False) for inst, suid in rows]
+    storage = get_s3_storage()
+    deface_on = get_defacer() is not None
+    out: list[_StreamRow] = []
+    for inst, suid in rows:
+        mode = instance_gate_plan(inst, deface_on=deface_on)
+        if mode == "classify":  # legacy NULL persisted risk
+            raw = await asyncio.to_thread(
+                storage.get_object_bytes, bucket=inst.s3_bucket, key=inst.s3_key
+            )
+            gate = await asyncio.to_thread(resolve_public_pixel_bytes, storage, inst, raw)
+            if gate.bytes_out is None:
+                continue
+            mode = "substitute" if gate.substituted else "serve"
+        if mode == "withhold":
+            continue
+        out.append((inst, suid, mode == "substitute"))
+    return out
+
+
 def _stream_dicom(
-    request: Request, study: ImagingStudy, rows: list[tuple[Instance, str]], grant: Grant | None
+    request: Request, study: ImagingStudy, rows: list[_StreamRow], grant: Grant | None
 ) -> StreamingResponse:
     storage = get_s3_storage()
     deid = should_deidentify(grant, study)
@@ -530,9 +574,13 @@ def _stream_dicom(
     scrub = deid and not already
     base = _wado_base(request)
 
-    def _source(inst: Instance):
+    def _source(inst: Instance, substituted: bool):
         def gen():
-            if scrub:
+            if substituted:
+                yield storage.get_object_bytes(
+                    bucket=inst.pixel_clean_s3_bucket, key=inst.pixel_clean_s3_key
+                )
+            elif scrub:
                 raw = storage.get_object_bytes(bucket=inst.s3_bucket, key=inst.s3_key)
                 yield deidentify_dicom_bytes(raw)
             else:
@@ -547,9 +595,9 @@ def _stream_dicom(
         (
             f"{base}/studies/{study.study_instance_uid}/series/{series_uid}"
             f"/instances/{inst.sop_instance_uid}",
-            _source(inst),
+            _source(inst, substituted),
         )
-        for inst, series_uid in rows
+        for inst, series_uid, substituted in rows
     ]
     boundary = dw.new_boundary()
     return StreamingResponse(
@@ -579,14 +627,22 @@ async def _retrieve(
     rows = await _instance_rows(db, study, series=series, sop_uid=sop_uid)
     if not rows:
         raise HTTPException(status_code=404, detail="no instances")
+    gated = await _pixel_gate_rows(study, rows)
+    if not gated:
+        raise HTTPException(status_code=404, detail="instances withheld pending pixel-PHI review")
     await audit.log(
         action="dicomweb_retrieve",
         actor_subject_id=user.subject_id if user else None,
         resource_kind="study",
         resource_id=study.id,
-        metadata={"series_uid": series_uid, "sop_uid": sop_uid, "instances": len(rows)},
+        metadata={
+            "series_uid": series_uid,
+            "sop_uid": sop_uid,
+            "instances": len(gated),
+            "pixel_withheld": len(rows) - len(gated),
+        },
     )
-    return _stream_dicom(request, study, rows, grant)
+    return _stream_dicom(request, study, gated, grant)
 
 
 @router.get("/studies/{study_uid}")
@@ -644,11 +700,25 @@ async def wado_instance(
 # isolation, and PS3.15 de-id-on-egress as the full-instance retrieve.
 
 
-async def _load_instance_bytes_scrubbed(inst: Instance, *, scrub: bool) -> bytes:
+async def _load_instance_bytes_scrubbed(
+    inst: Instance, *, scrub: bool, study: ImagingStudy
+) -> bytes:
     storage = get_s3_storage()
 
     def _read() -> bytes:
         raw = storage.get_object_bytes(bucket=inst.s3_bucket, key=inst.s3_key)
+        if pixel_gate_needed(study):
+            # Frames serve the pixel bitstream and bulkdata can address the
+            # PixelData tag directly — the same public burned-in-PHI gate as
+            # the full-instance retrieve applies here.
+            gate = resolve_public_pixel_bytes(storage, inst, raw)
+            if gate.bytes_out is None:
+                raise HTTPException(
+                    status_code=404, detail="instance withheld pending pixel-PHI review"
+                )
+            if gate.substituted:
+                return gate.bytes_out  # scrubbed at staging + stamped at accept
+            raw = gate.bytes_out
         return deidentify_dicom_bytes(raw) if scrub else raw
 
     return await asyncio.to_thread(_read)
@@ -683,7 +753,7 @@ async def wado_frames(
     series = await _resolve_series(db, study, series_uid)
     inst = await _resolve_instance(db, series, sop_uid)
     scrub = _scrub_needed(grant, study)
-    raw = await _load_instance_bytes_scrubbed(inst, scrub=scrub)
+    raw = await _load_instance_bytes_scrubbed(inst, scrub=scrub, study=study)
     try:
         transfer_syntax, frames = await asyncio.to_thread(dw.extract_frames, raw, frames_req)
     except dw.FrameError as exc:
@@ -739,7 +809,7 @@ async def wado_bulkdata(
     series = await _resolve_series(db, study, series_uid)
     inst = await _resolve_instance(db, series, sop_uid)
     scrub = _scrub_needed(grant, study)
-    raw = await _load_instance_bytes_scrubbed(inst, scrub=scrub)
+    raw = await _load_instance_bytes_scrubbed(inst, scrub=scrub, study=study)
     data = await asyncio.to_thread(dw.extract_bulkdata, raw, tag_int)
     if data is None:
         raise HTTPException(status_code=404, detail="bulkdata not found")
