@@ -32,39 +32,70 @@ for that validation.
 from __future__ import annotations
 
 import argparse
+import hashlib
+import json
 import subprocess
 import sys
 from pathlib import Path
 
-# PP-OCRv5 server/mobile detection model identifier as published by PaddleOCR.
-# Pin the exact name/version at validation time.
+# PP-OCRv5 mobile detection model identifier as published by PaddleOCR 3.x.
 _DET_MODEL_NAME = "PP-OCRv5_mobile_det"
 _OUT_FILENAME = "ppocrv5_det.onnx"
 
 
 def _download_det_model() -> Path:
-    """Resolve the local path of the PP-OCRv5 detection *inference* model,
-    downloading it via paddleocr if needed. Returns the inference-model dir
-    (containing inference.pdmodel / inference.pdiparams)."""
+    """Download + resolve the PP-OCRv5 detection *inference* model dir.
+
+    PaddleOCR 3.x downloads official models to
+    ``~/.paddlex/official_models/<name>/``; instantiating the text-detection
+    predictor with the model name triggers the pull. Returns the dir holding
+    the inference graph + params (PIR ``inference.json`` on Paddle 3.x, or the
+    legacy ``inference.pdmodel`` on 2.x — :func:`_resolve_model_files` handles
+    both)."""
     try:
-        from paddleocr import PaddleOCR  # noqa: F401  (triggers the model download)
+        from paddleocr import TextDetection
     except ImportError as exc:  # pragma: no cover - export extra only
-        raise SystemExit(
-            "paddleocr not installed; run `uv sync --extra export` first"
-        ) from exc
+        raise SystemExit("paddleocr not installed; run `uv sync --extra export`") from exc
 
-    # Instantiating PaddleOCR with detection enabled downloads the det model to
-    # ~/.paddleocr/. The precise on-disk layout depends on the paddleocr
-    # version; resolve it explicitly at validation time and return that dir.
-    raise SystemExit(
-        "TODO(validate-on-arm): resolve the downloaded "
-        f"{_DET_MODEL_NAME} inference-model directory and return it here. "
-        "Kept explicit rather than guessed so this never silently exports the "
-        "wrong graph."
-    )
+    # Instantiating the predictor downloads the model if absent.
+    TextDetection(model_name=_DET_MODEL_NAME)
+
+    base = Path.home() / ".paddlex" / "official_models" / _DET_MODEL_NAME
+    if not base.exists():
+        # Older/newer layouts: search the paddlex cache for the model dir.
+        cache = Path.home() / ".paddlex"
+        hits = [p.parent for p in cache.rglob("inference.*") if _DET_MODEL_NAME in str(p)]
+        if not hits:
+            raise SystemExit(
+                f"could not locate the downloaded {_DET_MODEL_NAME} inference dir under {cache}; "
+                "inspect the paddlex cache and pass the dir explicitly"
+            )
+        base = hits[0]
+    return base
 
 
-def export(out_dir: Path) -> None:
+def _resolve_model_files(model_dir: Path) -> list[str]:
+    """paddle2onnx args for the model, autodetecting PIR (Paddle 3.x,
+    ``inference.json``) vs the legacy ``inference.pdmodel`` (Paddle 2.x).
+    paddle2onnx >= 1.3 also accepts ``--model_dir`` alone, but being explicit
+    avoids picking up the wrong file."""
+    if (model_dir / "inference.json").exists():
+        model_filename = "inference.json"
+    elif (model_dir / "inference.pdmodel").exists():
+        model_filename = "inference.pdmodel"
+    else:
+        raise SystemExit(f"no inference.json / inference.pdmodel in {model_dir}")
+    return [
+        "--model_dir",
+        str(model_dir),
+        "--model_filename",
+        model_filename,
+        "--params_filename",
+        "inference.pdiparams",
+    ]
+
+
+def export(out_dir: Path) -> Path:
     out_dir.mkdir(parents=True, exist_ok=True)
     model_dir = _download_det_model()
     out_path = out_dir / _OUT_FILENAME
@@ -72,12 +103,7 @@ def export(out_dir: Path) -> None:
         sys.executable,
         "-m",
         "paddle2onnx",
-        "--model_dir",
-        str(model_dir),
-        "--model_filename",
-        "inference.pdmodel",
-        "--params_filename",
-        "inference.pdiparams",
+        *_resolve_model_files(model_dir),
         "--save_file",
         str(out_path),
         "--opset_version",
@@ -86,7 +112,20 @@ def export(out_dir: Path) -> None:
         "True",
     ]
     subprocess.run(cmd, check=True)
-    print(f"wrote {out_path}")
+
+    # Record provenance next to the graph (consumed by the model-sync + the
+    # recall-run engine fingerprint). ``.complete`` is the marker the workers
+    # model-sync init container asserts before starting the service.
+    sha = hashlib.sha256(out_path.read_bytes()).hexdigest()
+    (out_dir / "version.json").write_text(
+        json.dumps(
+            {"model_id": "pixelphi-ppocrv5-det-v1", "source": _DET_MODEL_NAME, "sha256": sha},
+            indent=2,
+        )
+    )
+    (out_dir / ".complete").write_text("")
+    print(f"wrote {out_path} (sha256={sha[:12]}...) + version.json + .complete")
+    return out_path
 
 
 def main() -> None:
