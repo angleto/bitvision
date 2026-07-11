@@ -49,7 +49,12 @@ def build_method_code_sequence(options: ProfileOptions) -> Sequence:
 
 
 def method_string(options: ProfileOptions) -> str:
-    return f"bitvision phoenix PS3.15 Basic Profile ({options.method_version})"
+    from bvphoenix.services.deid.profile_table import PS315_TABLE_VERSION
+
+    return (
+        f"bitvision phoenix PS3.15 Basic Profile "
+        f"({options.method_version}, E.1-1 {PS315_TABLE_VERSION})"
+    )
 
 
 __all__ = ["build_method_code_sequence", "method_codes", "method_string"]

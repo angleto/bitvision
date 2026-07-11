@@ -35,6 +35,11 @@ _PHI_SOURCE_KEYWORDS = (
 # instance (fail-closed), never leak, so we err broad. Matches the engine's own
 # extra-term threshold (engine.py).
 _MIN_TOKEN = 2
+# The engine's own pseudonym shape (operators.pseudonym). A source value that
+# is ALREADY one of our pseudonyms is anonymous by construction — hashing its
+# tokens would make every re-scrub (deidentify_reindex after a method-version
+# bump re-scrubs at-rest-scrubbed bytes) trip on its own "ANON" sentinel.
+_PSEUDONYM_RE = re.compile(r"ANON(-[0-9A-F]{12})?")
 # Split on the full punctuation class so "Rossi-Mario" / "Rossi.Mario" tokenise.
 _SPLIT_RE = re.compile(r"[\s,^;./\\-]+")
 
@@ -72,7 +77,7 @@ def collect_phi_hashes(ds: Dataset) -> set[str]:
     terms: set[str] = set()
     for kw in _PHI_SOURCE_KEYWORDS:
         val = ds.get(kw)
-        if val:
+        if val and not _PSEUDONYM_RE.fullmatch(str(val).strip()):
             for token in _tokens(val):
                 terms.add(_hash(token.upper()))
     return terms

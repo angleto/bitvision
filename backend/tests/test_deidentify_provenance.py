@@ -63,9 +63,13 @@ def test_deid_scrubs_patient_name():
 def test_provenance_code_sequence_not_in_nested_items():
     # Provenance markers belong on the top-level dataset only; nested sequence
     # items get scrubbed but must not carry the method code sequence.
+    # (ReferencedImageSequence is a KEPT sequence — E.1-1 X/Z/U*;
+    # RequestAttributesSequence is X = removed outright by the full table.)
     nested = Dataset()
     nested.PatientName = "Verdi^Anna"
-    out = deidentify_dicom_bytes(_dicom_bytes(RequestAttributesSequence=[nested]))
+    nested.ReferencedSOPClassUID = "1.2.840.10008.5.1.4.1.1.2"
+    nested.ReferencedSOPInstanceUID = "1.2.3.4.5"
+    out = deidentify_dicom_bytes(_dicom_bytes(ReferencedImageSequence=[nested]))
     ds = pydicom.dcmread(BytesIO(out))
-    item = ds.RequestAttributesSequence[0]
+    item = ds.ReferencedImageSequence[0]
     assert "DeidentificationMethodCodeSequence" not in item
