@@ -703,6 +703,7 @@ TOOL_SCOPE: dict[str, str] = {
     "get_contribution_gt_boxes": "contributions:label",
     "save_contribution_gt_boxes": "contributions:label",
     "score_contribution_gt": "contributions:label",
+    "get_deid_recall_runs": "contributions:read",
     # --- Public dataset catalog (OpenData commons, read-only) --------
     "list_public_datasets": "catalog:read",
     "get_public_dataset": "catalog:read",

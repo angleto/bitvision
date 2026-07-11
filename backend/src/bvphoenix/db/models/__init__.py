@@ -42,6 +42,7 @@ from bvphoenix.db.models.clinical_events import (
 from bvphoenix.db.models.clinical_notes import ClinicalNote
 from bvphoenix.db.models.contributor_payouts import ContributorPayout
 from bvphoenix.db.models.credit_ledger import CreditLedger
+from bvphoenix.db.models.deid_recall_runs import CORPUS_KINDS, DeidRecallRun
 from bvphoenix.db.models.dicom import Derivative, ImagingStudy, Instance, Series
 from bvphoenix.db.models.document_catalog import (
     DocumentAuthority,
@@ -210,6 +211,7 @@ __all__ = [
     "CLINICAL_EVENT_STATUSES",
     "CLINICAL_EVENT_STATUS_KINDS",
     "CONTENT_DOCUMENT_LINK_ROLES",
+    "CORPUS_KINDS",
     "DEFAULT_CHUNKER_VERSION",
     "EMAIL_DELIVERY_STATES",
     "INBOX_SOURCE_CHANNELS",
@@ -263,6 +265,7 @@ __all__ = [
     "DUCVote",
     "DataErasureRequest",
     "DatasetStudy",
+    "DeidRecallRun",
     "Derivative",
     "Document",
     "DocumentAuthority",

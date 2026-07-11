@@ -151,6 +151,22 @@ class DecisionOut(BaseModel):
     dry_run: bool = False
 
 
+class RecallRunOut(BaseModel):
+    id: uuid.UUID
+    corpus_kind: str
+    corpus_version: str | None
+    corpus_hash: str | None
+    engine: dict
+    coverage: float
+    recall: float
+    covered: int
+    total: int
+    cases: int
+    created_at: datetime | None
+    # PHI-bearing — populated only when explicitly requested (admin-only).
+    missed: dict | None = None
+
+
 # ---- ground-truth PHI box labeling (M6c) -----------------------------------
 # The reviewer draws the burned-in-PHI boxes on a staged instance; these are the
 # answer key the automatic pixel redaction's recall is scored against. Shape is
@@ -293,6 +309,44 @@ async def offer_submission(
         logger.exception("failed to enqueue run_review_checks for submission %s", sub.id)
 
     return SubmissionOut.from_row(sub)
+
+
+@router.get("/recall-runs", response_model=list[RecallRunOut])
+async def list_recall_runs(
+    db: Annotated[AsyncSession, Depends(get_db)],
+    user: Annotated[User, Depends(require_user)],
+    corpus_kind: Annotated[str | None, Query()] = None,
+    limit: Annotated[int, Query(ge=1, le=500)] = 50,
+    include_missed: Annotated[bool, Query()] = False,
+) -> list[RecallRunOut]:
+    """Burned-in-pixel redaction recall over time (``bvphoenix-deid-recall``
+    runs) — the tracked-over-time counterpart to the per-instance ``gt-score``.
+    ``missed`` (the un-redacted PHI texts) is omitted unless ``include_missed``;
+    it is PHI-bearing and admin-only either way."""
+    _require_admin(user)
+    from bvphoenix.db.models import DeidRecallRun
+
+    stmt = select(DeidRecallRun).order_by(DeidRecallRun.created_at.desc()).limit(limit)
+    if corpus_kind is not None:
+        stmt = stmt.where(DeidRecallRun.corpus_kind == corpus_kind)
+    rows = (await db.execute(stmt)).scalars().all()
+    return [
+        RecallRunOut(
+            id=r.id,
+            corpus_kind=r.corpus_kind,
+            corpus_version=r.corpus_version,
+            corpus_hash=r.corpus_hash,
+            engine=r.engine or {},
+            coverage=r.coverage,
+            recall=r.recall,
+            covered=r.covered,
+            total=r.total,
+            cases=r.cases,
+            created_at=r.created_at,
+            missed=(r.missed if include_missed else None),
+        )
+        for r in rows
+    ]
 
 
 @router.get("/queue", response_model=list[SubmissionOut])

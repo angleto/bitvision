@@ -148,6 +148,27 @@ TOOLS = [
             "required": ["submission_id", "instance_id"],
         },
     ),
+    Tool(
+        name="get_deid_recall_runs",
+        description=(
+            "Burned-in-pixel redaction recall over time: the persisted "
+            "bvphoenix-deid-recall runs (recall/covered/total per corpus + engine "
+            "fingerprint) — the tracked-over-time counterpart to the per-instance "
+            "gt-score. Filter by corpus_kind (synthetic/public/curated). The PHI-"
+            "bearing 'missed' texts are omitted unless include_missed=true."
+        ),
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "corpus_kind": {
+                    "type": "string",
+                    "enum": ["synthetic", "public", "curated"],
+                },
+                "limit": {"type": "integer", "minimum": 1, "maximum": 500},
+                "include_missed": {"type": "boolean"},
+            },
+        },
+    ),
 ]
 
 
@@ -186,6 +207,16 @@ async def handle(name: str, arguments: dict) -> str:
     if name == "score_contribution_gt":
         sid, iid = arguments["submission_id"], arguments["instance_id"]
         return json.dumps(await api_get(f"/contributions/{sid}/instances/{iid}/gt-score"), indent=2)
+
+    if name == "get_deid_recall_runs":
+        params = {
+            k: arguments[k]
+            for k in ("corpus_kind", "limit", "include_missed")
+            if arguments.get(k) is not None
+        }
+        return json.dumps(
+            await api_get("/contributions/recall-runs", params=params or None), indent=2
+        )
 
     raise ValueError(f"unknown tool: {name}")
 
