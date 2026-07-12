@@ -226,8 +226,14 @@ async def authorization_server_metadata(request: Request) -> JSONResponse:
     return JSONResponse(
         {
             "issuer": iss,
-            "authorization_endpoint": f"{iss}/authorize",
-            "token_endpoint": f"{iss}/token",
+            # Endpoints live under /mcp (see server_http route table) so a
+            # single ingress path covers the whole flow. The issuer stays
+            # at the host root so the RFC 8414 metadata document remains at
+            # ``{host}/.well-known/oauth-authorization-server`` (no path
+            # insertion) — OAuth does not require the endpoints to sit
+            # under the issuer path.
+            "authorization_endpoint": f"{iss}/mcp/authorize",
+            "token_endpoint": f"{iss}/mcp/token",
             "response_types_supported": ["code"],
             "grant_types_supported": ["authorization_code"],
             "code_challenge_methods_supported": ["S256"],
