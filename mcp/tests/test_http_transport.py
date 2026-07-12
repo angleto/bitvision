@@ -70,8 +70,8 @@ def test_oauth_metadata_endpoints(app: Any) -> None:
     auth_meta = client.get("/.well-known/oauth-authorization-server")
     assert auth_meta.status_code == 200
     body = auth_meta.json()
-    assert body["authorization_endpoint"].endswith("/authorize")
-    assert body["token_endpoint"].endswith("/token")
+    assert body["authorization_endpoint"].endswith("/mcp/authorize")
+    assert body["token_endpoint"].endswith("/mcp/token")
     assert "S256" in body["code_challenge_methods_supported"]
     assert "code" in body["response_types_supported"]
     assert "authorization_code" in body["grant_types_supported"]
@@ -136,7 +136,7 @@ def test_authorize_redirects_with_code(app: Any, monkeypatch: pytest.MonkeyPatch
     client = TestClient(app)
     _, challenge = _pkce_pair()
     resp = client.get(
-        "/authorize",
+        "/mcp/authorize",
         params={
             "response_type": "code",
             "client_id": "bvp_agt_abc",
@@ -157,7 +157,7 @@ def test_authorize_redirects_with_code(app: Any, monkeypatch: pytest.MonkeyPatch
 def test_authorize_rejects_plain_method(app: Any) -> None:
     client = TestClient(app)
     resp = client.get(
-        "/authorize",
+        "/mcp/authorize",
         params={
             "response_type": "code",
             "client_id": "bvp_agt_abc",
@@ -175,7 +175,7 @@ def test_authorize_rejects_http_redirect(app: Any) -> None:
     client = TestClient(app)
     _, challenge = _pkce_pair()
     resp = client.get(
-        "/authorize",
+        "/mcp/authorize",
         params={
             "response_type": "code",
             "client_id": "bvp_agt_abc",
@@ -212,7 +212,7 @@ def test_token_exchange_full_flow(app: Any, monkeypatch: pytest.MonkeyPatch) -> 
     client = TestClient(app)
     verifier, challenge = _pkce_pair()
     auth_resp = client.get(
-        "/authorize",
+        "/mcp/authorize",
         params={
             "response_type": "code",
             "client_id": "bvp_agt_abc",
@@ -230,7 +230,7 @@ def test_token_exchange_full_flow(app: Any, monkeypatch: pytest.MonkeyPatch) -> 
     expected_hash = hashlib.sha256(secret.encode("utf-8")).hexdigest()
 
     token_resp = client.post(
-        "/token",
+        "/mcp/token",
         data={
             "grant_type": "authorization_code",
             "code": code,
@@ -258,7 +258,7 @@ def test_token_rejects_bad_pkce(app: Any, monkeypatch: pytest.MonkeyPatch) -> No
     client = TestClient(app)
     _, challenge = _pkce_pair()
     location = client.get(
-        "/authorize",
+        "/mcp/authorize",
         params={
             "response_type": "code",
             "client_id": "bvp_agt_abc",
@@ -271,7 +271,7 @@ def test_token_rejects_bad_pkce(app: Any, monkeypatch: pytest.MonkeyPatch) -> No
     code = location.split("code=")[1].split("&")[0]
 
     resp = client.post(
-        "/token",
+        "/mcp/token",
         data={
             "grant_type": "authorization_code",
             "code": code,
@@ -296,7 +296,7 @@ def test_token_rejects_unknown_secret(app: Any, monkeypatch: pytest.MonkeyPatch)
     client = TestClient(app)
     verifier, challenge = _pkce_pair()
     location = client.get(
-        "/authorize",
+        "/mcp/authorize",
         params={
             "response_type": "code",
             "client_id": "bvp_agt_abc",
@@ -309,7 +309,7 @@ def test_token_rejects_unknown_secret(app: Any, monkeypatch: pytest.MonkeyPatch)
     code = location.split("code=")[1].split("&")[0]
 
     resp = client.post(
-        "/token",
+        "/mcp/token",
         data={
             "grant_type": "authorization_code",
             "code": code,

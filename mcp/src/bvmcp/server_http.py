@@ -486,8 +486,15 @@ def build_app() -> Starlette:
             endpoint=oauth_shim.protected_resource_metadata,
             methods=["GET"],
         ),
-        Route("/authorize", endpoint=oauth_shim.authorize_endpoint, methods=["GET"]),
-        Route("/token", endpoint=oauth_shim.token_endpoint, methods=["POST"]),
+        # /authorize + /token are served UNDER /mcp (not the host root) so
+        # that a single ingress path (/mcp) covers the entire OAuth dance
+        # when the MCP server shares a hostname with the app (bitvision.xeno
+        # .garden/mcp). Only the RFC-8414/9728 ``/.well-known`` documents
+        # must stay at the host root — everything else lives under /mcp.
+        # These exact routes MUST precede ``Mount("/mcp")`` so Starlette
+        # matches them before the catch-all mount swallows /mcp/*.
+        Route("/mcp/authorize", endpoint=oauth_shim.authorize_endpoint, methods=["GET"]),
+        Route("/mcp/token", endpoint=oauth_shim.token_endpoint, methods=["POST"]),
         Mount("/mcp", app=_mcp_endpoint),
     ]
     return Starlette(routes=routes, lifespan=_lifespan)
