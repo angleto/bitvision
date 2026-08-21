@@ -5,6 +5,19 @@ project follows semantic versioning; pre-release suffixes (`alpha`,
 `beta`) gate Kubernetes deployments via the GHCR image tag (without
 the leading `v`, see deployment guide).
 
+## 4.4.117 (2026-08-21)
+
+### Build fix: bound the MCP SDK below 2.0
+
+`mcp-http` crash-looped on the v4.4.116 image with
+`AttributeError: 'Server' object has no attribute 'list_tools'`. Not a code
+regression: `mcp/pyproject.toml` declared `mcp>=1.2.0` with no lockfile, and
+the image builds with a plain `uv sync`, so the first tagged build after the
+SDK's 2.0.0 release silently pulled a major version whose decorator API had
+changed. The previously-built pods (SDK 1.28.1) kept serving, so production
+was never degraded. Bounded to `<2`; moving to 2.x is a deliberate migration
+of `server.py` / `server_http.py`, not something a rebuild should decide.
+
 ## 4.4.116 (2026-08-21)
 
 ### Clinical event dates: one owner, and a way to correct the past

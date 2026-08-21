@@ -7,7 +7,16 @@ requires-python = ">=3.12"
 license = { text = "AGPL-3.0-or-later" }
 authors = [{ name = "bitvision phoenix contributors" }]
 dependencies = [
-    "mcp>=1.2.0",
+    # Upper bound is load-bearing, not caution. The image builds with a
+    # plain ``uv sync`` against this file (infra/dockerfiles/mcp-http.
+    # Dockerfile) and there is no lockfile, so an unbounded ``>=`` lets a
+    # MAJOR SDK release into the next tagged build. That is exactly what
+    # happened on v4.4.116: mcp 2.0.0 dropped ``Server.list_tools`` and
+    # the image crash-looped on import while the previously-built pods
+    # (SDK 1.28.1) kept serving. Moving to 2.x is a deliberate migration
+    # of server.py / server_http.py, not something a rebuild should do
+    # on its own.
+    "mcp>=1.2.0,<2",
     "pydantic>=2.9.0",
     "pydantic-settings>=2.6.0",
     "httpx>=0.28.0",
