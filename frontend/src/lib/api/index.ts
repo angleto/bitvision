@@ -786,16 +786,141 @@ export const studiesApi = {
    *  The body is plain-text and explicitly excludes the password
    *  (transactional credentials must travel out-of-band). ``locale``
    *  drives IT/EN copy on the email; defaults to the request's
-   *  Accept-Language on the backend if omitted. */
+   *  Accept-Language on the backend if omitted.
+   *
+   *  Delivery is NOT assumed: the backend reports the real SMTP
+   *  outcome (see ``ShareNotifyResult``). HTTP 200 = handed to the
+   *  MTA, HTTP 202 = retriable failure parked in the dispatch ledger,
+   *  HTTP 502 = permanent failure. ``request`` throws ``ApiError`` on
+   *  the 502 (the delivery envelope survives on ``ApiError.detail`` —
+   *  recover it with ``shareNotifyFailure``); the 202 is a 2xx and
+   *  resolves normally with ``status === "queued"``. */
   notifyShare: (linkId: string, customMessage?: string | null, locale?: "it" | "en" | null) =>
-    request<{ sent: boolean; to: string }>(
-      `/api/share-links/${encodeURIComponent(linkId)}/notify`,
-      {
-        method: "POST",
-        json: { custom_message: customMessage ?? null, locale: locale ?? null },
-      },
-    ),
+    request<ShareNotifyResult>(`/api/share-links/${encodeURIComponent(linkId)}/notify`, {
+      method: "POST",
+      json: { custom_message: customMessage ?? null, locale: locale ?? null },
+    }),
 };
+
+// -------- share-link notification delivery --------
+
+/** Terminal state of one share-notification delivery attempt.
+ *  ``"sent"``   the MTA accepted the message (HTTP 200);
+ *  ``"queued"`` retriable SMTP failure, the dispatch ledger will retry
+ *               (HTTP 202) — the message has NOT left the pod yet;
+ *  ``"failed"`` permanent failure, no retry (HTTP 502). */
+export type ShareNotifyStatus = "sent" | "queued" | "failed";
+
+/** Body of ``POST /api/share-links/{id}/notify``, returned verbatim on
+ *  200 and 202 and carried on the ``ApiError.detail`` of the 502. */
+export interface ShareNotifyResult {
+  sent: boolean;
+  to: string;
+  delivery_id: string;
+  status: ShareNotifyStatus;
+  /** Discriminated SMTP failure code (``smtp_auth_failed``,
+   *  ``smtp_unreachable``, …); null when ``status === "sent"``. */
+  error_code: string | null;
+}
+
+/** Failure codes the backend emits (services/email.py). Kept as a
+ *  closed list so the UI can map every one of them to a translated
+ *  sentence and fall back to a generic one for anything unknown
+ *  (a newly added backend code must never render a raw slug). */
+export const SHARE_NOTIFY_ERROR_CODES = [
+  "smtp_connect_timeout",
+  "smtp_unreachable",
+  "smtp_connect_failed",
+  "smtp_dns_failure",
+  "smtp_auth_failed",
+  "smtp_recipient_refused",
+  "smtp_sender_refused",
+  "smtp_tls_failed",
+  "smtp_insecure_auth_refused",
+  "smtp_server_disconnected",
+  "smtp_not_configured",
+  "smtp_unknown_error",
+] as const;
+
+export type ShareNotifyErrorCode = (typeof SHARE_NOTIFY_ERROR_CODES)[number];
+
+/**
+ * Normalise a raw ``error_code`` to a key that is guaranteed to have a
+ * translation. Unknown / missing codes collapse to ``"unknown"``.
+ */
+export function shareNotifyErrorKey(
+  code: string | null | undefined,
+): ShareNotifyErrorCode | "unknown" {
+  if (!code) return "unknown";
+  return (SHARE_NOTIFY_ERROR_CODES as readonly string[]).includes(code)
+    ? (code as ShareNotifyErrorCode)
+    : "unknown";
+}
+
+/**
+ * Recover the delivery envelope from a rejected ``notifyShare`` call.
+ *
+ * ``request`` throws ``ApiError`` for every non-2xx, so the HTTP 502
+ * "permanently failed" branch of the notify contract lands in the
+ * caller's ``catch``. The body is still the delivery envelope, so we
+ * dig it out instead of showing a bare "HTTP 502" — the whole point of
+ * the fix is that the user learns WHY the mail did not go out.
+ *
+ * Accepts the envelope at the top level (plain ``JSONResponse``) or
+ * nested under ``detail`` (if it ever travels through the RFC 7807
+ * problem-details middleware). Returns null for anything that is not a
+ * delivery failure (401/403/404, an HTML gateway error page, a network
+ * error) so the caller can fall back to its generic error path.
+ */
+export function shareNotifyFailure(e: unknown): ShareNotifyResult | null {
+  if (!(e instanceof ApiError)) return null;
+  const roots: unknown[] = [e.detail];
+  if (e.detail && typeof e.detail === "object") {
+    roots.push((e.detail as { detail?: unknown }).detail);
+  }
+  for (const root of roots) {
+    if (!root || typeof root !== "object") continue;
+    const r = root as Record<string, unknown>;
+    const status = r.status;
+    if (status !== "failed" && status !== "queued" && status !== "sent") continue;
+    const rawCode =
+      typeof r.error_code === "string"
+        ? r.error_code
+        : typeof r.code === "string"
+          ? r.code
+          : typeof r.type === "string"
+            ? (r.type.split("/").pop() ?? null)
+            : null;
+    return {
+      sent: r.sent === true,
+      to: typeof r.to === "string" ? r.to : "",
+      delivery_id: typeof r.delivery_id === "string" ? r.delivery_id : "",
+      status,
+      error_code: rawCode,
+    };
+  }
+  // Fallback for a body whose ``status`` member is the numeric HTTP
+  // code (RFC 7807 uses ``status`` for exactly that, so a lifted
+  // problem body would shadow our discriminator): if any level carries
+  // one of our SMTP codes, that is unambiguously a delivery failure.
+  for (const root of roots) {
+    if (!root || typeof root !== "object") continue;
+    const r = root as Record<string, unknown>;
+    for (const raw of [r.error_code, r.code, r.type]) {
+      if (typeof raw !== "string") continue;
+      const slug = raw.split("/").pop() ?? "";
+      if (!slug.startsWith("smtp_")) continue;
+      return {
+        sent: false,
+        to: typeof r.to === "string" ? r.to : "",
+        delivery_id: typeof r.delivery_id === "string" ? r.delivery_id : "",
+        status: "failed",
+        error_code: slug,
+      };
+    }
+  }
+  return null;
+}
 
 // -------- PET-specific endpoints --------
 

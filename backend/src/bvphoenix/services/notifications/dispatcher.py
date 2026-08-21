@@ -324,7 +324,13 @@ def _record_outcome(
         dispatch.sent_at = datetime.now(UTC)
         dispatch.provider_message_id = result.provider_message_id
         dispatch.error_code = None
+        dispatch.error_detail = None
         return "sent"
+    # ``error_detail`` has been on NotificationResult all along and is
+    # populated in five places by the webhook notifier, but no column
+    # received it, so every failure collapsed to an opaque code. It is
+    # operator-only and never echoed on the public API.
+    dispatch.error_detail = result.error_detail
     if result.retriable and dispatch.attempt_count < MAX_RETRIES:
         dispatch.status = "pending"
         dispatch.error_code = result.error_code

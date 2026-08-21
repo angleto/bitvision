@@ -1325,6 +1325,35 @@
     "revokeTitle": "Revoke this link (irreversible)",
     "revokeConfirm": "Really revoke this link? This is irreversible."
   },
+  "emailDelivery": {
+    "queuedTitle": "Delivery not confirmed yet",
+    "queuedBody": "The email to {to} has not gone out yet: the mail server did not answer. Delivery will be retried automatically.",
+    "queuedHint": "Do not treat it as sent. If you need certainty, copy the link and send it yourself from your mail client.",
+    "failedTitle": "Email NOT sent",
+    "failedBody": "No email was delivered to {to}.",
+    "failedHint": "The link is still valid: copy it and send it from your mail client, or retry once the mail server configuration is fixed.",
+    "reasonLabel": "Reason",
+    "codeLabel": "Technical code: {code}",
+    "deliveryIdLabel": "Delivery id: {id}",
+    "retry": "Retry send",
+    "retrying": "Retrying…",
+    "genericError": "Send failed.",
+    "reason": {
+      "smtp_connect_timeout": "The mail server did not answer within the timeout (connection timed out).",
+      "smtp_unreachable": "The mail server is unreachable from the platform: network or SMTP port blocked.",
+      "smtp_connect_failed": "The mail server refused the connection.",
+      "smtp_dns_failure": "The mail server hostname could not be resolved (DNS failure).",
+      "smtp_auth_failed": "SMTP credentials rejected: authentication to the mail server failed.",
+      "smtp_recipient_refused": "The mail server rejected the recipient address. Check that it is correct.",
+      "smtp_sender_refused": "The mail server rejected the configured sender address.",
+      "smtp_tls_failed": "Could not establish the encrypted (TLS) connection to the mail server.",
+      "smtp_insecure_auth_refused": "Blocked for safety: the platform will not send credentials over an unencrypted connection.",
+      "smtp_server_disconnected": "The mail server closed the connection mid-send.",
+      "smtp_not_configured": "Email sending is not configured on this installation.",
+      "smtp_unknown_error": "Unexpected mail server error while sending.",
+      "unknown": "Cause not identified: check the server logs."
+    }
+  },
   "resendShare": {
     "title": "Resend email to recipient",
     "subtitle": "Same link, new email. You can add a personal note; the password (if any) is NOT included, for security.",

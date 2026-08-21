@@ -82,8 +82,8 @@ class EmailNotifier(Notifier):
             ),
             list_unsubscribe_post_url=payload.opt_out_url if payload.opt_out_url else None,
         )
-        ok = send_email_sync(message)
-        if ok:
+        outcome = send_email_sync(message)
+        if outcome.ok:
             return NotificationResult(
                 success=True,
                 # send_email_sync doesn't surface the SMTP server's
@@ -93,14 +93,15 @@ class EmailNotifier(Notifier):
                 # the TEM HTTP API (returns a UUID).
                 provider_message_id=None,
             )
-        # send_email_sync logs the exception internally; we don't have
-        # a structured error code to attach. Treat as retriable —
-        # SMTP failures are typically transient, and the safety-net
-        # cron will re-fire the dispatch on the next tick.
+        # Propagate the transport's own discrimination instead of
+        # collapsing everything into one opaque code: a blocked port
+        # and an expired API token need different operator responses,
+        # and only the former is worth retrying.
         return NotificationResult(
             success=False,
-            error_code="smtp_send_failed",
-            retriable=True,
+            error_code=outcome.error_code,
+            error_detail=outcome.error_detail,
+            retriable=outcome.retriable,
         )
 
 

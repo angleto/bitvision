@@ -52,6 +52,11 @@ from bvphoenix.db.models.document_catalog import (
 from bvphoenix.db.models.document_entities import DocumentEntities
 from bvphoenix.db.models.document_ocr import DocumentOCR
 from bvphoenix.db.models.duc import DUCMember, DUCRequest, DUCVote
+from bvphoenix.db.models.email_delivery import (
+    EMAIL_DELIVERY_PURPOSES,
+    EMAIL_DELIVERY_STATUSES,
+    EmailDelivery,
+)
 from bvphoenix.db.models.embedding_errors import EmbeddingError
 from bvphoenix.db.models.embedding_models import EmbeddingModel
 from bvphoenix.db.models.embeddings import Embedding
@@ -213,7 +218,9 @@ __all__ = [
     "CONTENT_DOCUMENT_LINK_ROLES",
     "CORPUS_KINDS",
     "DEFAULT_CHUNKER_VERSION",
+    "EMAIL_DELIVERY_PURPOSES",
     "EMAIL_DELIVERY_STATES",
+    "EMAIL_DELIVERY_STATUSES",
     "INBOX_SOURCE_CHANNELS",
     "LLM_PROVIDERS",
     "LLM_TIER_HINTS",
@@ -275,6 +282,7 @@ __all__ = [
     "DocumentOCR",
     "DocumentProvenance",
     "DocumentStudyLink",
+    "EmailDelivery",
     "EmailVerificationToken",
     "Embedding",
     "EmbeddingError",

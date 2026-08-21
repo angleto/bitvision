@@ -417,15 +417,38 @@ class Settings(BaseSettings):
     # SMTP / email sender. ``smtp_host`` empty means dev mode: messages
     # are appended to logs/dev_emails.eml and printed to stdout.
     smtp_host: str = Field(default="")
+    # 587 is the RFC 6409 submission port and the right generic default.
+    # Note for Scaleway deployments: Scaleway blackholes outbound 25 /
+    # 465 / 587 from Instances and Kapsule nodes, so a relay there must
+    # be pointed at TEM's alternates (2587 STARTTLS, 2465 implicit TLS).
+    # A blocked port does not refuse the connection, it drops it, so the
+    # only symptom is ``smtp_connect_timeout`` after the full timeout.
     smtp_port: int = Field(default=587)
     smtp_username: str = Field(default="")
     smtp_password: str = Field(default="")
+    # Deprecated in favour of ``smtp_security``; still read so an
+    # existing BVP_SMTP_USE_TLS in a ConfigMap keeps working across the
+    # rollout. ``smtp_security`` wins whenever it is set explicitly.
     smtp_use_tls: bool = Field(default=True)
+    # "starttls"  — plaintext connect, then upgrade (ports 587 / 2587)
+    # "implicit"  — TLS from the first byte, smtplib.SMTP_SSL (465 / 2465)
+    # "none"      — no encryption; refuses to send credentials
+    # Empty means "derive from the deprecated smtp_use_tls flag".
+    smtp_security: Literal["", "starttls", "implicit", "none"] = Field(default="")
+    # Per-resolved-address connect timeout, not a total budget: a host
+    # with an A and a AAAA record can burn 2x this before giving up.
+    smtp_timeout_seconds: int = Field(default=15, ge=1, le=120)
     smtp_from_address: str = Field(default="no-reply@bitvision.local")
     smtp_from_name: str = Field(default="bitvision phoenix")
-    # Email delivery. Provider ``stub`` just logs messages; real SMTP /
-    # SES wiring can land later without touching call sites.
-    email_provider: str = Field(default="stub")
+    # Email delivery backend. ``stub`` / ``log`` force the file+stdout
+    # dev sender even when a host is configured; empty (the default)
+    # means "use SMTP when a host is set, dev sender otherwise".
+    #
+    # The default is deliberately NOT "stub": with a short-circuit on
+    # stub, losing this one ConfigMap key would silently route 100% of
+    # production mail into a file inside an ephemeral pod while every
+    # layer still reported success.
+    email_provider: Literal["", "stub", "log", "smtp"] = Field(default="")
     email_from: str = Field(default="no-reply@bitvision.local")
     # Public origin used to build user-facing links in outbound emails
     # (e.g. the password-reset URL). Falls back to localhost in dev.
@@ -433,6 +456,18 @@ class Settings(BaseSettings):
     # Password-reset token lifetime (minutes). Short by design — the
     # email delivery path is lower-trust than a live session.
     password_reset_ttl_minutes: int = Field(default=15)
+
+    @property
+    def resolved_smtp_security(self) -> Literal["starttls", "implicit", "none"]:
+        """Effective transport security, honouring the legacy flag.
+
+        ``smtp_security`` is authoritative when set. Otherwise fall back
+        to the deprecated boolean so a deployment that only ever set
+        ``BVP_SMTP_USE_TLS`` keeps its current behaviour verbatim.
+        """
+        if self.smtp_security:
+            return self.smtp_security
+        return "starttls" if self.smtp_use_tls else "none"
 
     # ---- Notifications dispatcher (sprint C) ---------------------------
     # Global kill-switch. Set false to stop the worker from firing any

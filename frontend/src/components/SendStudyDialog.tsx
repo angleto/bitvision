@@ -24,12 +24,15 @@ import QRCode from "qrcode";
 import { useEffect, useMemo, useState } from "react";
 import { createPortal } from "react-dom";
 
+import EmailDeliveryNotice from "@/components/EmailDeliveryNotice";
 import {
   ApiError,
   type PatientContact,
   type ShareLink,
+  type ShareNotifyResult,
   foldersApi,
   patientsApi,
+  shareNotifyFailure,
   studiesApi,
 } from "@/lib/api";
 
@@ -130,6 +133,12 @@ export default function SendStudyDialog({
   const [error, setError] = useState<string | null>(null);
   const [generatedPassword, setGeneratedPassword] = useState<string | null>(null);
   const [success, setSuccess] = useState<string | null>(null);
+  // Real outcome of the email delivery (email mode only). The green
+  // "inviata a X" is now gated on ``status === "sent"``: a retriable
+  // failure (HTTP 202) and a permanent one (HTTP 502) render their own
+  // panel instead of a success the user cannot trust.
+  const [delivery, setDelivery] = useState<ShareNotifyResult | null>(null);
+  const [retryingNotify, setRetryingNotify] = useState(false);
   // Holds the ShareLink record after a successful create so the
   // post-submit view can offer "Copia di nuovo" + "Apri client mail"
   // without re-triggering the create flow. Set in handleSubmit.
@@ -170,6 +179,8 @@ export default function SendStudyDialog({
     if (open) {
       setError(null);
       setSuccess(null);
+      setDelivery(null);
+      setRetryingNotify(false);
       setGeneratedPassword(null);
       setCreatedLink(null);
       setCopyFlash(null);
@@ -316,6 +327,54 @@ export default function SendStudyDialog({
     window.location.href = buildMailtoUrl(link);
   }
 
+  /**
+   * Fire the notify endpoint and return the REAL delivery outcome.
+   *
+   * ``request`` throws ApiError on every non-2xx, so the HTTP 502
+   * "permanent SMTP failure" branch of the notify contract arrives as
+   * a rejection whose body is still the delivery envelope: we recover
+   * it and return it as a normal outcome. The HTTP 202 "queued for
+   * retry" branch is a 2xx and resolves directly with
+   * ``status === "queued"``. Anything that is not a delivery outcome
+   * (403, 404, network error) is re-thrown for the caller's generic
+   * error path.
+   */
+  async function sendNotification(linkId: string): Promise<ShareNotifyResult> {
+    // Pass the active UI locale so the backend renders the email body +
+    // subject in the same language the grantor was reading when they hit
+    // Send. Cookie + Accept-Language are fallbacks server-side; the
+    // explicit field wins so a user who toggled the LanguageSwitcher in
+    // this tab gets coherent copy.
+    const apiLocale = locale === "en" ? "en" : "it";
+    try {
+      return await studiesApi.notifyShare(linkId, customMessage.trim() || null, apiLocale);
+    } catch (e) {
+      const failure = shareNotifyFailure(e);
+      if (failure) return failure;
+      throw e;
+    }
+  }
+
+  /** Re-run the notification for an already created link (failed
+   *  delivery path). The share link itself is fine — only the email
+   *  did not go out — so we must not create a second link. */
+  async function handleRetryNotify() {
+    if (!createdLink) return;
+    setRetryingNotify(true);
+    setError(null);
+    try {
+      const result = await sendNotification(createdLink.id);
+      setDelivery(result);
+      setSuccess(
+        result.status === "sent" ? t("successSent", { to: result.to || recipientEmail }) : null,
+      );
+    } catch (e) {
+      setError(e instanceof ApiError ? t("errorGeneric", { message: e.message }) : String(e));
+    } finally {
+      setRetryingNotify(false);
+    }
+  }
+
   async function handleCopyAgain(link: ShareLink) {
     const ok = await copyLinkToClipboard(link.url);
     setCopyFlash(ok ? "copied" : "failed");
@@ -331,6 +390,7 @@ export default function SendStudyDialog({
     setBusy(true);
     setError(null);
     setSuccess(null);
+    setDelivery(null);
     setGeneratedPassword(null);
     setCreatedLink(null);
     try {
@@ -376,18 +436,15 @@ export default function SendStudyDialog({
       setCreatedLink(link);
 
       if (deliveryMode === "email") {
-        // Pass the active UI locale so the backend renders the email
-        // body + subject in the same language the grantor was reading
-        // when they hit Send. Cookie + Accept-Language are fallbacks
-        // server-side; the explicit field wins so a user who toggled
-        // the LanguageSwitcher in this tab gets coherent copy.
-        const apiLocale = locale === "en" ? "en" : "it";
-        const result = await studiesApi.notifyShare(
-          link.id,
-          customMessage.trim() || null,
-          apiLocale,
-        );
-        setSuccess(t("successSent", { to: result.to }));
+        // The share link exists at this point regardless of what the
+        // mail server does. Only claim "inviata" when the backend says
+        // the message actually left: queued / failed render their own
+        // panel (EmailDeliveryNotice) instead of the green success.
+        const result = await sendNotification(link.id);
+        setDelivery(result);
+        if (result.status === "sent") {
+          setSuccess(t("successSent", { to: result.to || recipientEmail }));
+        }
       } else {
         // Copy mode: write the absolute URL to clipboard, then
         // navigate to mailto: so the OS mail client opens with a
@@ -1017,6 +1074,18 @@ export default function SendStudyDialog({
             )}
           </div>
         )}
+        {/* Delivery truth panel: shown whenever the backend reported a
+            non-"sent" outcome for the email mode. The share link block
+            above stays visible so the user can copy the link and send
+            it by hand while the mail server is broken. */}
+        {delivery && delivery.status !== "sent" && (
+          <EmailDeliveryNotice
+            outcome={delivery}
+            to={recipientEmail}
+            onRetry={() => void handleRetryNotify()}
+            retrying={retryingNotify}
+          />
+        )}
         {error && (
           <p className="error" style={{ fontSize: "0.85rem" }}>
             {error}
@@ -1060,6 +1129,7 @@ export default function SendStudyDialog({
               onClick={() => {
                 setCreatedLink(null);
                 setSuccess(null);
+                setDelivery(null);
                 setGeneratedPassword(null);
                 setShowQr(false);
                 setQrDataUrl(null);

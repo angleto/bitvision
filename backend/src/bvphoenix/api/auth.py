@@ -15,8 +15,8 @@ mints a replacement. Login refuses unverified accounts when
 
 from __future__ import annotations
 
-import contextlib
 import hashlib
+import logging
 import secrets
 import uuid
 from datetime import UTC, datetime, timedelta
@@ -49,9 +49,18 @@ from bvphoenix.db.models.gdpr import REQUIRED_CONSENT_KINDS
 from bvphoenix.db.session import get_db
 from bvphoenix.middleware.audit_dependency import AuditDep
 from bvphoenix.services.email import (
+    EmailMessage,
     build_password_reset_email,
-    send_email,
-    send_verification_email,
+    build_verification_email,
+)
+from bvphoenix.services.email_delivery import (
+    attempt as attempt_delivery,
+)
+from bvphoenix.services.email_delivery import (
+    enqueue as enqueue_delivery,
+)
+from bvphoenix.services.email_delivery import (
+    register_builder as register_delivery_builder,
 )
 from bvphoenix.services.quota import (
     STORAGE_FREE_TIER_BYTES,
@@ -87,6 +96,8 @@ _reset_limiter = SlidingWindowRateLimiter(max_hits=10, window_seconds=60.0)
 # tests, the bvphoenix-import CLI, MCP integration tests) but the
 # frontend bundle no longer reads it. See docs/security-auth-cookies.md.
 SESSION_COOKIE_NAME = "bvp_session"
+
+logger = logging.getLogger(__name__)
 
 
 def _set_session_cookie(
@@ -194,6 +205,66 @@ def _build_verification_url(raw_token: str, settings: Settings) -> str:
     return f"{base}/verify-email?{urlencode({'token': raw_token})}"
 
 
+async def _run_delivery(delivery_id: uuid.UUID, message: EmailMessage) -> None:
+    """Attempt a queued delivery from a background task.
+
+    Opens its own session: the request's session is closed by the time
+    FastAPI runs background tasks. Never raises — a background task that
+    throws is logged by starlette and nothing else, and the ledger row
+    already records the failure for the drain cron to pick up.
+    """
+    from bvphoenix.db.session import SessionFactory
+
+    try:
+        async with SessionFactory() as db:
+            await attempt_delivery(db, delivery_id, message=message)
+            await db.commit()
+    except Exception:
+        logger.exception("ledger delivery %s could not be attempted", delivery_id)
+
+
+async def _rebuild_verification_email(db: AsyncSession, row) -> EmailMessage | None:
+    """Ledger builder for ``purpose='email_verification'``.
+
+    Mints a *fresh* token rather than replaying the original: the raw
+    value is never stored (only its hash), and a new one is harmless
+    since the token is single-use and scoped to the same account.
+
+    Returns ``None`` once the address is verified, so a retry that has
+    been overtaken by a successful verification parks instead of mailing
+    a link nobody needs.
+    """
+    if row.subject_id is None:
+        return None
+    settings = get_settings()
+    user = (
+        await db.execute(select(User).where(User.subject_id == row.subject_id))
+    ).scalar_one_or_none()
+    if user is None or user.email_verified_at is not None:
+        return None
+    raw_token = await _issue_verification_token(db, user, settings)
+    return build_verification_email(
+        to=user.email, token_url=_build_verification_url(raw_token, settings)
+    )
+
+
+async def _rebuild_password_reset_email(db: AsyncSession, row) -> EmailMessage | None:
+    """Ledger builder for ``purpose='password_reset'`` — deliberately none.
+
+    A reset token lives for ``password_reset_ttl_minutes`` (15 by
+    default). The ledger's backoff spans hours, so any message this
+    could rebuild would carry an already-expired link. Reset rows are
+    therefore enqueued with ``max_attempts=1``: the row exists so an
+    operator can *see* that resets are failing, not so they get retried.
+    The user simply requests another reset once the relay is back.
+    """
+    return None
+
+
+register_delivery_builder("email_verification", _rebuild_verification_email)
+register_delivery_builder("password_reset", _rebuild_password_reset_email)
+
+
 async def _issue_verification_token(db: AsyncSession, user: User, settings: Settings) -> str:
     """Mint a new one-shot verification token and persist its hash.
 
@@ -254,12 +325,25 @@ async def register(
         )
 
     raw_token = await _issue_verification_token(db, user, settings)
+    url = _build_verification_url(raw_token, settings)
+    verification_msg = build_verification_email(to=user.email, token_url=url)
+    # Queue in the same transaction as the token. With
+    # ``require_email_verification`` on, a signup whose email never
+    # arrives is a permanent lockout: ``email_verified_at`` has no other
+    # write path. The ledger turns a relay outage into a delayed
+    # verification instead of a dead account.
+    delivery = await enqueue_delivery(
+        db,
+        purpose="email_verification",
+        recipient_email=user.email,
+        subject_line=verification_msg.subject,
+        subject_id=user.subject_id,
+    )
     await db.commit()
 
-    url = _build_verification_url(raw_token, settings)
     # Dispatch in the background so a slow SMTP relay does not delay the
-    # HTTP response. ``send_verification_email`` swallows its own errors.
-    background_tasks.add_task(send_verification_email, user.email, url)
+    # HTTP response. The outcome lands on the ledger row either way.
+    background_tasks.add_task(_run_delivery, delivery.id, verification_msg)
 
     access_token: str | None = None
     if not settings.require_email_verification:
@@ -413,9 +497,17 @@ async def resend_verification(
     ).scalar_one_or_none()
     if user is not None and user.email_verified_at is None:
         raw_token = await _issue_verification_token(db, user, settings)
-        await db.commit()
         url = _build_verification_url(raw_token, settings)
-        background_tasks.add_task(send_verification_email, user.email, url)
+        verification_msg = build_verification_email(to=user.email, token_url=url)
+        delivery = await enqueue_delivery(
+            db,
+            purpose="email_verification",
+            recipient_email=user.email,
+            subject_line=verification_msg.subject,
+            subject_id=user.subject_id,
+        )
+        await db.commit()
+        background_tasks.add_task(_run_delivery, delivery.id, verification_msg)
     return {"status": "accepted"}
 
 
@@ -492,6 +584,7 @@ async def my_storage(
 async def forgot_password(
     body: ForgotPasswordIn,
     request: Request,
+    background_tasks: BackgroundTasks,
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> Response:
     """Issue a reset token for ``body.email`` and email it.
@@ -531,10 +624,26 @@ async def forgot_password(
             reset_url=reset_url,
             ttl_minutes=settings.password_reset_ttl_minutes,
         )
-        # Best-effort: email transport failure must not leak existence by
-        # flipping the response to 5xx.
-        with contextlib.suppress(Exception):
-            await send_email(message)
+        # max_attempts=1: the token expires in minutes, so a retry hours
+        # later would deliver a dead link. The row exists so a failing
+        # relay is *visible*, not so it is retried.
+        delivery = await enqueue_delivery(
+            db,
+            purpose="password_reset",
+            recipient_email=user.email,
+            subject_line=message.subject,
+            subject_id=user.subject_id,
+            max_attempts=1,
+        )
+        await db.commit()
+        # Deliver AFTER the response, not inside it. The response is a
+        # constant 204 so the body cannot leak whether the address has an
+        # account, but a synchronous send would leak it through timing:
+        # a known address would wait for the SMTP round trip (up to the
+        # full connect timeout against a dead relay) while an unknown one
+        # returned instantly. Handing it to a background task keeps the
+        # observable latency the same on both branches.
+        background_tasks.add_task(_run_delivery, delivery.id, message)
 
     return Response(status_code=status.HTTP_204_NO_CONTENT)
 

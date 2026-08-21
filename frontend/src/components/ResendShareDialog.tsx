@@ -18,47 +18,76 @@
 import { useLocale, useTranslations } from "next-intl";
 import { useEffect, useState } from "react";
 
+import EmailDeliveryNotice from "@/components/EmailDeliveryNotice";
 import NativeDialog from "@/components/NativeDialog";
-import { ApiError, type ShareLink, studiesApi } from "@/lib/api";
+import {
+  ApiError,
+  type ShareLink,
+  type ShareNotifyResult,
+  shareNotifyFailure,
+  studiesApi,
+} from "@/lib/api";
 
 interface Props {
   link: ShareLink;
   open: boolean;
   onClose: () => void;
-  /** Called after a successful send so the parent table can show a
-   *  toast / refresh state if needed. */
-  onSent?: (info: { sent: boolean; to: string }) => void;
+  /** Called once the backend reported a terminal delivery outcome
+   *  (sent, queued or failed) so the parent table can refresh. Read
+   *  ``info.status`` before claiming anything to the user: ``sent`` is
+   *  the only outcome where the message actually left the pod. */
+  onSent?: (info: ShareNotifyResult) => void;
 }
 
 export default function ResendShareDialog({ link, open, onClose, onSent }: Props) {
   const t = useTranslations("resendShare");
+  const td = useTranslations("emailDelivery");
   const locale = useLocale();
   const [customMessage, setCustomMessage] = useState("");
   const [emailLocale, setEmailLocale] = useState<"it" | "en">(locale === "en" ? "en" : "it");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [done, setDone] = useState<{ to: string } | null>(null);
+  // Real delivery outcome from the backend, not a "the request did not
+  // throw" proxy for it. ``null`` until the first submit resolves.
+  const [outcome, setOutcome] = useState<ShareNotifyResult | null>(null);
 
   useEffect(() => {
     if (!open) return;
     setCustomMessage("");
     setError(null);
-    setDone(null);
+    setOutcome(null);
   }, [open]);
 
   async function submit() {
     setBusy(true);
     setError(null);
+    setOutcome(null);
     try {
+      // HTTP 200 (sent) and HTTP 202 (queued for retry) both resolve
+      // here — the status field discriminates them.
       const out = await studiesApi.notifyShare(link.id, customMessage.trim() || null, emailLocale);
-      setDone({ to: out.to });
+      setOutcome(out);
       onSent?.(out);
     } catch (e) {
-      setError(e instanceof ApiError ? e.message : "send failed");
+      // HTTP 502 (permanent SMTP failure) reaches this branch because
+      // ``request`` throws on every non-2xx; the delivery envelope
+      // survives on ApiError.detail and carries the error_code.
+      const failure = shareNotifyFailure(e);
+      if (failure) {
+        setOutcome(failure);
+        onSent?.(failure);
+      } else {
+        setError(e instanceof ApiError ? e.message : td("genericError"));
+      }
     } finally {
       setBusy(false);
     }
   }
+
+  const sent = outcome?.status === "sent";
+  // The form stays mounted on a failed delivery so the Send button
+  // doubles as "retry" once the operator fixed the mail server.
+  const formVisible = !outcome || outcome.status === "failed";
 
   if (!link.recipient_email) {
     // Defensive: the parent only opens the dialog when the share has
@@ -96,7 +125,7 @@ export default function ResendShareDialog({ link, open, onClose, onSent }: Props
         <h2 style={{ marginTop: 0, fontSize: "1.05rem", marginBottom: "0.4rem" }}>{t("title")}</h2>
         <p style={{ marginTop: 0, fontSize: "0.85rem", opacity: 0.75 }}>{t("subtitle")}</p>
 
-        {!done && (
+        {formVisible && (
           <>
             <div
               style={{
@@ -210,7 +239,7 @@ export default function ResendShareDialog({ link, open, onClose, onSent }: Props
           </>
         )}
 
-        {done && (
+        {sent && outcome && (
           <p
             style={{
               fontSize: "0.9rem",
@@ -222,9 +251,13 @@ export default function ResendShareDialog({ link, open, onClose, onSent }: Props
               margin: "0.5rem 0",
             }}
           >
-            {t("sentTo", { to: done.to })}
+            {t("sentTo", { to: outcome.to || link.recipient_email || "" })}
           </p>
         )}
+
+        {/* queued (HTTP 202) and failed (HTTP 502): neutral / error
+            panel, never the green one. */}
+        {outcome && !sent && <EmailDeliveryNotice outcome={outcome} to={link.recipient_email} />}
 
         <footer
           style={{
@@ -235,9 +268,9 @@ export default function ResendShareDialog({ link, open, onClose, onSent }: Props
           }}
         >
           <button type="button" onClick={onClose} disabled={busy} className="ghost">
-            {done ? t("close") : t("cancel")}
+            {outcome && !formVisible ? t("close") : t("cancel")}
           </button>
-          {!done && (
+          {formVisible && (
             <button
               type="button"
               onClick={() => void submit()}

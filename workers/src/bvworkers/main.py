@@ -112,6 +112,18 @@ CRON_JOBS = [
     # (vs the jobs reaper's 5 min) is deliberate: a user may legitimately pause
     # mid-upload for minutes; append_chunk bumps updated_at so an actively
     # progressing upload is never reaped.
+    # Outbound email ledger drain. Rows land in ``email_deliveries``
+    # before their first send; when the relay is reachable that attempt
+    # succeeds inline and this cron finds nothing. It exists for the
+    # case that actually happened on 2026-07-31, when the SMTP port was
+    # blackholed and undelivered messages had nobody owning the retry.
+    # Offset by 2 minutes from the other crons so they don't contend on
+    # the same DB connection.
+    cron(
+        "bvworkers.tasks.drain_email_deliveries.drain_email_deliveries",
+        minute={2, 7, 12, 17, 22, 27, 32, 37, 42, 47, 52, 57},
+        run_at_startup=False,
+    ),
     cron(
         "bvworkers.tasks.cleanup_upload_sessions.cleanup_upload_sessions",
         minute={1, 6, 11, 16, 21, 26, 31, 36, 41, 46, 51, 56},

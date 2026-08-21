@@ -76,10 +76,15 @@ class ICSAttachmentNotifier(Notifier):
                 ("X-BV-Idempotency-Key", payload.idempotency_key),
             ),
         )
-        ok = send_email_sync(message)
-        if ok:
+        outcome = send_email_sync(message)
+        if outcome.ok:
             return NotificationResult(success=True)
-        return NotificationResult(success=False, error_code="ics_email_send_failed", retriable=True)
+        return NotificationResult(
+            success=False,
+            error_code=outcome.error_code,
+            error_detail=outcome.error_detail,
+            retriable=outcome.retriable,
+        )
 
 
 __all__ = ["ICSAttachmentNotifier"]

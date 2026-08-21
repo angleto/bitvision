@@ -14,7 +14,7 @@ import logging
 import secrets
 import uuid
 from datetime import UTC, datetime, timedelta
-from typing import Annotated, Any
+from typing import Annotated, Any, Literal
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Request, Response, status
 from fastapi.responses import StreamingResponse
@@ -33,6 +33,7 @@ from bvphoenix.auth.deps import set_session_cookie
 from bvphoenix.auth.tokens import decode_token, issue_access_token
 from bvphoenix.config import get_settings
 from bvphoenix.db.models import Document, Grant, ImagingStudy, Patient, ShareLink, User
+from bvphoenix.db.models.email_delivery import EmailDelivery
 from bvphoenix.db.models.sharing import PUBLIC_SUBJECT_ID, SHARE_LINK_MODES
 from bvphoenix.db.session import get_db
 from bvphoenix.middleware.audit_dependency import AuditDep
@@ -40,7 +41,22 @@ from bvphoenix.services.access_levels import (
     level_to_permissions,
     permissions_to_level,
 )
-from bvphoenix.services.email import build_share_invitation_email, send_email
+from bvphoenix.services.email import (
+    EmailMessage,
+    build_share_invitation_email,
+)
+from bvphoenix.services.email import (
+    normalize_locale as normalize_email_locale,
+)
+from bvphoenix.services.email_delivery import (
+    attempt as attempt_delivery,
+)
+from bvphoenix.services.email_delivery import (
+    enqueue as enqueue_delivery,
+)
+from bvphoenix.services.email_delivery import (
+    register_builder as register_delivery_builder,
+)
 from bvphoenix.services.grants import resolve_deidentify_default
 from bvphoenix.services.permissions import SHARED_DOWNLOAD
 from bvphoenix.services.rate_limit import (
@@ -1239,9 +1255,154 @@ class NotifyShareLinkIn(BaseModel):
     )
 
 
+async def _resolve_grantor_name(
+    db: AsyncSession,
+    subject_id: uuid.UUID | None,
+    lang: str,
+    *,
+    fallback: str | None = None,
+) -> str:
+    """Human-readable attribution for the invitation body.
+
+    Display name lives on the Subject row (uniform across users and
+    service principals); fall back to the email for legacy / partial
+    accounts so the message is always attributable to someone.
+    """
+    from bvphoenix.db.models.principals import Subject
+
+    subj = None
+    if subject_id is not None:
+        subj = (
+            await db.execute(select(Subject).where(Subject.id == subject_id))
+        ).scalar_one_or_none()
+    generic = "a colleague" if lang == "en" else "un collega"
+    return (subj.display_name if subj else None) or fallback or generic
+
+
+async def _build_share_invitation(
+    db: AsyncSession,
+    link: ShareLink,
+    grant: Grant,
+    *,
+    locale: str | None,
+    custom_message: str | None,
+    grantor_name: str,
+) -> EmailMessage:
+    """Render the invitation for ``link``.
+
+    Extracted from the endpoint so the delivery ledger can rebuild the
+    message on a retry instead of storing the rendered body. Rebuilding
+    also means a replay reflects the link's *current* state (expiry,
+    de-identification flag) rather than a stale snapshot.
+    """
+    settings = get_settings()
+    base_url = (settings.public_frontend_url or "").rstrip("/")
+    # Same canonical landing as ``_link_out.url`` — emails the
+    # branded ``/info`` page so the recipient sees the privacy
+    # banner + cached download CTA instead of the bare verify form.
+    landing_url = (
+        f"{base_url}/shared/{link.token}/info" if base_url else f"/shared/{link.token}/info"
+    )
+    lang = normalize_email_locale(locale)
+
+    # Compose study summary. We resolve the resource the grant points
+    # at — for studies, study_description + modalities; for fascicolo
+    # shares, the patient pseudonym.
+    study_summary = "shared study" if lang == "en" else "studio condiviso"
+    if grant.resource_kind == "study":
+        study = (
+            await db.execute(select(ImagingStudy).where(ImagingStudy.id == grant.resource_id))
+        ).scalar_one_or_none()
+        if study is not None:
+            modalities = ", ".join(study.modalities or []) or "—"
+            label = study.study_description or study.study_instance_uid
+            unknown_date = "date unknown" if lang == "en" else "data ignota"
+            date = str(study.study_date) if study.study_date else unknown_date
+            study_summary = f"{label} · {modalities} · {date}"
+    elif grant.resource_kind == "patient":
+        # Patient-scoped (fascicolo) shares: don't leak the real name.
+        # The display_name already respects the share's deidentify
+        # flag at the persistence layer for shared grantees.
+        study_summary = "patient health record" if lang == "en" else "fascicolo paziente"
+
+    if grant.valid_until:
+        expires_label = grant.valid_until.strftime("%Y-%m-%d %H:%M UTC")
+    else:
+        expires_label = "no expiry" if lang == "en" else "nessuna scadenza"
+
+    return build_share_invitation_email(
+        to=link.recipient_email or "",
+        recipient_name=link.recipient_name,
+        grantor_name=grantor_name,
+        study_summary=study_summary,
+        landing_url=landing_url,
+        expires_label=expires_label,
+        deidentified=bool(grant.deidentify),
+        autogen_password=None,  # never re-emit; OOB only
+        custom_message=custom_message,
+        locale=locale,
+    )
+
+
+async def _rebuild_share_invitation(db: AsyncSession, row: EmailDelivery) -> EmailMessage | None:
+    """Ledger builder for ``purpose='share_invitation'``.
+
+    Returns ``None`` when the link is gone or revoked, which parks the
+    row as ``dead_letter`` instead of retrying a dead invitation.
+
+    Known limitation, deliberate: the grantor's optional ``custom_message``
+    is NOT reproduced. It is free text that may carry clinical context,
+    and the ledger's no-PHI invariant is worth more than reproducing an
+    intro line on the rare retry path. The standard invitation is
+    complete and actionable without it.
+    """
+    if row.share_link_id is None:
+        return None
+    link = (
+        await db.execute(select(ShareLink).where(ShareLink.id == row.share_link_id))
+    ).scalar_one_or_none()
+    if link is None or not link.recipient_email:
+        return None
+    grant = (await db.execute(select(Grant).where(Grant.id == link.grant_id))).scalar_one_or_none()
+    if grant is None or grant.revoked_at is not None:
+        return None
+    lang = normalize_email_locale(row.locale)
+    grantor_name = await _resolve_grantor_name(db, grant.grantor_subject_id, lang)
+    return await _build_share_invitation(
+        db,
+        link,
+        grant,
+        locale=row.locale,
+        custom_message=None,
+        grantor_name=grantor_name,
+    )
+
+
+register_delivery_builder("share_invitation", _rebuild_share_invitation)
+
+
 class NotifyShareLinkOut(BaseModel):
+    """Truthful outcome of a notify attempt.
+
+    ``sent`` used to be hard-coded ``True``: the field existed but no
+    code path could set it to ``False``, so a grantor was told the
+    consultant had been emailed even when nothing left the pod. It is
+    now an observation, and ``status`` distinguishes the two ways of
+    not-being-sent, which need different responses from the caller.
+    """
+
     sent: bool
     to: str
+    # Ledger row id — quotable at support time, and the handle for a
+    # manual requeue.
+    delivery_id: str
+    # "sent"   — the relay accepted it
+    # "queued" — failed on a retriable error; the ledger will retry
+    # "failed" — refused in a way no retry will fix
+    status: Literal["sent", "queued", "failed"]
+    # Discriminated transport code (services/email.py ERROR_*), so the
+    # UI can explain a bad address differently from a dead relay.
+    error_code: str | None = None
 
 
 @router.post(
@@ -1252,6 +1413,7 @@ class NotifyShareLinkOut(BaseModel):
 @limiter.limit(SHARE_NOTIFY_LIMIT)
 async def notify_share_link(
     request: Request,
+    response: Response,
     link_id: uuid.UUID,
     body: NotifyShareLinkIn,
     db: Annotated[AsyncSession, Depends(get_db)],
@@ -1284,75 +1446,48 @@ async def notify_share_link(
             detail="share link has no recipient_email; set it via PATCH first",
         )
 
-    settings = get_settings()
-    base_url = (settings.public_frontend_url or "").rstrip("/")
-    # Same canonical landing as ``_link_out.url`` — emails the
-    # branded ``/info`` page so the recipient sees the privacy
-    # banner + cached download CTA instead of the bare verify form.
-    landing_url = (
-        f"{base_url}/shared/{link.token}/info" if base_url else f"/shared/{link.token}/info"
-    )
-
-    # Pre-compute the locale here so the study summary + expires
-    # label can also be localised (the email body builder takes
-    # ``locale`` separately but the values it interpolates need to
-    # be in the same language).
+    # The locale drives the study summary and the expiry label as well
+    # as the template, so it is resolved once and threaded through.
     cookie_locale = request.cookies.get("BVP_LOCALE")
     accept_lang = request.headers.get("accept-language")
     chosen_locale = body.locale or cookie_locale or accept_lang
-    from bvphoenix.services.email import _normalize_locale as _norm_locale
-
-    lang = _norm_locale(chosen_locale)
-
-    # Compose study summary. We resolve the resource the grant points
-    # at — for studies, study_description + modalities; for fascicolo
-    # shares, the patient pseudonym.
-    study_summary = "shared study" if lang == "en" else "studio condiviso"
-    if grant.resource_kind == "study":
-        study = (
-            await db.execute(select(ImagingStudy).where(ImagingStudy.id == grant.resource_id))
-        ).scalar_one_or_none()
-        if study is not None:
-            modalities = ", ".join(study.modalities or []) or "—"
-            label = study.study_description or study.study_instance_uid
-            unknown_date = "date unknown" if lang == "en" else "data ignota"
-            date = str(study.study_date) if study.study_date else unknown_date
-            study_summary = f"{label} · {modalities} · {date}"
-    elif grant.resource_kind == "patient":
-        # Patient-scoped (fascicolo) shares: don't leak the real name.
-        # The display_name already respects the share's deidentify
-        # flag at the persistence layer for shared grantees.
-        study_summary = "patient health record" if lang == "en" else "fascicolo paziente"
-
-    if grant.valid_until:
-        expires_label = grant.valid_until.strftime("%Y-%m-%d %H:%M UTC")
-    else:
-        expires_label = "no expiry" if lang == "en" else "nessuna scadenza"
-    # Display name lives on the Subject row (uniform across users +
-    # service principals); fall back to email for legacy / partial
-    # accounts so the email is always attributable.
-    from bvphoenix.db.models.principals import Subject
-
-    subj = (
-        await db.execute(select(Subject).where(Subject.id == user.subject_id))
-    ).scalar_one_or_none()
-    grantor_fallback = "a colleague" if lang == "en" else "un collega"
-    grantor_name = (subj.display_name if subj else None) or user.email or grantor_fallback
-    msg = build_share_invitation_email(
-        to=link.recipient_email,
-        recipient_name=link.recipient_name,
-        grantor_name=grantor_name,
-        study_summary=study_summary,
-        landing_url=landing_url,
-        expires_label=expires_label,
-        deidentified=bool(grant.deidentify),
-        autogen_password=None,  # never re-emit; OOB only
-        custom_message=body.custom_message,
+    lang = normalize_email_locale(chosen_locale)
+    grantor_name = await _resolve_grantor_name(db, user.subject_id, lang, fallback=user.email)
+    msg = await _build_share_invitation(
+        db,
+        link,
+        grant,
         locale=chosen_locale,
+        custom_message=body.custom_message,
+        grantor_name=grantor_name,
     )
-    await send_email(msg)
+    # Persist the intent BEFORE attempting delivery, so a failure is a
+    # queued row an operator can inspect and replay rather than a log
+    # line in a pod that rotates.
+    delivery = await enqueue_delivery(
+        db,
+        purpose="share_invitation",
+        recipient_email=link.recipient_email,
+        subject_line=msg.subject,
+        locale=lang,
+        share_link_id=link.id,
+    )
+    outcome = await attempt_delivery(db, delivery.id, message=msg)
+
+    if outcome.ok:
+        delivery_status: Literal["sent", "queued", "failed"] = "sent"
+    elif outcome.retriable:
+        delivery_status = "queued"
+    else:
+        delivery_status = "failed"
+
+    # The audit row records what happened, not what we hoped. Writing
+    # ``share_email_sent`` unconditionally is how three undelivered
+    # messages on 2026-07-31 acquired durable attestations of delivery;
+    # the chain documented below (share_create -> share_email_sent ->
+    # share_access) is only evidence if the middle link is earned.
     await audit.log(
-        action="share_email_sent",
+        action="share_email_sent" if outcome.ok else "share_email_failed",
         actor_subject_id=user.subject_id,
         resource_kind=grant.resource_kind,
         resource_id=grant.resource_id,
@@ -1361,9 +1496,29 @@ async def notify_share_link(
             "link_id": str(link.id),
             "to": link.recipient_email,
             "deidentified": bool(grant.deidentify),
+            "delivery_id": str(delivery.id),
+            "delivery_status": delivery_status,
+            # error_code only; error_detail names hosts and ports and
+            # stays server-side.
+            "error_code": outcome.error_code,
         },
     )
-    return NotifyShareLinkOut(sent=True, to=link.recipient_email)
+
+    # 202 for "we own it and will retry", 502 for "the relay refused it
+    # and retrying will not help". Both carry the same body so the
+    # client renders one branch off ``status``.
+    if delivery_status == "queued":
+        response.status_code = status.HTTP_202_ACCEPTED
+    elif delivery_status == "failed":
+        response.status_code = status.HTTP_502_BAD_GATEWAY
+
+    return NotifyShareLinkOut(
+        sent=outcome.ok,
+        to=link.recipient_email,
+        delivery_id=str(delivery.id),
+        status=delivery_status,
+        error_code=outcome.error_code,
+    )
 
 
 class ClaimShareLinkIn(BaseModel):

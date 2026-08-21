@@ -52,6 +52,7 @@ from sqlalchemy import (
     Index,
     Integer,
     String,
+    Text,
     UniqueConstraint,
     func,
     text,
@@ -149,6 +150,11 @@ class NotificationDispatch(Base):
     # storage-isolation memo applies to outbound endpoints too).
     provider_message_id: Mapped[str | None] = mapped_column(String(255))
     error_code: Mapped[str | None] = mapped_column(String(64))
+    # Operator-facing expansion of ``error_code`` (host, port, resolved
+    # addresses, server reply). NotificationResult has carried this
+    # field all along but nothing persisted it, so every failure
+    # collapsed to an opaque code. Never echoed on the public API.
+    error_detail: Mapped[str | None] = mapped_column(Text)
     # Who scheduled the dispatch — typically the human / agent that
     # created or last edited the source event / task.
     author_kind: Mapped[str] = mapped_column(String(16), nullable=False)
