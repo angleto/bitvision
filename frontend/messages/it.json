@@ -1325,6 +1325,35 @@
     "revokeTitle": "Revoca questo link (azione irreversibile)",
     "revokeConfirm": "Vuoi davvero revocare questo link? L'azione è irreversibile."
   },
+  "emailDelivery": {
+    "queuedTitle": "Consegna non ancora confermata",
+    "queuedBody": "L'email per {to} non è ancora partita: il server di posta non ha risposto. La consegna verrà riprovata automaticamente.",
+    "queuedHint": "Non considerarla inviata. Se ti serve la certezza, copia il link e invialo tu con il tuo client di posta.",
+    "failedTitle": "Email NON inviata",
+    "failedBody": "Nessuna email è stata consegnata a {to}.",
+    "failedHint": "Il link resta valido: copialo e invialo con il tuo client di posta, oppure riprova dopo aver corretto la configurazione del server di posta.",
+    "reasonLabel": "Motivo",
+    "codeLabel": "Codice tecnico: {code}",
+    "deliveryIdLabel": "ID consegna: {id}",
+    "retry": "Riprova invio",
+    "retrying": "Nuovo tentativo…",
+    "genericError": "Invio non riuscito.",
+    "reason": {
+      "smtp_connect_timeout": "Il server di posta non ha risposto entro il tempo massimo (connessione scaduta).",
+      "smtp_unreachable": "Il server di posta non è raggiungibile dalla piattaforma: rete o porta SMTP bloccata.",
+      "smtp_connect_failed": "Il server di posta ha rifiutato la connessione.",
+      "smtp_dns_failure": "Il nome del server di posta non è risolvibile (errore DNS).",
+      "smtp_auth_failed": "Credenziali SMTP rifiutate: autenticazione al server di posta fallita.",
+      "smtp_recipient_refused": "Il server di posta ha rifiutato l'indirizzo del destinatario. Controlla che sia corretto.",
+      "smtp_sender_refused": "Il server di posta ha rifiutato l'indirizzo del mittente configurato.",
+      "smtp_tls_failed": "Non è stato possibile stabilire la connessione cifrata (TLS) con il server di posta.",
+      "smtp_insecure_auth_refused": "Invio bloccato per sicurezza: la piattaforma non invia le credenziali su una connessione non cifrata.",
+      "smtp_server_disconnected": "Il server di posta ha chiuso la connessione durante l'invio.",
+      "smtp_not_configured": "L'invio email non è configurato su questa installazione.",
+      "smtp_unknown_error": "Errore imprevisto del server di posta durante l'invio.",
+      "unknown": "Causa non identificata: controlla i log del server."
+    }
+  },
   "resendShare": {
     "title": "Re-invia email al destinatario",
     "subtitle": "Stesso link, nuova email. Puoi aggiungere un messaggio personale; la password (se presente) NON viene inclusa per sicurezza.",

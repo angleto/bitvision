@@ -20,6 +20,7 @@ from bvworkers.tasks.dispatch_notification import (
     dispatch_notification,
     notification_safety_net,
 )
+from bvworkers.tasks.drain_email_deliveries import drain_email_deliveries
 from bvworkers.tasks.embed_bge_m3 import embed_bge_m3_all, embed_bge_m3_dense
 from bvworkers.tasks.embed_series import embed_series
 from bvworkers.tasks.embed_text import embed_text_target
@@ -92,6 +93,7 @@ FUNCTIONS = [
     propagate_lesion,
     dispatch_notification,
     notification_safety_net,
+    drain_email_deliveries,
     run_review_checks,
     process_inbound_email,
     promote_inbox_item,
