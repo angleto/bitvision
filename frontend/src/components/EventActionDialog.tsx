@@ -9,11 +9,12 @@
 // One component, no duplication.
 
 import { useTranslations } from "next-intl";
-import { useRef, useState } from "react";
+import { useId, useRef, useState } from "react";
 
-import { ApiError } from "@/lib/api";
 import type { ClinicalEvent } from "@/lib/api_records";
 import { calendarApi, newIdempotencyKey } from "@/lib/calendar_api";
+import { nowLocalInputValue, toLocalInputValue, validateAmend } from "@/lib/event_dates";
+import { describeEventError } from "@/lib/event_errors";
 
 export type ActionKind = "confirm" | "reschedule" | "complete" | "cancel" | "markMissed";
 
@@ -28,21 +29,42 @@ export default function EventActionDialog({ event, action, onClose, onSuccess }:
   const t = useTranslations("eventActions");
   const [reason, setReason] = useState("");
   const [newPlannedStartAt, setNewPlannedStartAt] = useState(
-    toLocalInputValue(event.planned_start_at) || toLocalInputValue(new Date().toISOString()),
+    toLocalInputValue(event.planned_start_at) || nowLocalInputValue(),
   );
   const [newPlannedEndAt, setNewPlannedEndAt] = useState("");
-  const [actualStartAt, setActualStartAt] = useState(toLocalInputValue(new Date().toISOString()));
+  // Seed the execution time from the SCHEDULED time, not from now.
+  // Seeding it with ``new Date()`` is what stamped the insertion moment
+  // as the clinical fact: a visit booked for Tuesday 09:00 and recorded
+  // on Thursday evening was filed as happening Thursday evening.
+  // ``max`` + the guard in submit() keep it out of the future; correcting
+  // it afterwards is the amend-time endpoint's job.
+  const [actualStartAt, setActualStartAt] = useState(
+    toLocalInputValue(event.planned_start_at) || nowLocalInputValue(),
+  );
   const [narrative, setNarrative] = useState("");
   const [note, setNote] = useState("");
-  const [confirmedAt, setConfirmedAt] = useState(toLocalInputValue(new Date().toISOString()));
+  const [confirmedAt, setConfirmedAt] = useState(nowLocalInputValue());
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   // Drag-out protection: mousedown must originate on backdrop for
   // the click to count as a dismissal.
   const mouseDownOnBackdrop = useRef(false);
+  const actualStartId = useId();
+  const errorId = useId();
+
+  // ``actual_start_at`` records something that already happened, so the
+  // same rule the amend-time endpoint enforces applies here.
+  const actualStartError =
+    action === "complete"
+      ? (validateAmend({ family: "actual", start: actualStartAt }).errorKey ?? null)
+      : null;
 
   async function submit(): Promise<void> {
     if (busy) return;
+    if (actualStartError) {
+      setError(t(actualStartError));
+      return;
+    }
     setBusy(true);
     setError(null);
     const idempotencyKey = newIdempotencyKey();
@@ -102,13 +124,11 @@ export default function EventActionDialog({ event, action, onClose, onSuccess }:
         onSuccess();
       }
     } catch (e) {
-      setError(
-        e instanceof ApiError
-          ? `${e.status}: ${describeDetail(e.detail)}`
-          : e instanceof Error
-            ? e.message
-            : "error",
-      );
+      // Same localiser the edit and plan dialogs use: these transition
+      // endpoints answer with the same structured ``code`` bodies through the
+      // same problem-details handler, and the owner of the record reads
+      // Italian. The server's English prose stays a last resort.
+      setError(describeEventError(e, t));
     } finally {
       setBusy(false);
     }
@@ -143,6 +163,7 @@ export default function EventActionDialog({ event, action, onClose, onSuccess }:
         style={{
           width: "min(440px, 95%)",
           background: "var(--bv-card-bg, #fff)",
+          color: "var(--bv-fg)",
           borderRadius: 8,
           padding: "1rem",
         }}
@@ -200,13 +221,18 @@ export default function EventActionDialog({ event, action, onClose, onSuccess }:
             <>
               <Field label={t("actualStart")}>
                 <input
+                  id={actualStartId}
                   type="datetime-local"
                   required
                   value={actualStartAt}
+                  max={nowLocalInputValue()}
                   onChange={(e) => setActualStartAt(e.target.value)}
+                  aria-invalid={actualStartError ? true : undefined}
+                  aria-describedby={actualStartError ? errorId : undefined}
                   style={inputStyle}
                 />
               </Field>
+              <p style={hintStyle}>{t("actualStartHint")}</p>
               <Field label={t("narrativeOptional")}>
                 <textarea
                   rows={3}
@@ -240,12 +266,21 @@ export default function EventActionDialog({ event, action, onClose, onSuccess }:
               />
             </Field>
           )}
-          {error && <p style={{ color: "var(--bv-danger, #c00)" }}>{error}</p>}
+          {actualStartError && !error && (
+            <p id={errorId} role="alert" style={inlineError}>
+              {t(actualStartError)}
+            </p>
+          )}
+          {error && (
+            <p id={errorId} role="alert" style={inlineError}>
+              {error}
+            </p>
+          )}
           <div style={{ display: "flex", justifyContent: "flex-end", gap: 8 }}>
             <button type="button" className="ghost" onClick={onClose} disabled={busy}>
               {t("cancelDialog")}
             </button>
-            <button type="submit" disabled={busy}>
+            <button type="submit" disabled={busy || actualStartError !== null}>
               {busy ? "…" : t(`${action}Submit`)}
             </button>
           </div>
@@ -281,23 +316,20 @@ const inputStyle = {
   width: "100%",
 } as const;
 
-function toLocalInputValue(iso: string | null | undefined): string {
-  if (!iso) return "";
-  const d = new Date(iso);
-  if (Number.isNaN(d.getTime())) return "";
-  // Build a yyyy-mm-ddThh:mm string in local time (the format
-  // expected by <input type="datetime-local">).
-  const pad = (n: number): string => String(n).padStart(2, "0");
-  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
-}
+const hintStyle = {
+  fontSize: "0.72rem",
+  color: "var(--bv-fg-soft)",
+  margin: "-0.2rem 0 0",
+} as const;
 
-function describeDetail(detail: unknown): string {
-  if (typeof detail === "string") return detail;
-  if (detail && typeof detail === "object") {
-    const d = detail as { detail?: { message?: string }; message?: string };
-    if (d.detail?.message) return d.detail.message;
-    if (d.message) return d.message;
-    return JSON.stringify(detail);
-  }
-  return String(detail);
-}
+// Explicit fg + bg: a bare colour on an inherited background is the
+// project's recurring "unreadable in light mode" bug.
+const inlineError = {
+  color: "var(--bv-danger)",
+  background: "var(--bv-danger-soft)",
+  border: "1px solid var(--bv-danger)",
+  borderRadius: 6,
+  padding: "0.35rem 0.5rem",
+  fontSize: "0.8rem",
+  margin: 0,
+} as const;

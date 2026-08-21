@@ -13,7 +13,9 @@ from __future__ import annotations
 import os
 import uuid
 from collections.abc import AsyncIterator, Iterator
+from contextlib import asynccontextmanager
 from datetime import UTC, datetime, timedelta
+from typing import TYPE_CHECKING
 
 import numpy as np
 import pytest
@@ -35,6 +37,9 @@ from bvphoenix.db.models import (
 from bvphoenix.db.models.principals import Subject
 from bvphoenix.db.session import SessionFactory
 from bvphoenix.services.rate_limit import limiter as _app_limiter
+
+if TYPE_CHECKING:  # pragma: no cover - typing only
+    from httpx import AsyncClient
 
 
 @pytest.fixture(autouse=True)
@@ -86,7 +91,18 @@ def _have_db() -> bool:
         return False
 
 
-skip_if_no_db = pytest.mark.skipif(not _have_db(), reason="no Postgres available")
+_HAVE_DB = _have_db()
+
+# CI's ``backend-db-test`` job arms ``BVP_REQUIRE_DB=1``: there a
+# Postgres service IS up, so a probe miss (a slow runner, IPv6-first
+# resolution, a remapped port) must not turn the whole DB-backed gate
+# into a silent all-skipped green. With the flag set the tests RUN and
+# fail loudly on the connection instead of skipping; ``test_db_gate.py``
+# turns that into one readable failure. Without the flag (every local
+# run) the behaviour is unchanged: no Postgres, no DB tests.
+REQUIRE_DB = os.getenv("BVP_REQUIRE_DB") == "1"
+
+skip_if_no_db = pytest.mark.skipif(not _HAVE_DB and not REQUIRE_DB, reason="no Postgres available")
 
 
 def _have_s3() -> bool:
@@ -390,3 +406,131 @@ async def make_embedding(db_session: AsyncSession):
 
     yield _make
     # Embeddings cascade away when the series is deleted via the study teardown.
+
+
+@asynccontextmanager
+async def client_as(session: AsyncSession, user: User | None) -> AsyncIterator[AsyncClient]:
+    """Async client bound to the live FastAPI app, authenticated as ``user``.
+
+    ``test_collab_fixes.py`` grew a private ``_client_as`` for the same
+    job but never restores ``app.dependency_overrides``, so whichever
+    file ran first kept the app pinned to its own session for the rest
+    of the process. This version is a context manager and restores the
+    previous overrides on exit, which makes it safe to use from several
+    files in one run.
+
+    ``session`` is the test's own :class:`AsyncSession`, so a handler's
+    ``await db.commit()`` is visible to the assertions afterwards
+    without a second connection (and without racing the fixture's
+    rollback). Passing ``user=None`` yields an anonymous client whose
+    ``require_user`` raises 401.
+    """
+    from httpx import ASGITransport, AsyncClient
+
+    from bvphoenix.auth import optional_user, require_user
+    from bvphoenix.db.session import get_db
+    from bvphoenix.main import app
+
+    async def _db() -> AsyncIterator[AsyncSession]:
+        yield session
+
+    async def _usr() -> User:
+        if user is None:
+            from fastapi import HTTPException
+
+            raise HTTPException(status_code=401, detail="not authenticated")
+        return user
+
+    if user is not None:
+        # ``commit`` / ``rollback`` on the shared session expire every
+        # loaded attribute. The app reads ``user.is_admin`` from handler
+        # code, which runs on the event loop and NOT inside
+        # ``greenlet_spawn``, so a lazy reload there raises
+        # MissingGreenlet. Refreshing here (awaited, so the greenlet
+        # exists) hands the app a fully loaded instance.
+        await session.refresh(user)
+
+    previous = dict(app.dependency_overrides)
+    app.dependency_overrides[get_db] = _db
+    app.dependency_overrides[require_user] = _usr
+    app.dependency_overrides[optional_user] = _usr
+    try:
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+            yield client
+    finally:
+        app.dependency_overrides.clear()
+        app.dependency_overrides.update(previous)
+
+
+@asynccontextmanager
+async def client_as_bearer(session: AsyncSession, bearer: str) -> AsyncIterator[AsyncClient]:
+    """Async client that goes through the REAL auth chain.
+
+    :func:`client_as` overrides ``require_user`` / ``optional_user``,
+    which keeps ordinary tests short but bypasses everything that
+    populates ``request.state.is_agent`` — so a test built on it can
+    never tell a human write from an agent one, and an endpoint that
+    stamped ``author_kind='human'`` on every row would look correct.
+
+    This variant overrides only ``get_db`` and presents ``bearer`` in
+    the ``Authorization`` header, so ``bvphoenix.auth.deps`` resolves
+    the credential for real. Pass the plaintext per-assistant
+    ``client_secret`` (the modern MCP path) to obtain an agent context
+    carrying ``agent_assistant_id``; pass a user JWT for a human one.
+
+    Like :func:`client_as` it restores the previous overrides on exit,
+    so several files can use it in the same run.
+    """
+    from httpx import ASGITransport, AsyncClient
+
+    from bvphoenix.db.session import get_db
+    from bvphoenix.main import app
+
+    async def _db() -> AsyncIterator[AsyncSession]:
+        yield session
+
+    previous = dict(app.dependency_overrides)
+    app.dependency_overrides[get_db] = _db
+    try:
+        async with AsyncClient(
+            transport=ASGITransport(app=app),
+            base_url="http://test",
+            headers={"Authorization": f"Bearer {bearer}"},
+        ) as client:
+            yield client
+    finally:
+        app.dependency_overrides.clear()
+        app.dependency_overrides.update(previous)
+
+
+@asynccontextmanager
+async def public_client(session: AsyncSession) -> AsyncIterator[AsyncClient]:
+    """Anonymous client: ``optional_user`` resolves to ``None``.
+
+    Distinct from ``client_as(session, None)``, which makes
+    ``optional_user`` RAISE 401 — the right shape for asserting that a
+    ``require_user`` endpoint refuses anonymous callers, and the wrong
+    one for the public endpoints (``/api/shared/{token}/info`` and
+    friends) that are supposed to answer without a session.
+    """
+    from httpx import ASGITransport, AsyncClient
+
+    from bvphoenix.auth import optional_user
+    from bvphoenix.db.session import get_db
+    from bvphoenix.main import app
+
+    async def _db() -> AsyncIterator[AsyncSession]:
+        yield session
+
+    async def _anon() -> None:
+        return None
+
+    previous = dict(app.dependency_overrides)
+    app.dependency_overrides[get_db] = _db
+    app.dependency_overrides[optional_user] = _anon
+    try:
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+            yield client
+    finally:
+        app.dependency_overrides.clear()
+        app.dependency_overrides.update(previous)

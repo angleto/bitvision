@@ -1,16 +1,58 @@
 // Calendar feed + planning + transition API client.
 // Wraps the /api/patients/{pid}/calendar feed and the 5 transition
-// sub-resources (confirm / reschedule / complete / cancel / mark-missed)
-// plus the historical/planned event creator (POST /api/clinical-events).
+// sub-resources (confirm / reschedule / complete / cancel / mark-missed),
+// the time-correction sub-resource (amend-time), plus the
+// historical/planned event creator (POST /api/clinical-events).
 
 import { API_BASE_URL, ApiError, getStoredToken, request } from "@/lib/api";
 import type {
   CalendarFeed,
   ClinicalEvent,
   ClinicalEventAttachment,
+  ClinicalEventKind,
   EventDocument,
   EventStatus,
 } from "@/lib/api_records";
+
+/** The body of ``PATCH /api/clinical-events/{id}``.
+ *
+ *  Deliberately carries NO temporal key. Since migration 0047 the server
+ *  answers 422 {"code": "use_amend_time"} to ``event_date`` /
+ *  ``planned_start_at`` / ``planned_end_at`` / ``timezone`` on PATCH, because
+ *  a clinical date is an amendable fact that needs an audit row, not a
+ *  metadata field. Keeping them out of the type means a caller that tries
+ *  fails to compile instead of failing on the wire. */
+export interface EventMetadataPatch {
+  kind?: ClinicalEventKind;
+  title?: string;
+  narrative?: string | null;
+  body_part?: string | null;
+  code_loinc?: string | null;
+  code_snomed?: string | null;
+  location_struct?: Record<string, string | number | undefined> | null;
+  recurrence_rule?: string | null;
+  recurrence_exdates?: string[] | null;
+  reminder_offsets_minutes?: number[] | null;
+  meeting_url?: string | null;
+  links?: { label?: string; url: string }[] | null;
+}
+
+/** The body of ``POST /api/clinical-events/{id}/amend-time``.
+ *
+ *  Send only the anchor family that matches the event's status
+ *  (``planned_*`` for planned/confirmed/rescheduled/cancelled, ``actual_*``
+ *  for completed/missed); ``event_date`` is accepted only on a date-only row
+ *  whose anchor is NULL. ``reason`` is mandatory when the amendment touches
+ *  the actual_* family or ``event_date``. See ``@/lib/event_dates``. */
+export interface AmendEventTimePayload {
+  planned_start_at?: string | null;
+  planned_end_at?: string | null;
+  actual_start_at?: string | null;
+  actual_end_at?: string | null;
+  event_date?: string | null;
+  timezone?: string | null;
+  reason?: string;
+}
 
 export interface CalendarFeedFilters {
   from?: string; // YYYY-MM-DD inclusive
@@ -52,28 +94,21 @@ export const calendarApi = {
     return request<CalendarFeed>(`/api/patients/${patientId}/calendar${buildQuery(filters)}`);
   },
 
-  // Patch a single event's mutable metadata. Status transitions live
-  // on the dedicated sub-resources (confirmEvent, rescheduleEvent,
-  // ...); PATCH only adjusts title / narrative / planned_* / location /
-  // reminders / body_part / timezone. ``etag`` is sent as If-Match;
-  // the response carries a fresh ETag.
+  // Re-read one event, chiefly to recover from a 412: the etag the form
+  // started with is stale because somebody else (another tab, an MCP agent)
+  // wrote the row, and the user needs the current values, not a dead end.
+  async getEvent(eventId: string): Promise<ClinicalEvent> {
+    return request<ClinicalEvent>(`/api/clinical-events/${eventId}`);
+  },
+
+  // Patch a single event's mutable METADATA. Status transitions live on
+  // the dedicated sub-resources (confirmEvent, rescheduleEvent, ...) and
+  // clinical time lives on amendEventTime; PATCH adjusts title /
+  // narrative / kind / location / reminders / body_part / codes / links.
+  // ``etag`` is sent as If-Match; the response carries a fresh ETag.
   async patchEvent(
     eventId: string,
-    patch: {
-      kind?: string;
-      title?: string;
-      narrative?: string | null;
-      body_part?: string | null;
-      planned_start_at?: string | null;
-      planned_end_at?: string | null;
-      timezone?: string | null;
-      location_struct?: Record<string, string | number | undefined> | null;
-      reminder_offsets_minutes?: number[] | null;
-      event_date?: string | null;
-      meeting_url?: string | null;
-      links?: { label?: string; url: string }[] | null;
-      attachments?: { label?: string; url: string; mime?: string; size?: number }[] | null;
-    },
+    patch: EventMetadataPatch,
     init: { etag: string },
   ): Promise<ClinicalEvent> {
     const token = getStoredToken();
@@ -132,10 +167,12 @@ export const calendarApi = {
     });
   },
 
-  // Common request shape for the 5 FSM transitions.
+  // Common request shape for the 5 FSM transitions + the amend-time
+  // correction (same If-Match / Idempotency-Key / dry_run contract, even
+  // though amend-time is not a state change).
   async _transition(
     eventId: string,
-    verb: "confirm" | "reschedule" | "complete" | "cancel" | "mark-missed",
+    verb: "confirm" | "reschedule" | "complete" | "cancel" | "mark-missed" | "amend-time",
     body: Record<string, unknown>,
     init: { etag: string; idempotencyKey: string; dryRun?: boolean },
   ): Promise<{ event: ClinicalEvent; replacedEventId: string | null }> {
@@ -224,6 +261,28 @@ export const calendarApi = {
     init: { etag: string; idempotencyKey: string; dryRun?: boolean },
   ): Promise<ClinicalEvent> {
     const { event } = await this._transition(eventId, "mark-missed", payload, init);
+    return event;
+  },
+
+  // Correct the recorded clinical date/time WITHOUT moving the status.
+  // The only writer of clinical time after creation, and the only way to
+  // re-date a terminal row (completed / cancelled / rescheduled): an FSM
+  // transition would be wrong there, because nothing about the event's
+  // state changed, only our record of when it happened.
+  //
+  // The returned event carries a fresh ``etag``; a caller chaining a PATCH
+  // onto the amendment must use THAT one, not the etag it started with.
+  async amendEventTime(
+    eventId: string,
+    payload: AmendEventTimePayload,
+    init: { etag: string; idempotencyKey: string; dryRun?: boolean },
+  ): Promise<ClinicalEvent> {
+    const { event } = await this._transition(
+      eventId,
+      "amend-time",
+      payload as Record<string, unknown>,
+      init,
+    );
     return event;
   },
 

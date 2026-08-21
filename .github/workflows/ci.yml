@@ -58,6 +58,18 @@ jobs:
     # head`` — which also loads the seeded catalog via 0001) and runs the
     # DB-backed feature tests so a tagged release is gated on them.
     # Mirrors the ``search-eval`` service block.
+    #
+    # The four ``clinical_events`` files guard the event_date fix: the
+    # DB trigger (``fn_ce_derive_event_date``, migration 0047), the PATCH
+    # refusal that points at ``/amend-time``, the amendment endpoint
+    # itself and the CREATE path that records a past event in one call
+    # all need a real Postgres, so ``backend-test`` skips every one of
+    # them. Off this list the fix ships as unguarded as the bug was.
+    # ``test_collab_fixes.py`` joins them because it now shares the
+    # ``client_as`` / ``public_client`` helpers in ``tests/conftest.py``
+    # with those files: a change to the shared fixtures must break here,
+    # not on somebody's laptop. ``test_db_gate.py`` runs first and asserts
+    # the gate is actually armed (see ``BVP_REQUIRE_DB`` below).
     services:
       postgres:
         image: pgvector/pgvector:pg16
@@ -75,6 +87,14 @@ jobs:
     env:
       BVP_DATABASE_URL: postgresql+asyncpg://bvphoenix:bvphoenix@localhost:5432/bvphoenix
       BVP_DATABASE_URL_SYNC: postgresql+psycopg://bvphoenix:bvphoenix@localhost:5432/bvphoenix
+      # Every file below is gated by ``skip_if_no_db``, decided by a 200 ms
+      # TCP probe that returns False silently: a probe miss (slow runner,
+      # IPv6-first localhost, remapped port) would skip the whole gate and
+      # report this job green having run none of it. This flag disarms the
+      # skip here, so the tests execute and fail loudly instead, and arms
+      # ``test_db_gate.py`` to say so in one line. Unset everywhere else, so
+      # local runs without a Postgres keep skipping.
+      BVP_REQUIRE_DB: "1"
     steps:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v5
@@ -83,7 +103,7 @@ jobs:
         run: |
           uv sync --extra dev
           uv run alembic upgrade head
-          uv run pytest tests/test_clinical_event_documents.py tests/integration/test_catalog_db.py tests/test_hybrid_text_dense.py -q
+          uv run pytest tests/test_db_gate.py tests/test_clinical_event_documents.py tests/integration/test_catalog_db.py tests/test_hybrid_text_dense.py tests/test_clinical_events_calendar_v1.py tests/test_clinical_events_patch_api.py tests/test_clinical_events_amend_time.py tests/test_clinical_events_create_api.py tests/test_collab_fixes.py -q
 
   search-eval:
     name: Search relevance gate

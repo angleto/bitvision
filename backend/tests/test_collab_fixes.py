@@ -25,12 +25,9 @@ import uuid
 from datetime import UTC, datetime
 
 import pytest
-from fastapi import HTTPException
-from httpx import ASGITransport, AsyncClient
 from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from bvphoenix.auth import optional_user, require_user
 from bvphoenix.config import get_settings
 from bvphoenix.db.models import (
     Folder,
@@ -42,11 +39,9 @@ from bvphoenix.db.models import (
     User,
 )
 from bvphoenix.db.models.sharing import PUBLIC_SUBJECT_ID
-from bvphoenix.db.session import get_db
-from bvphoenix.main import app
 from bvphoenix.services import bulk_ingest as bi
 from bvphoenix.services.permissions import can_access_folder
-from tests.conftest import skip_if_no_db
+from tests.conftest import client_as, public_client, skip_if_no_db
 
 pytestmark = skip_if_no_db
 
@@ -97,33 +92,6 @@ async def _cleanup_patient(db: AsyncSession, patient_id: uuid.UUID) -> None:
     ):
         await db.execute(text(stmt), {"p": patient_id})
     await db.commit()
-
-
-def _client_as(session: AsyncSession, user: User | None) -> AsyncClient:
-    async def _db():
-        yield session
-
-    async def _usr():
-        if user is None:
-            raise HTTPException(status_code=401, detail="not authenticated")
-        return user
-
-    app.dependency_overrides[get_db] = _db
-    app.dependency_overrides[require_user] = _usr
-    app.dependency_overrides[optional_user] = _usr
-    return AsyncClient(transport=ASGITransport(app=app), base_url="http://test")
-
-
-def _public_client(session: AsyncSession) -> AsyncClient:
-    async def _db():
-        yield session
-
-    async def _anon():
-        return None
-
-    app.dependency_overrides[get_db] = _db
-    app.dependency_overrides[optional_user] = _anon
-    return AsyncClient(transport=ASGITransport(app=app), base_url="http://test")
 
 
 # --------------------------------------------------------------------------
@@ -201,38 +169,36 @@ async def test_patient_share_to_existing_account_binds_real_subject(
     await db_session.flush()
     await db_session.commit()
 
-    client = _client_as(db_session, owner)
     try:
-        r = await client.post(
-            f"/api/patients/{patient.id}/share",
-            json={
-                "access_level": "editor",
-                "download": True,
-                "target": {"kind": "link_public"},
-                "recipient_email": recip_email,
-                "mode": "claim",
-            },
-        )
-        assert r.status_code == 201, r.text
-        grants = (
-            (
-                await db_session.execute(
-                    select(Grant).where(
-                        Grant.resource_kind == "patient", Grant.resource_id == patient.id
+        async with client_as(db_session, owner) as client:
+            r = await client.post(
+                f"/api/patients/{patient.id}/share",
+                json={
+                    "access_level": "editor",
+                    "download": True,
+                    "target": {"kind": "link_public"},
+                    "recipient_email": recip_email,
+                    "mode": "claim",
+                },
+            )
+            assert r.status_code == 201, r.text
+            grants = (
+                (
+                    await db_session.execute(
+                        select(Grant).where(
+                            Grant.resource_kind == "patient", Grant.resource_id == patient.id
+                        )
                     )
                 )
+                .scalars()
+                .all()
             )
-            .scalars()
-            .all()
-        )
-        assert len(grants) == 1
-        # Bound to the real account, not the public sentinel.
-        assert grants[0].grantee_subject_id == recipient.subject_id
-        # editor level carries write:report → the recipient can upload.
-        assert "write:report" in grants[0].permissions
+            assert len(grants) == 1
+            # Bound to the real account, not the public sentinel.
+            assert grants[0].grantee_subject_id == recipient.subject_id
+            # editor level carries write:report → the recipient can upload.
+            assert "write:report" in grants[0].permissions
     finally:
-        app.dependency_overrides.clear()
-        await client.aclose()
         await _cleanup_patient(db_session, patient.id)
 
 
@@ -273,29 +239,21 @@ async def test_share_info_claimable_then_bindable_for_claim_mode(
 
     try:
         # No account for recipient yet → claimable (create account), not bindable.
-        pub = _public_client(db_session)
-        try:
+        async with public_client(db_session) as pub:
             r = await pub.get(f"/api/shared/{token}/info")
             assert r.status_code == 200, r.text
             info = r.json()
             assert info["claimable"] is True
             assert info["bindable"] is False
-        finally:
-            app.dependency_overrides.clear()
-            await pub.aclose()
 
         # Recipient registers separately → now bindable (log in + /bind), not claimable.
         await make_user(email=recip_email)
-        pub = _public_client(db_session)
-        try:
+        async with public_client(db_session) as pub:
             r = await pub.get(f"/api/shared/{token}/info")
             assert r.status_code == 200, r.text
             info = r.json()
             assert info["claimable"] is False
             assert info["bindable"] is True
-        finally:
-            app.dependency_overrides.clear()
-            await pub.aclose()
     finally:
         await _cleanup_patient(db_session, patient.id)
 
@@ -330,17 +288,15 @@ async def test_bind_repoints_public_grant_to_logged_in_recipient(
     await db_session.flush()
     await db_session.commit()
 
-    client = _client_as(db_session, recipient)
     try:
-        r = await client.post(f"/api/share-links/{token}/bind")
-        assert r.status_code == 200, r.text
-        refreshed = (
-            await db_session.execute(select(Grant).where(Grant.id == grant.id))
-        ).scalar_one()
-        assert refreshed.grantee_subject_id == recipient.subject_id
+        async with client_as(db_session, recipient) as client:
+            r = await client.post(f"/api/share-links/{token}/bind")
+            assert r.status_code == 200, r.text
+            refreshed = (
+                await db_session.execute(select(Grant).where(Grant.id == grant.id))
+            ).scalar_one()
+            assert refreshed.grantee_subject_id == recipient.subject_id
     finally:
-        app.dependency_overrides.clear()
-        await client.aclose()
         await _cleanup_patient(db_session, patient.id)
 
 

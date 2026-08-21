@@ -2395,6 +2395,13 @@ export const consultationsApi = {
     recommendations_md?: string | null;
     author_kind?: "human" | "agent";
     status?: "draft" | "submitted";
+    /** ``YYYY-MM-DD`` for the ``consultation_event`` this call mints when
+     *  the consultation is not pinned to an existing event. Defaults
+     *  server-side to today, which is right for a synthesis written now and
+     *  wrong for one being imported from an older record: without this the
+     *  insertion moment is filed as the clinical date. Correcting it after
+     *  the fact means POST /clinical-events/{id}/amend-time. */
+    event_date?: string;
     citations?: {
       target_kind: ConsultationCitation["target_kind"];
       target_id: string;

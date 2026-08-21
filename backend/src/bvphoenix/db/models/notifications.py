@@ -53,7 +53,6 @@ from sqlalchemy import (
     Integer,
     String,
     Text,
-    UniqueConstraint,
     func,
     text,
 )
@@ -138,8 +137,11 @@ class NotificationDispatch(Base):
     scheduled_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     locale: Mapped[str] = mapped_column(String(8), nullable=False, server_default=text("'it'"))
     # Idempotency anchor: sha256 of (target_id, contact_id, offset,
-    # channel). The post-commit listener computes the same key on
-    # every re-fire so a duplicate insert is a clean ON CONFLICT no-op.
+    # channel, anchor instant). The post-commit listener computes the
+    # same key on every re-fire so a duplicate insert is a clean
+    # ON CONFLICT no-op. The anchor is part of the hash so that a MOVED
+    # appointment yields a different reminder rather than colliding with
+    # the one just cancelled for the old slot.
     idempotency_key: Mapped[str] = mapped_column(String(64), nullable=False)
     status: Mapped[str] = mapped_column(
         String(16), nullable=False, server_default=text("'pending'")
@@ -196,7 +198,17 @@ class NotificationDispatch(Base):
         # Idempotency: same key on the same (target, contact, offset,
         # channel) is a replay — the post-commit listener uses ON
         # CONFLICT DO NOTHING when materialising rows on event edits.
-        UniqueConstraint("idempotency_key", name="uq_notification_dispatches_idem"),
+        # Partial UNIQUE (migration 0047): a CANCELLED dispatch releases
+        # its key. Every re-scheduling path cancels the pending reminders
+        # and re-materialises them, so a globally-unique key meant the
+        # rebuilt row was silently swallowed by the ON CONFLICT and the
+        # patient got no reminder for the moved appointment.
+        Index(
+            "uq_notification_dispatches_idem",
+            "idempotency_key",
+            unique=True,
+            postgresql_where=text("status <> 'cancelled'"),
+        ),
         # Patient-scoped lookup for the "what's queued for this
         # fascicolo" admin / opt-out view.
         Index(

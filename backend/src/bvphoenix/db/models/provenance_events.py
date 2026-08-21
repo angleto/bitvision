@@ -97,6 +97,11 @@ PROVENANCE_ACTIVITIES: tuple[str, ...] = (
     "transition.complete",
     "transition.cancel",
     "transition.mark_missed",
+    # Correction of a recorded clinical time (migration 0047). NOT an
+    # FSM move: the status is untouched, only our record of WHEN the
+    # event happened changes. Stamped by
+    # ``POST /clinical-events/{id}/amend-time``.
+    "transition.amend_time",
     "create.rescheduled",
     # Clinical event binary attachments. Distinct from ``link`` /
     # ``unlink`` because those mean "I linked an existing Document";

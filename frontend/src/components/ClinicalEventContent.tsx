@@ -20,7 +20,7 @@
 // tell at a glance whether the latest write was a human or an AI
 // assistant.
 
-import { useTranslations } from "next-intl";
+import { useLocale, useTranslations } from "next-intl";
 import Link from "next/link";
 import { useRouter, useSearchParams } from "next/navigation";
 import { useCallback, useEffect, useState } from "react";
@@ -38,6 +38,7 @@ import {
   provenanceApi,
   reportContentsApi,
 } from "@/lib/api_records";
+import { authoritativeInstant, formatInZone } from "@/lib/event_dates";
 import { type EvidenceLinkViolation, parseEvidenceLinkError } from "@/lib/evidenceLinks";
 
 interface Props {
@@ -53,6 +54,7 @@ export default function ClinicalEventContent({ eventId, initialEvent }: Props) {
   const router = useRouter();
   const modal = useModal();
   const t = useTranslations("clinicalEventDetail");
+  const locale = useLocale();
   const [event, setEvent] = useState<ClinicalEvent | null>(initialEvent ?? null);
   const [contents, setContents] = useState<ReportContent[] | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -255,6 +257,13 @@ export default function ClinicalEventContent({ eventId, initialEvent }: Props) {
       : null;
 
   const hasNarrative = !!(event.narrative && event.narrative.trim().length > 0);
+  // The instant the record is anchored on, in the event's own zone. Falls
+  // back to the standalone DATE only for rows that never had a time.
+  const whenLabel = formatInZone(
+    authoritativeInstant(event) ?? event.event_date,
+    locale,
+    event.timezone,
+  );
 
   return (
     <main style={{ padding: "1rem 1.5rem", maxWidth: "1100px" }}>
@@ -360,7 +369,11 @@ export default function ClinicalEventContent({ eventId, initialEvent }: Props) {
         </div>
         <p style={{ color: "var(--muted-fg, #666)", margin: "0.25rem 0" }}>
           {KIND_KEY[event.kind] ? t(KIND_KEY[event.kind]) : event.kind}
-          {event.event_date ? ` — ${event.event_date}` : ""}
+          {/* The anchor instant when the row has one, in the event's own
+           * zone; the bare DATE only for rows that genuinely have no time.
+           * Printing the raw ``event_date`` showed an ISO string and hid
+           * the hour the appointment actually carries. */}
+          {whenLabel ? ` — ${whenLabel}` : ""}
           {event.body_part ? t("districtSuffix", { bodyPart: event.body_part }) : ""}
         </p>
 

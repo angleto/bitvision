@@ -324,3 +324,45 @@ async def test_partial_index_for_planned_present(db_session) -> None:
         "ix_clinical_events_patient_actual",
         "ix_clinical_events_patient_status_planned",
     ]
+
+
+@skip_if_no_db
+async def test_trigger_derives_event_date_for_cancelled(db_session) -> None:
+    """Migration 0047 put ``cancelled`` in the planned anchor family.
+
+    Before it, ``fn_ce_derive_event_date`` matched
+    ``('planned','confirmed','rescheduled')`` on one side and
+    ``('completed','missed')`` on the other, so ``cancelled`` fell
+    through both branches: a cancelled row's ``event_date`` froze while
+    every other status re-derived, and the API layer had to mirror that
+    one special case. The function is now total over the six statuses.
+
+    Same 22:30-UTC-in-Europe/Rome instant used by the planned test, so a
+    naive UTC cast would answer 2026-06-15 instead of 2026-06-16.
+    """
+    patient = await _new_patient(db_session)
+    ev = ClinicalEvent(
+        patient_id=patient.id,
+        kind="outpatient_visit",
+        title="Cancelled late-evening visit",
+        event_status="planned",
+        planned_start_at=datetime(2026, 6, 15, 22, 30, tzinfo=UTC),
+        timezone="Europe/Rome",
+    )
+    db_session.add(ev)
+    await db_session.flush()
+    await db_session.refresh(ev)
+    assert ev.event_date == date(2026, 6, 16)
+
+    # Cancel it, then move the anchor: the date must follow the new
+    # planned_start_at instead of staying pinned to the old one.
+    ev.event_status = "cancelled"
+    ev.status_change_reason = "ambulatorio chiuso"
+    ev.planned_start_at = datetime(2026, 6, 20, 22, 30, tzinfo=UTC)
+    await db_session.flush()
+    await db_session.refresh(ev)
+    assert ev.event_date == date(2026, 6, 21), (
+        "a cancelled row must re-derive event_date from planned_start_at "
+        "in the row's timezone (22:30 UTC = 00:30 next day in Rome)"
+    )
+    await db_session.rollback()

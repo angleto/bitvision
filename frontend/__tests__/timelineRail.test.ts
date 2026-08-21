@@ -207,6 +207,57 @@ describe("eventToRailItem", () => {
     expect(item.sortKey).toBeNull();
   });
 
+  test("the bucket is the anchor's day IN THE EVENT'S ZONE, not the UTC day", () => {
+    // 00:30 in Rome is 22:30 the previous day in UTC. Slicing the ISO
+    // string railed this appointment under the 14th while the record, and
+    // the DB trigger that derives event_date, both say the 15th.
+    const ev = makeEvent({
+      id: "ev-after-midnight",
+      event_status: "planned",
+      event_date: "2026-06-15",
+      planned_start_at: "2026-06-14T22:30:00Z",
+      timezone: "Europe/Rome",
+    });
+    const item = eventToRailItem(ev, "#000");
+    expect(item.dateKey).toBe("2026-06-15");
+    // The sort key stays the raw instant: ordering within the day is by
+    // moment, and re-projecting it would only lose precision.
+    expect(item.sortKey).toBe("2026-06-14T22:30:00Z");
+  });
+
+  test("a zone west of Greenwich moves the bucket back a day", () => {
+    const ev = makeEvent({
+      id: "ev-la",
+      event_status: "completed",
+      event_date: "2026-06-14",
+      actual_start_at: "2026-06-15T03:00:00Z",
+      timezone: "America/Los_Angeles",
+    });
+    expect(eventToRailItem(ev, "#000").dateKey).toBe("2026-06-14");
+  });
+
+  test("no timezone on the row means UTC, exactly as the trigger's COALESCE does", () => {
+    const ev = makeEvent({
+      id: "ev-no-tz",
+      event_status: "planned",
+      event_date: "2026-06-14",
+      planned_start_at: "2026-06-14T22:30:00Z",
+      timezone: null,
+    });
+    expect(eventToRailItem(ev, "#000").dateKey).toBe("2026-06-14");
+  });
+
+  test("an unparseable anchor falls back to the stored event_date", () => {
+    const ev = makeEvent({
+      id: "ev-broken-anchor",
+      event_status: "planned",
+      event_date: "2026-06-15",
+      planned_start_at: "not a timestamp",
+      timezone: "Europe/Rome",
+    });
+    expect(eventToRailItem(ev, "#000").dateKey).toBe("2026-06-15");
+  });
+
   test("eventsToRailItems maps the whole list preserving order", () => {
     const events = [
       makeEvent({ id: "a", event_date: "2026-06-15" }),

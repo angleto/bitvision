@@ -45,12 +45,22 @@ from bvphoenix.db.models._common import uuid_pk
 
 # Verbs persisted by the API layer. Mirrors the sub-resource names
 # (without the leading slash) so the audit chain is grep-friendly.
+#
+# ``amend_time`` is the odd one out: it does NOT move ``event_status``.
+# It corrects the recorded clinical date/time of an event (the wrong
+# actual_start_at was captured, the appointment was moved, a legacy
+# date-only row got the wrong date) and is legal on terminal rows,
+# because the event still happened — only our record of *when* changes.
+# It lives here rather than on PATCH so every correction of a clinical
+# time carries actor, before/after snapshots and an Idempotency-Key,
+# exactly like the FSM verbs. See migration 0047.
 TRANSITION_ACTIONS: tuple[str, ...] = (
     "confirm",
     "reschedule",
     "complete",
     "cancel",
     "mark_missed",
+    "amend_time",
 )
 
 
