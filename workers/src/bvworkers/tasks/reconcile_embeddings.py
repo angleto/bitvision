@@ -35,8 +35,9 @@ from __future__ import annotations
 import logging
 from typing import Any
 
+from bvphoenix.db.engine import make_async_engine
 from sqlalchemy import text
-from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from bvworkers.config import get_settings
 
@@ -88,7 +89,7 @@ async def reconcile_missing_embeddings(ctx: dict) -> dict[str, Any]:  # type: ig
         """
     )
 
-    engine = create_async_engine(settings.database_url, pool_pre_ping=True)
+    engine = make_async_engine(settings.database_url, pool_pre_ping=True)
     enqueued = 0
     candidates = 0
     try:

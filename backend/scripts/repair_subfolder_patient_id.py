@@ -33,10 +33,11 @@ import argparse
 import uuid
 from collections import defaultdict
 
-from sqlalchemy import create_engine, select, update
+from sqlalchemy import select, update
 from sqlalchemy.orm import Session
 
 from bvphoenix.config import get_settings
+from bvphoenix.db.engine import make_sync_engine
 from bvphoenix.db.models import Folder
 
 
@@ -105,7 +106,7 @@ def main() -> None:
         parser.error("pass --owner-subject-id <uuid> or --all-owners")
 
     settings = get_settings()
-    engine = create_engine(settings.database_url_sync, future=True)
+    engine = make_sync_engine(settings.database_url_sync)
     with Session(engine) as session:
         q = select(Folder.id, Folder.parent_folder_id, Folder.patient_id)
         if args.owner_subject_id is not None:

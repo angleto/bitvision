@@ -26,8 +26,9 @@ import logging
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
+from bvphoenix.db.engine import make_async_engine
 from sqlalchemy import text
-from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from bvworkers.config import get_settings
 
@@ -123,7 +124,7 @@ async def cleanup_expired_jobs(
         log.exception("bvphoenix not importable from worker: %s", exc)
         return {"status": "error", "reason": f"bvphoenix import: {exc}"}
 
-    engine = create_async_engine(settings.database_url, pool_pre_ping=True)
+    engine = make_async_engine(settings.database_url, pool_pre_ping=True)
     deleted = 0
     artifacts_dropped = 0
     artifact_failures = 0

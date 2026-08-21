@@ -230,12 +230,13 @@ async def tile_wsi(ctx: dict, job_id: str, slide_id: str) -> dict[str, Any]:  # 
     settings = get_settings()
 
     try:
+        from bvphoenix.db.engine import make_async_engine
         from bvphoenix.db.models import PathologySlide
         from bvphoenix.db.session import SERVICE_SUBJECT, set_current_subject
         from bvphoenix.services import jobs as jobs_service
         from bvphoenix.services.pathology_keys import dzi_descriptor_key
         from sqlalchemy import select, update
-        from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
+        from sqlalchemy.ext.asyncio import AsyncSession
     except ImportError as exc:  # pragma: no cover
         log.exception("tile_wsi: bvphoenix not importable: %s", exc)
         return {"status": "error", "reason": f"bvphoenix import: {exc}"}
@@ -251,7 +252,7 @@ async def tile_wsi(ctx: dict, job_id: str, slide_id: str) -> dict[str, Any]:  # 
     derivatives_bucket = settings.s3_bucket_derivatives
     put_extra = settings.put_extra_args()
 
-    engine = create_async_engine(settings.database_url, pool_pre_ping=True)
+    engine = make_async_engine(settings.database_url, pool_pre_ping=True)
 
     async def _set_error(code: str, detail: str) -> None:
         async with AsyncSession(engine, expire_on_commit=False) as db:

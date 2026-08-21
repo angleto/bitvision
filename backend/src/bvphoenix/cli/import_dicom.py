@@ -24,10 +24,11 @@ from pathlib import Path
 import click
 import pydicom
 from pydicom.errors import InvalidDicomError
-from sqlalchemy import create_engine, select, text
+from sqlalchemy import select, text
 from sqlalchemy.orm import Session
 
 from bvphoenix.config import get_settings
+from bvphoenix.db.engine import make_sync_engine
 from bvphoenix.db.models import (
     ClinicalEvent,
     ImagingStudy,
@@ -415,7 +416,7 @@ def main(
     storage = get_s3_storage()
     storage.ensure_bucket(settings.s3_bucket_raw)
 
-    engine = create_engine(settings.database_url_sync, future=True)
+    engine = make_sync_engine(settings.database_url_sync)
     with Session(engine) as session:
         owner = _resolve_owner(session, owner_email)
         if patient_id is not None:
@@ -473,7 +474,7 @@ def _enqueue_pack_jobs(settings, series_ids: list[str]) -> None:
         from bvphoenix.services.arq_redis import redis_settings
         from bvphoenix.services.ingest_jobs import enqueue_postprocess_jobs
 
-        engine = create_engine(settings.database_url_sync, future=True)
+        engine = make_sync_engine(settings.database_url_sync)
         with Session(engine) as session:
             rows = session.execute(
                 text("SELECT id::text, modality FROM series WHERE id::text = ANY(:ids)"),

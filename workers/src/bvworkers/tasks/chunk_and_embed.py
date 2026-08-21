@@ -43,13 +43,14 @@ import uuid
 from functools import lru_cache
 from typing import Any
 
+from bvphoenix.db.engine import make_async_engine
 from bvphoenix.services.chunking import (
     DEFAULT_CHUNKER_VERSION,
     chunk_document_text,
 )
 from bvphoenix.services.text_models import load_text_model_specs
 from sqlalchemy import text
-from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, create_async_engine
+from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession
 
 from bvworkers.config import get_settings
 
@@ -61,7 +62,7 @@ def _engine() -> AsyncEngine:
     """Module-cached async engine.
 
     Each chunk-and-embed task used to spin up its own engine with
-    ``create_async_engine(...)`` and dispose it at the end. Under a
+    ``make_async_engine(...)`` and dispose it at the end. Under a
     bulk backfill (thousands of tasks per minute on a 4-CPU worker)
     this saturated Postgres ``max_connections`` and added 50-200 ms
     of TCP setup per task. We now share a single engine for the
@@ -70,7 +71,7 @@ def _engine() -> AsyncEngine:
     backend pattern.
     """
     settings = get_settings()
-    return create_async_engine(settings.database_url, pool_pre_ping=True, pool_size=8)
+    return make_async_engine(settings.database_url, pool_pre_ping=True, pool_size=8)
 
 
 __all__ = [

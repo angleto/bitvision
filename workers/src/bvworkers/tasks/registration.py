@@ -25,8 +25,9 @@ import uuid
 from datetime import UTC, datetime
 from typing import Any
 
+from bvphoenix.db.engine import make_async_engine
 from sqlalchemy import select, update
-from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from bvworkers.config import get_settings
 from bvworkers.job_safety import mark_registration_failed_raw, with_registration_safety_net
@@ -168,7 +169,7 @@ async def register_series(
     import SimpleITK as sitk  # noqa: N813 — community-standard alias
 
     settings = get_settings()
-    engine = create_async_engine(settings.database_url, pool_pre_ping=True)
+    engine = make_async_engine(settings.database_url, pool_pre_ping=True)
     try:
         async with AsyncSession(engine, expire_on_commit=False) as db:
             await set_current_subject(db, SERVICE_SUBJECT)

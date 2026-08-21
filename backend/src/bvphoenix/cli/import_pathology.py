@@ -18,10 +18,11 @@ from collections.abc import Iterable
 from pathlib import Path
 
 import click
-from sqlalchemy import create_engine, select
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from bvphoenix.config import get_settings
+from bvphoenix.db.engine import make_sync_engine
 from bvphoenix.db.models import Patient
 from bvphoenix.services.pathology_import import (
     PathologyImportSource,
@@ -143,7 +144,7 @@ def main(
     settings = get_settings()
     storage, bucket = storage_target()
 
-    engine = create_engine(settings.database_url_sync, future=True)
+    engine = make_sync_engine(settings.database_url_sync)
     inserted = 0
     skipped_existing = 0
     failed: list[tuple[str, str]] = []

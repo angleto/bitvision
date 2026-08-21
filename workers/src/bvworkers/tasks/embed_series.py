@@ -20,13 +20,14 @@ import uuid
 import numpy as np
 import pydicom
 from botocore.client import Config
+from bvphoenix.db.engine import make_async_engine
 from bvphoenix.services.embeddable import (
     SeriesNotEmbeddable,
     is_embeddable_modality,
     is_embeddable_sop_class,
 )
 from sqlalchemy import text
-from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from bvworkers.config import get_settings
 
@@ -254,7 +255,7 @@ async def embed_series(ctx: dict, series_id: str) -> dict:  # type: ignore[type-
     import boto3
 
     settings = get_settings()
-    engine = create_async_engine(settings.database_url, pool_pre_ping=True)
+    engine = make_async_engine(settings.database_url, pool_pre_ping=True)
 
     s3 = boto3.client(
         "s3",

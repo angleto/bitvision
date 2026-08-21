@@ -46,10 +46,11 @@ import sys
 from dataclasses import dataclass, field
 
 import click
-from sqlalchemy import create_engine, select
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from bvphoenix.config import get_settings
+from bvphoenix.db.engine import make_sync_engine
 from bvphoenix.db.models import Document
 from bvphoenix.storage import get_s3_storage
 
@@ -91,7 +92,7 @@ def main(patient_id: str | None, apply: bool) -> None:
         )
         sys.exit(0)
 
-    engine = create_engine(settings.database_url_sync, future=True)
+    engine = make_sync_engine(settings.database_url_sync)
     counts = _Counts()
 
     with Session(engine, future=True) as db:

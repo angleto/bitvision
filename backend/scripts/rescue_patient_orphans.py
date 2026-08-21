@@ -20,10 +20,11 @@ import argparse
 import uuid
 from datetime import UTC, datetime
 
-from sqlalchemy import create_engine, select
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from bvphoenix.config import get_settings
+from bvphoenix.db.engine import make_sync_engine
 from bvphoenix.db.models import Document, Folder, FolderItem, ImagingStudy, Patient
 
 
@@ -113,7 +114,7 @@ def main() -> None:
     args = parser.parse_args()
 
     settings = get_settings()
-    engine = create_engine(settings.database_url_sync, future=True)
+    engine = make_sync_engine(settings.database_url_sync)
     with Session(engine) as session:
         patient = session.execute(
             select(Patient).where(Patient.id == args.patient_id)

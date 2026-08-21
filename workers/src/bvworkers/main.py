@@ -7,7 +7,7 @@ from urllib.parse import parse_qs, urlparse
 
 from arq.connections import RedisSettings
 from arq.cron import cron
-from sqlalchemy.ext.asyncio import create_async_engine
+from bvphoenix.db.engine import make_async_engine
 
 from bvworkers.config import get_settings
 from bvworkers.tasks import registry
@@ -46,7 +46,7 @@ async def startup(ctx: dict) -> None:  # type: ignore[type-arg]
     # on the happy path, so a backfill flood leaked a connection on every
     # error and exhausted Postgres. A single bounded pool caps this worker
     # to ``pool_size`` connections regardless of ``max_jobs``.
-    ctx["db_engine"] = create_async_engine(
+    ctx["db_engine"] = make_async_engine(
         _settings.database_url,
         pool_pre_ping=True,
         pool_size=5,

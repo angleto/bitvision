@@ -20,10 +20,11 @@ import sys
 import uuid
 
 import click
-from sqlalchemy import create_engine, text
+from sqlalchemy import text
 from sqlalchemy.orm import Session
 
 from bvphoenix.config import get_settings
+from bvphoenix.db.engine import make_sync_engine
 
 
 @click.command(
@@ -54,7 +55,7 @@ def main(
         raise click.ClickException("pass --all or one or more --slide-id")
 
     settings = get_settings()
-    engine = create_engine(settings.database_url_sync, future=True)
+    engine = make_sync_engine(settings.database_url_sync)
 
     with Session(engine) as session:
         if slide_ids:

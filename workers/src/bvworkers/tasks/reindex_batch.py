@@ -33,8 +33,9 @@ import uuid
 from typing import Any
 
 import structlog
+from bvphoenix.db.engine import make_async_engine
 from sqlalchemy import text
-from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from bvworkers.config import get_settings
 
@@ -234,7 +235,7 @@ async def reindex_batch(
     offset = max(0, int(offset))
 
     settings = get_settings()
-    engine = create_async_engine(settings.database_url, pool_pre_ping=True)
+    engine = make_async_engine(settings.database_url, pool_pre_ping=True)
 
     import boto3
     from botocore.client import Config
