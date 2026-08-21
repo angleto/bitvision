@@ -3,8 +3,11 @@
 Called from the api/clinical_events.py + api/patient_tasks.py write
 paths after the source row is committed. Idempotent: each
 ``(target, contact, offset, channel)`` combination has a deterministic
-``idempotency_key`` and the UNIQUE constraint on the column turns a
-re-fire into a clean no-op.
+``idempotency_key`` and the unique index on the column turns a re-fire
+into a clean no-op. Since migration 0047 that index is PARTIAL
+(``WHERE status <> 'cancelled'``): a cancelled reminder releases its
+key, so cancel-then-rebuild, which is what every re-scheduling path
+does, can insert instead of being silently swallowed.
 
 Channels picked for a contact: intersection of
 ``contact.preferred_channels`` AND the per-channel consent flags AND
@@ -218,9 +221,14 @@ async def materialise_event_dispatches(db: AsyncSession, event: ClinicalEvent) -
         .values(rows)
         .on_conflict_do_nothing(
             index_elements=["idempotency_key"],
-            # Must mirror the partial UNIQUE index from migration 0047: a
+            # Mirrors the partial UNIQUE index of migration 0047: a
             # cancelled row no longer owns the key, so cancel-then-rebuild
-            # can insert.
+            # can insert. Naming the arbiter rather than using a bare
+            # DO NOTHING keeps an unexpected conflict (a PK collision,
+            # say) loud instead of silently dropping the row. Safe across
+            # the rollout window: an index with no predicate is inferable
+            # under any ``index_where``, so this also plans correctly
+            # against the pre-0047 global UNIQUE.
             index_where=text("status <> 'cancelled'"),
         )
         .returning(NotificationDispatch.id)
@@ -282,9 +290,14 @@ async def materialise_task_dispatches(db: AsyncSession, task: PatientTask) -> in
         .values(rows)
         .on_conflict_do_nothing(
             index_elements=["idempotency_key"],
-            # Must mirror the partial UNIQUE index from migration 0047: a
+            # Mirrors the partial UNIQUE index of migration 0047: a
             # cancelled row no longer owns the key, so cancel-then-rebuild
-            # can insert.
+            # can insert. Naming the arbiter rather than using a bare
+            # DO NOTHING keeps an unexpected conflict (a PK collision,
+            # say) loud instead of silently dropping the row. Safe across
+            # the rollout window: an index with no predicate is inferable
+            # under any ``index_where``, so this also plans correctly
+            # against the pre-0047 global UNIQUE.
             index_where=text("status <> 'cancelled'"),
         )
         .returning(NotificationDispatch.id)
