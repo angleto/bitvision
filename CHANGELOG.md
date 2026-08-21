@@ -5,6 +5,68 @@ project follows semantic versioning; pre-release suffixes (`alpha`,
 `beta`) gate Kubernetes deployments via the GHCR image tag (without
 the leading `v`, see deployment guide).
 
+## 4.4.116 (2026-08-21)
+
+### Clinical event dates: one owner, and a way to correct the past
+
+Closes "Problemi Modifica eventi". Editing the date of a not-yet-happened
+event returned 500, and there was no way at all to record or correct the real
+date of an event that had already happened, admin included. Both had the same
+root: nothing in the model owned the clinical date.
+
+* **The 500** was a `date` object reaching `provenance_events.diff` (JSONB)
+  through an audit diff built from raw model attributes, on an engine with no
+  `json_serializer`. Fixed at the choke point: `bvphoenix/db/engine.py` is now
+  the only sanctioned way to build a SQLAlchemy engine (57 call sites
+  converted across backend, cli, scripts, alembic and workers), its encoder is
+  fail-loud, and an AST guard in the test suite refuses any engine built
+  elsewhere so the defect class cannot return through another door.
+* **`event_date` is now formally derived** from the status anchor:
+  `planned_start_at` for planned/confirmed/rescheduled/cancelled,
+  `actual_start_at` for completed/missed, projected through the row's
+  timezone. `PATCH /clinical-events/{id}` refuses `event_date`,
+  `planned_*` and `timezone` with 422 `use_amend_time`; echoing an unchanged
+  value is still a 200. Rows with a NULL anchor (DICOM StudyDate imports,
+  document backfills) keep a standalone `event_date` and stay directly
+  writable.
+* **New `POST /clinical-events/{id}/amend-time`**: the only way to correct a
+  recorded time without moving `event_status`, and the only way to re-date a
+  terminal row. Not an FSM move, so completed / cancelled / rescheduled accept
+  it. `If-Match`, `Idempotency-Key`, `dry_run`, one
+  `clinical_event_transitions` row and one provenance row. A reason is
+  required only when a realised fact is being corrected.
+* **Frontend**: one edit dialog for every status, amend-time then PATCH with
+  the fresh etag and an explicit message when the date landed but the metadata
+  write did not. Complete seeds from the planned time instead of `now()`,
+  which is what filed the click moment as the clinical time. Creation gained
+  an "already happened" mode. Timezone validated on both sides, 422 codes
+  translated.
+* **MCP**: `amend_event_time` with the same scopes / etag / dry_run, and
+  `update_clinical_event` realigned to the fields that are actually patchable.
+  A parity test fails the build if the two surfaces drift.
+* **Reminders**: moving an appointment used to cancel its reminders and create
+  none, because the dispatch idempotency key did not include the anchor and
+  the rebuilt row collided with the one just cancelled. The anchor is now part
+  of the key and cancelled rows release it (partial unique index).
+* **CI**: the DB-backed job runs the new files and can no longer report green
+  by skipping them, which is how the original bug shipped unguarded.
+
+Migration `0047_clinical_event_amend_time`: new transition verb, total date
+derivation (`cancelled` was in neither branch), widened provenance activity
+CHECK, partial unique index on `notification_dispatches.idempotency_key`. No
+row is rewritten.
+
+### Outbound email delivery ledger
+
+Outbound mail had no record of what actually happened: `notify` reported
+success as soon as the call did not raise, so a blackholed SMTP port looked
+identical to a delivered message. Migration `0046_email_deliveries` adds a row
+per outbound message written before the first attempt, the transport reports
+the real SMTP outcome (200 / 202 / 502), `notification_dispatches.error_detail`
+persists the operator-facing failure detail, a worker cron drains the ledger,
+and the UI says plainly when a link was NOT delivered instead of showing a
+green tick that means nothing.
+
 ## 4.4.113 (2026-07-02)
 
 ### Anonymizer M6c: review-UI ground-truth PHI box labeling (task 3d8038e0)
