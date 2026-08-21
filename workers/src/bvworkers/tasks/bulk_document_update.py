@@ -21,7 +21,8 @@ import uuid
 from datetime import date
 from typing import Any
 
-from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
+from bvphoenix.db.engine import make_async_engine
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from bvworkers.config import get_settings
 from bvworkers.job_safety import mark_job_failed_raw, with_safety_net
@@ -61,7 +62,7 @@ async def bulk_document_update(
     from sqlalchemy import select
 
     settings = get_settings()
-    engine = create_async_engine(settings.database_url, pool_pre_ping=True)
+    engine = make_async_engine(settings.database_url, pool_pre_ping=True)
     try:
         async with AsyncSession(engine, expire_on_commit=False) as db:
             await set_current_subject(db, SERVICE_SUBJECT)

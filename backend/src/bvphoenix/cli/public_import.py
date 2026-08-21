@@ -39,7 +39,6 @@ from urllib.parse import urlencode
 import click
 import httpx
 import yaml
-from sqlalchemy import create_engine
 from sqlalchemy.orm import Session
 
 from bvphoenix.cli._public_http import (
@@ -49,6 +48,7 @@ from bvphoenix.cli._public_http import (
 )
 from bvphoenix.cli.import_dicom import _enqueue_pack_jobs
 from bvphoenix.config import get_settings
+from bvphoenix.db.engine import make_sync_engine
 from bvphoenix.services.public_dataset import (
     PublicDatasetSource,
     completed_series_uids_for_source,
@@ -520,7 +520,7 @@ def main(
 
     only_set = set(only)
     keep_series = set(only_series)
-    engine = create_engine(settings.database_url_sync, future=True)
+    engine = make_sync_engine(settings.database_url_sync)
 
     processed = 0
     succeeded = 0

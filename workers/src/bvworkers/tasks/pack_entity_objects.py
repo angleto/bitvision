@@ -29,11 +29,11 @@ import uuid
 from typing import Any
 
 from arq.connections import ArqRedis
+from bvphoenix.db.engine import make_async_engine
 from sqlalchemy import text
-from sqlalchemy.ext.asyncio import create_async_engine, async_sessionmaker
+from sqlalchemy.ext.asyncio import async_sessionmaker
 
 from bvworkers.config import get_settings
-
 
 KINDS_TO_PACK: frozenset[str] = frozenset(
     {"clinical_note", "report", "annotation", "consultation", "summary"}
@@ -57,7 +57,7 @@ async def pack_entity_objects_task(
     from bvphoenix.services.versioning import pack_entity_objects
 
     settings = get_settings()
-    engine = create_async_engine(settings.database_url, echo=False)
+    engine = make_async_engine(settings.database_url, echo=False)
     factory = async_sessionmaker(engine, expire_on_commit=False)
 
     converted_per_kind: dict[str, int] = {}

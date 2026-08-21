@@ -31,10 +31,11 @@ import uuid
 
 import click
 from arq import create_pool
-from sqlalchemy import create_engine, text
+from sqlalchemy import text
 from sqlalchemy.orm import Session
 
 from bvphoenix.config import get_settings
+from bvphoenix.db.engine import make_sync_engine
 from bvphoenix.db.models.text_chunks import (
     CHUNK_SOURCE_KINDS,
     DEFAULT_CHUNKER_VERSION,
@@ -54,7 +55,7 @@ def main() -> None:
 
 
 def _engine():
-    return create_engine(get_settings().database_url_sync, future=True)
+    return make_sync_engine(get_settings().database_url_sync)
 
 
 _SOURCE_QUERIES: dict[str, str] = {

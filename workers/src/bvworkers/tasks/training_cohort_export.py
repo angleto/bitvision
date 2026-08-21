@@ -46,6 +46,7 @@ from datetime import UTC, datetime
 from typing import Any
 
 import pydicom
+from bvphoenix.db.engine import make_async_engine
 from bvphoenix.db.models import DatasetStudy, LicensedDataset, User
 from bvphoenix.db.session import SERVICE_SUBJECT, set_current_subject
 from bvphoenix.services import jobs as jobs_service
@@ -56,7 +57,7 @@ from bvphoenix.services.patient_export import _bytes_member, _fetch_blob_bytes
 from bvphoenix.services.pixel_deid import classify_pixel_risk_bytes
 from bvphoenix.storage import get_s3_storage
 from sqlalchemy import select
-from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
+from sqlalchemy.ext.asyncio import AsyncSession
 from stream_zip import stream_zip
 
 from bvworkers.config import get_settings
@@ -429,7 +430,7 @@ async def training_cohort_export_zip(
     jid = uuid.UUID(job_id)
     query = json.loads(canonical_input_json)
     settings = get_settings()
-    engine = create_async_engine(settings.database_url, pool_pre_ping=True)
+    engine = make_async_engine(settings.database_url, pool_pre_ping=True)
     try:
         async with AsyncSession(engine, expire_on_commit=False) as db:
             await set_current_subject(db, SERVICE_SUBJECT)

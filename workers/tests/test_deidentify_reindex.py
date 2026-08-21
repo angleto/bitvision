@@ -131,7 +131,7 @@ def _wire_monkeypatches(
     session: _ScriptedSession,
     s3: _StubS3 | None,
 ) -> None:
-    monkeypatch.setattr(mod, "create_async_engine", lambda *a, **kw: _Engine())
+    monkeypatch.setattr(mod, "make_async_engine", lambda *a, **kw: _Engine())
     monkeypatch.setattr(mod, "AsyncSession", lambda _engine: session)
     if s3 is None:
         monkeypatch.setattr(

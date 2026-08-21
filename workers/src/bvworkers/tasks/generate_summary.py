@@ -20,8 +20,9 @@ from __future__ import annotations
 import logging
 import uuid
 
+from bvphoenix.db.engine import make_async_engine
 from sqlalchemy import text
-from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from bvworkers.config import get_settings
 
@@ -93,7 +94,7 @@ async def generate_summary(
             lang=lang,
         )
 
-    engine = create_async_engine(settings.database_url, pool_pre_ping=True)
+    engine = make_async_engine(settings.database_url, pool_pre_ping=True)
     try:
         async with AsyncSession(engine, expire_on_commit=False) as db:
             # Worker contexts bypass RLS — the enqueuing backend has
@@ -158,7 +159,7 @@ async def _fallback_generate(
     import hashlib
     from datetime import UTC, datetime
 
-    engine = create_async_engine(database_url, pool_pre_ping=True)
+    engine = make_async_engine(database_url, pool_pre_ping=True)
     try:
         async with AsyncSession(engine, expire_on_commit=False) as db:
             now = datetime.now(UTC).isoformat()

@@ -34,8 +34,9 @@ import logging
 import uuid
 from datetime import UTC, datetime
 
+from bvphoenix.db.engine import make_async_engine
 from sqlalchemy import select
-from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+from sqlalchemy.ext.asyncio import async_sessionmaker
 
 from bvworkers.config import get_settings
 
@@ -54,7 +55,7 @@ def _make_async_session_factory():
     AsyncSessionMaker on first use rather than at import time
     (avoiding "future attached to a different loop" errors)."""
     settings = get_settings()
-    engine = create_async_engine(settings.database_url, pool_pre_ping=True)
+    engine = make_async_engine(settings.database_url, pool_pre_ping=True)
     return async_sessionmaker(engine, expire_on_commit=False)
 
 

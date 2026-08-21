@@ -75,7 +75,7 @@ class _FakeRedis:
 
 def _wire(monkeypatch: pytest.MonkeyPatch, candidate_ids: list[str]) -> None:
     monkeypatch.setattr(mod, "get_settings", lambda: types.SimpleNamespace(database_url="stub://"))
-    monkeypatch.setattr(mod, "create_async_engine", lambda *a, **kw: _FakeEngine())
+    monkeypatch.setattr(mod, "make_async_engine", lambda *a, **kw: _FakeEngine())
     monkeypatch.setattr(mod, "AsyncSession", lambda *a, **kw: _FakeSession(candidate_ids))
 
 

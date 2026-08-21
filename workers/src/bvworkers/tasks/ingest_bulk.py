@@ -31,8 +31,9 @@ import logging
 import uuid
 from typing import Any
 
+from bvphoenix.db.engine import make_async_engine
 from sqlalchemy import text, update
-from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from bvworkers.config import get_settings
 from bvworkers.job_safety import mark_job_failed_raw, with_safety_net
@@ -76,7 +77,7 @@ async def ingest_bulk_files(
         return {"status": "error", "reason": f"import: {exc}"}
 
     settings = get_settings()
-    engine = create_async_engine(settings.database_url, pool_pre_ping=True)
+    engine = make_async_engine(settings.database_url, pool_pre_ping=True)
     try:
         # Two independent sessions on the same engine:
         #   * ``db``          — owns the single atomic ingest transaction.
@@ -324,7 +325,6 @@ async def ingest_bulk_files(
             if ocr_docs:
                 try:
                     from arq import create_pool
-
                     from bvphoenix.config import get_settings as _get_bvp_settings
                     from bvphoenix.services.arq_redis import redis_settings
                     from bvphoenix.services.jobs import enqueue_or_get, set_arq_job_id

@@ -148,10 +148,10 @@ def export_labeled_corpus(
     help="Include multi-frame instances by extracting frame 0 (else skip them).",
 )
 def main(out_dir: str, frame0_extract: bool) -> None:
-    from sqlalchemy import create_engine
+    from bvphoenix.db.engine import make_sync_engine
 
     root = Path(out_dir)
-    engine = create_engine(get_settings().database_url_sync, future=True)
+    engine = make_sync_engine(get_settings().database_url_sync)
     with Session(engine) as db:
         stats = export_labeled_corpus(db, get_s3_storage(), root, frame0_extract=frame0_extract)
     click.echo(

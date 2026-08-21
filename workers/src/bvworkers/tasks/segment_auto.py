@@ -205,10 +205,11 @@ async def _persist_segmentation_rows(
     """Upsert one Segmentation ORM row per produced mask, with provenance.
     Idempotent on (series_id, producer, label) so re-runs replace cleanly.
     Best-effort: a DB failure here never loses the masks already in S3."""
+    from bvphoenix.db.engine import make_async_engine
     from bvphoenix.db.models import Segmentation
     from sqlalchemy import func
     from sqlalchemy.dialects.postgresql import insert as pg_insert
-    from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
+    from sqlalchemy.ext.asyncio import AsyncSession
 
     def _uid(v: str | None) -> uuid.UUID | None:
         try:
@@ -218,7 +219,7 @@ async def _persist_segmentation_rows(
 
     pid, token, actor = _uid(patient_id), _uid(agent_token_id), _uid(created_by)
     version = _totalseg_version()
-    engine = create_async_engine(settings.database_url, pool_pre_ping=True)
+    engine = make_async_engine(settings.database_url, pool_pre_ping=True)
     try:
         async with AsyncSession(engine) as db:
             for label, key, size_bytes, nonzero in metas:
@@ -317,10 +318,11 @@ async def segment_auto(
     # build it the same way ``services.volumes`` does: keyed on
     # series_instance_uid, not the row id, since the file lives in
     # an external S3 namespace.
+    from bvphoenix.db.engine import make_async_engine
     from sqlalchemy import text
-    from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
+    from sqlalchemy.ext.asyncio import AsyncSession
 
-    engine = create_async_engine(settings.database_url, pool_pre_ping=True)
+    engine = make_async_engine(settings.database_url, pool_pre_ping=True)
     try:
         async with AsyncSession(engine) as db:
             row = (

@@ -24,10 +24,11 @@ from __future__ import annotations
 import argparse
 import uuid
 
-from sqlalchemy import create_engine, select, update
+from sqlalchemy import select, update
 from sqlalchemy.orm import Session
 
 from bvphoenix.config import get_settings
+from bvphoenix.db.engine import make_sync_engine
 from bvphoenix.db.models import Folder, FolderItem
 
 
@@ -91,7 +92,7 @@ def main() -> None:
     args = parser.parse_args()
 
     settings = get_settings()
-    engine = create_engine(settings.database_url_sync, future=True)
+    engine = make_sync_engine(settings.database_url_sync)
     apply = not args.dry_run
 
     with Session(engine) as session:

@@ -26,10 +26,11 @@ from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import bvphoenix.services.review_queue.engine as review_engine
+from bvphoenix.db.engine import make_async_engine
 from bvphoenix.db.session import SERVICE_SUBJECT, set_current_subject
 from bvphoenix.services.review_queue.profile import get_profile
 from sqlalchemy import select
-from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from bvworkers.config import get_settings
 
@@ -56,7 +57,7 @@ async def promote_submission(ctx: dict[str, Any], submission_id: str) -> dict[st
 
     _ensure_profile_registered()
     settings = get_settings()
-    engine = create_async_engine(settings.database_url, pool_pre_ping=True)
+    engine = make_async_engine(settings.database_url, pool_pre_ping=True)
     try:
         profile = get_profile(PROFILE_NAME)
         async with AsyncSession(engine, expire_on_commit=False) as db:
@@ -118,7 +119,7 @@ async def contribution_maintenance(ctx: dict[str, Any]) -> dict[str, Any]:
     redis = ctx["redis"]
     stats = {"requeued": 0, "repromoted": 0, "repurged": 0}
 
-    engine = create_async_engine(settings.database_url, pool_pre_ping=True)
+    engine = make_async_engine(settings.database_url, pool_pre_ping=True)
     try:
         async with AsyncSession(engine) as db:
             await set_current_subject(db, SERVICE_SUBJECT)

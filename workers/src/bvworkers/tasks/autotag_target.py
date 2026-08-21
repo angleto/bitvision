@@ -29,8 +29,9 @@ import uuid
 from dataclasses import dataclass
 
 import httpx
+from bvphoenix.db.engine import make_async_engine
 from sqlalchemy import text
-from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from bvworkers.config import get_settings
 
@@ -336,7 +337,7 @@ async def autotag_target(ctx: dict, target_kind: str, target_id: str) -> dict:  
         return {"status": "invalid_target_kind", "target_kind": target_kind}
 
     settings = get_settings()
-    engine = create_async_engine(settings.database_url, pool_pre_ping=True)
+    engine = make_async_engine(settings.database_url, pool_pre_ping=True)
     tid = uuid.UUID(target_id)
 
     async with AsyncSession(engine) as db:

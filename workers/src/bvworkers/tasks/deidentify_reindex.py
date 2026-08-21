@@ -34,8 +34,9 @@ import uuid
 
 import boto3
 from botocore.client import Config
+from bvphoenix.db.engine import make_async_engine
 from sqlalchemy import text
-from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from bvworkers.config import get_settings
 
@@ -122,7 +123,7 @@ async def deidentify_reindex_study(ctx: dict, study_id: str) -> dict:  # type: i
     """Scrub raw DICOM, invalidate cached derivatives, and re-enqueue
     the volume pack for every series of ``study_id``."""
     settings = get_settings()
-    engine = create_async_engine(settings.database_url, pool_pre_ping=True)
+    engine = make_async_engine(settings.database_url, pool_pre_ping=True)
 
     s3 = boto3.client(
         "s3",

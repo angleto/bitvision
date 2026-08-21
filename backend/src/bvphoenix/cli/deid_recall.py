@@ -19,10 +19,10 @@ import tempfile
 from pathlib import Path
 
 import click
-from sqlalchemy import create_engine
 from sqlalchemy.orm import Session
 
 from bvphoenix.config import get_settings
+from bvphoenix.db.engine import make_sync_engine
 from bvphoenix.db.models import CORPUS_KINDS, DeidRecallRun
 from bvphoenix.services.pixel_deid import clean_pixel_data
 from bvphoenix.services.pixel_deid_eval import load_public_corpus, score_redaction
@@ -118,7 +118,7 @@ def main(
             shutil.rmtree(tmp, ignore_errors=True)
 
     settings = get_settings()
-    db_engine = create_engine(settings.database_url_sync, future=True)
+    db_engine = make_sync_engine(settings.database_url_sync)
     with Session(db_engine) as db:
         run = DeidRecallRun(
             corpus_kind=corpus_kind,

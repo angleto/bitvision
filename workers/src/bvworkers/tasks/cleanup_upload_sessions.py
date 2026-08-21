@@ -18,7 +18,8 @@ from __future__ import annotations
 import logging
 from typing import Any
 
-from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
+from bvphoenix.db.engine import make_async_engine
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from bvworkers.config import get_settings
 
@@ -41,7 +42,7 @@ async def cleanup_upload_sessions(ctx: dict) -> dict[str, Any]:  # type: ignore[
         log.exception("bvphoenix not importable from worker: %s", exc)
         return {"status": "error", "reason": f"bvphoenix import: {exc}"}
 
-    engine = create_async_engine(settings.database_url, pool_pre_ping=True)
+    engine = make_async_engine(settings.database_url, pool_pre_ping=True)
     aborted = 0
     abort_failures = 0
     deleted = 0

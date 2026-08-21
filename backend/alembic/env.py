@@ -1,6 +1,7 @@
 """Alembic environment — async config pulling from bvphoenix.config."""
 
 import asyncio
+import json
 from logging.config import fileConfig
 
 from alembic import context
@@ -11,6 +12,7 @@ from sqlalchemy.ext.asyncio import async_engine_from_config
 from bvphoenix.config import get_settings
 from bvphoenix.db import models
 from bvphoenix.db.base import Base
+from bvphoenix.db.engine import dumps as json_dumps
 
 config = context.config
 
@@ -75,10 +77,16 @@ def do_run_migrations(connection: Connection) -> None:
 
 
 async def run_migrations_online() -> None:
+    # ``json_serializer`` mirrors ``bvphoenix.db.engine``: a migration
+    # that writes a JSONB default or backfills a JSONB column goes
+    # through the same bind path as the app and must not choke on a
+    # ``date`` / ``UUID``.
     connectable = async_engine_from_config(
         config.get_section(config.config_ini_section, {}),
         prefix="sqlalchemy.",
         poolclass=pool.NullPool,
+        json_serializer=json_dumps,
+        json_deserializer=json.loads,
     )
     async with connectable.connect() as connection:
         await connection.run_sync(do_run_migrations)

@@ -26,8 +26,9 @@ import logging
 import uuid
 from datetime import UTC, datetime, timedelta
 
+from bvphoenix.db.engine import make_async_engine
 from sqlalchemy import select
-from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from bvworkers.config import get_settings
 
@@ -42,7 +43,7 @@ _STALE_ENQUEUE = timedelta(minutes=15)
 
 def _session_engine():
     settings = get_settings()
-    return create_async_engine(settings.database_url, pool_pre_ping=True)
+    return make_async_engine(settings.database_url, pool_pre_ping=True)
 
 
 async def process_inbound_email(ctx: dict, inbound_email_id: str) -> dict:

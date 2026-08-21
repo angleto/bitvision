@@ -40,11 +40,11 @@ from pathlib import Path
 
 import click
 import httpx
-from sqlalchemy import create_engine
 from sqlalchemy.orm import Session
 
 from bvphoenix.cli._public_http import HTTP_TIMEOUT, _http_get_with_retry
 from bvphoenix.config import get_settings
+from bvphoenix.db.engine import make_sync_engine
 from bvphoenix.services.pathology_import import storage_target
 from bvphoenix.services.pathology_jobs import enqueue_tile_jobs_sync
 from bvphoenix.services.public_pathology import (
@@ -306,7 +306,7 @@ def main(
     settings = get_settings()
     storage, bucket = storage_target()
     only_set = set(only)
-    engine = create_engine(settings.database_url_sync, future=True)
+    engine = make_sync_engine(settings.database_url_sync)
 
     scratch = Path(scratch_dir) if scratch_dir else Path(tempfile.gettempdir())
     scratch.mkdir(parents=True, exist_ok=True)

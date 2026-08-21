@@ -16,9 +16,10 @@ from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 
 from sqlalchemy import text
-from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from bvphoenix.config import get_settings
+from bvphoenix.db.engine import make_async_engine
 
 _settings = get_settings()
 
@@ -45,7 +46,10 @@ _settings = get_settings()
 # scoped UID variants) so the 100-slot LRU was thrashing on the hot
 # path. 250 is wide enough that cache turnover under typical traffic
 # stays at noise level (verified on staging).
-engine = create_async_engine(
+# ``make_async_engine`` (not ``create_async_engine``) so the JSON/JSONB
+# bind codecs are wired: see ``bvphoenix.db.engine``. Building an engine
+# anywhere else is a test failure (tests/test_db_engine_factory.py).
+engine = make_async_engine(
     _settings.database_url,
     echo=_settings.env == "development",
     pool_pre_ping=True,

@@ -12,10 +12,11 @@ from __future__ import annotations
 import argparse
 import uuid
 
-from sqlalchemy import create_engine, select
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from bvphoenix.config import get_settings
+from bvphoenix.db.engine import make_sync_engine
 from bvphoenix.db.models import Document, Folder, FolderItem
 
 
@@ -25,7 +26,7 @@ def main() -> None:
     args = parser.parse_args()
 
     settings = get_settings()
-    engine = create_engine(settings.database_url_sync, future=True)
+    engine = make_sync_engine(settings.database_url_sync)
     with Session(engine) as session:
         # All ISO-bundle Documents on this patient.
         docs = session.execute(

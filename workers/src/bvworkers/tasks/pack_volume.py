@@ -32,10 +32,11 @@ import boto3
 import numpy as np
 import pydicom
 from botocore.client import Config
+from bvphoenix.db.engine import make_async_engine
 from bvphoenix.services.derivative_keys import volume_stack_key
 from bvphoenix.services.volumes import compute_volume_geometry, partition_substacks
 from sqlalchemy import text
-from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from bvworkers.config import get_settings
 
@@ -204,7 +205,7 @@ async def pack_volume(ctx: dict, series_id: str) -> dict:  # type: ignore[type-a
     # overflow) per engine would multiply into a TooManyConnectionsError
     # against the shared Postgres. One job runs strictly sequential queries,
     # so a single connection (plus one overflow slot) is enough.
-    engine = create_async_engine(
+    engine = make_async_engine(
         settings.database_url, pool_pre_ping=True, pool_size=1, max_overflow=1
     )
 

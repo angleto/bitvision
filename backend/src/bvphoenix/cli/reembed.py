@@ -42,10 +42,11 @@ from datetime import UTC, datetime
 
 import click
 from arq import create_pool
-from sqlalchemy import create_engine, text
+from sqlalchemy import text
 from sqlalchemy.orm import Session
 
 from bvphoenix.config import get_settings
+from bvphoenix.db.engine import make_sync_engine
 from bvphoenix.services.arq_redis import redis_settings
 
 VALID_TARGET_KINDS = ("study", "series", "instance")
@@ -62,7 +63,7 @@ def main() -> None:
 
 
 def _engine():
-    return create_engine(get_settings().database_url_sync, future=True)
+    return make_sync_engine(get_settings().database_url_sync)
 
 
 def _count_candidates(

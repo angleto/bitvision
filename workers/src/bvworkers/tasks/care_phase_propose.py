@@ -15,7 +15,8 @@ from __future__ import annotations
 import logging
 import uuid
 
-from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
+from bvphoenix.db.engine import make_async_engine
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from bvworkers.config import get_settings
 
@@ -72,7 +73,7 @@ async def propose_care_phases(
         return {"status": "error", "reason": "backend not importable"}
 
     settings = get_settings()
-    engine = create_async_engine(settings.database_url, pool_pre_ping=True)
+    engine = make_async_engine(settings.database_url, pool_pre_ping=True)
     Session = async_sessionmaker(engine, expire_on_commit=False, class_=AsyncSession)
     try:
         async with Session() as session:

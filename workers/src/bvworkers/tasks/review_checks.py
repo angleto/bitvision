@@ -20,7 +20,8 @@ import importlib
 import logging
 import uuid
 
-from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
+from bvphoenix.db.engine import make_async_engine
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from bvworkers.config import get_settings
 
@@ -48,7 +49,7 @@ async def run_review_checks(ctx: dict, profile_name: str, item_id: str) -> dict:
     profile = get_profile(profile_name)
 
     settings = get_settings()
-    db_engine = create_async_engine(settings.database_url, pool_pre_ping=True)
+    db_engine = make_async_engine(settings.database_url, pool_pre_ping=True)
     try:
         async with AsyncSession(db_engine) as db:
             item = await profile.load_item(db, uuid.UUID(item_id))

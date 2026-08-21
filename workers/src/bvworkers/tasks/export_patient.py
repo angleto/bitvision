@@ -30,8 +30,9 @@ import logging
 import uuid
 from typing import Any
 
+from bvphoenix.db.engine import make_async_engine
 from sqlalchemy import select
-from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from bvworkers.config import get_settings
 
@@ -86,7 +87,7 @@ async def export_patient_zip(
         log.exception("bvphoenix not importable from worker: %s", exc)
         return {"status": "error", "reason": f"bvphoenix import: {exc}"}
 
-    engine = create_async_engine(settings.database_url, pool_pre_ping=True)
+    engine = make_async_engine(settings.database_url, pool_pre_ping=True)
     try:
         async with AsyncSession(engine, expire_on_commit=False) as db:
             # SERVICE_SUBJECT lets the worker bypass RLS — the API has

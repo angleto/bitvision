@@ -27,10 +27,11 @@ import uuid
 import boto3
 import numpy as np
 from botocore.client import Config
+from bvphoenix.db.engine import make_async_engine
 from bvphoenix.services.derivative_keys import volume_key, volume_preview_key
 from bvphoenix.services.volumes import partition_substacks
 from sqlalchemy import text
-from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from bvworkers.config import get_settings
 from bvworkers.tasks.pack_volume import (
@@ -68,7 +69,7 @@ async def prefetch_series(ctx: dict, series_id: str) -> dict:  # type: ignore[ty
     Idempotent: if either derivative already exists we skip re-uploading.
     """
     settings = get_settings()
-    engine = create_async_engine(settings.database_url, pool_pre_ping=True)
+    engine = make_async_engine(settings.database_url, pool_pre_ping=True)
 
     s3 = boto3.client(
         "s3",

@@ -13,11 +13,12 @@ from datetime import UTC, datetime
 
 import click
 import pyotp
-from sqlalchemy import create_engine, select
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from bvphoenix.auth import hash_password
 from bvphoenix.config import get_settings
+from bvphoenix.db.engine import make_sync_engine
 from bvphoenix.db.models import Subject, User
 
 
@@ -34,7 +35,7 @@ def main() -> None:
 def create_user(email: str, password: str, display_name: str, admin: bool) -> None:
     """Create a user. Use --admin to grant the admin role."""
     settings = get_settings()
-    engine = create_engine(settings.database_url_sync, future=True)
+    engine = make_sync_engine(settings.database_url_sync)
     email_norm = email.strip().lower()
     with Session(engine) as session:
         existing = session.execute(
@@ -63,7 +64,7 @@ def create_user(email: str, password: str, display_name: str, admin: bool) -> No
 def promote(email: str) -> None:
     """Promote an existing user to admin."""
     settings = get_settings()
-    engine = create_engine(settings.database_url_sync, future=True)
+    engine = make_sync_engine(settings.database_url_sync)
     with Session(engine) as session:
         user = session.execute(
             select(User).where(User.email == email.strip().lower())
@@ -87,7 +88,7 @@ def mfa_bootstrap(email: str) -> None:
     then log in via ``/api/auth/login-mfa``. See docs/security-mfa.md.
     """
     settings = get_settings()
-    engine = create_engine(settings.database_url_sync, future=True)
+    engine = make_sync_engine(settings.database_url_sync)
     email_norm = email.strip().lower()
     with Session(engine) as session:
         user = session.execute(select(User).where(User.email == email_norm)).scalar_one_or_none()
