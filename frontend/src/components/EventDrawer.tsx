@@ -20,6 +20,13 @@ import {
   type EventStatus,
   carePhasesApi,
 } from "@/lib/api_records";
+import {
+  authoritativeEnd,
+  authoritativeInstant,
+  formatInZone,
+  secondaryPlannedInstant,
+  whenCaptionKey,
+} from "@/lib/event_dates";
 import { eventStatusStyle } from "@/lib/event_status_style";
 
 interface Props {
@@ -205,14 +212,39 @@ export default function EventDrawer({ eventId, isOwner, onClose, onChanged }: Pr
             </div>
             <dl style={dlStyle}>
               <Row label="Kind">{event.kind}</Row>
-              {event.event_date && <Row label="Date">{event.event_date}</Row>}
-              {event.planned_start_at && (
-                <Row label="Planned">{new Date(event.planned_start_at).toLocaleString()}</Row>
+              {/* One authoritative "when", rendered in the event's own
+               * timezone, with a caption naming what it is derived from.
+               * Listing Date / Planned / Actual side by side left the user
+               * to guess which one the record actually goes by. */}
+              <Row label={t("whenLabel")}>
+                {formatInZone(
+                  authoritativeInstant(event) ?? event.event_date,
+                  locale,
+                  event.timezone,
+                ) || "—"}
+                {authoritativeEnd(event) && (
+                  <>
+                    {" → "}
+                    {formatInZone(authoritativeEnd(event), locale, event.timezone)}
+                  </>
+                )}
+                <span style={captionStyle}>
+                  {t(whenCaptionKey(event))}
+                  {event.timezone ? ` · ${event.timezone}` : ""}
+                </span>
+              </Row>
+              {/* The non-authoritative half of the pair, whenever the row
+               * carries one. Two distinct cases, both previously lost:
+               * a completed visit still carries what it was booked for, and
+               * a MISSED one carries only that — mark-missed never writes
+               * actual_start_at, so the booked time is the only time the row
+               * has, and the drawer used to drop it and caption the bare
+               * date "no time recorded". */}
+              {secondaryPlannedInstant(event) && (
+                <Row label={t("originallyPlannedLabel")}>
+                  {formatInZone(secondaryPlannedInstant(event), locale, event.timezone)}
+                </Row>
               )}
-              {event.actual_start_at && (
-                <Row label="Actual">{new Date(event.actual_start_at).toLocaleString()}</Row>
-              )}
-              {event.timezone && <Row label="TZ">{event.timezone}</Row>}
               {event.location_struct && (
                 <Row label="Location">
                   {[
@@ -329,8 +361,10 @@ export default function EventDrawer({ eventId, isOwner, onClose, onChanged }: Pr
                   borderTop: "1px solid var(--bv-card-border, #e5e7eb)",
                 }}
               >
-                {/* Edit is always available regardless of status; the
-                 * server's PATCH only touches metadata, never status. */}
+                {/* Edit is available for EVERY status, terminal ones
+                 * included: correcting the date of an event that already
+                 * happened is exactly the case that had no path before. It
+                 * is listed first so it is not lost among the transitions. */}
                 <button
                   type="button"
                   onClick={() => setEditOpen(true)}
@@ -370,6 +404,13 @@ export default function EventDrawer({ eventId, isOwner, onClose, onChanged }: Pr
                   setEvent(updated);
                   onChanged();
                 }}
+                onPartialSave={(updated) => {
+                  // The time amendment landed but the metadata PATCH did
+                  // not: refresh behind the still-open dialog so the drawer
+                  // is not showing a date the server no longer holds.
+                  setEvent(updated);
+                  onChanged();
+                }}
               />
             )}
           </>
@@ -396,6 +437,13 @@ function Row({ label, children }: { label: string; children: React.ReactNode }) 
     </>
   );
 }
+
+const captionStyle = {
+  display: "block",
+  fontSize: "0.72rem",
+  color: "var(--bv-fg-soft)",
+  marginTop: 2,
+} as const;
 
 const dlStyle = {
   display: "grid",

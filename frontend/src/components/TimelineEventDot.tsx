@@ -13,6 +13,7 @@ import { useRouter } from "next/navigation";
 import { useCallback } from "react";
 
 import type { EventStatus, TimelineEvent } from "@/lib/api_records";
+import { authoritativeInstant, secondaryPlannedInstant } from "@/lib/event_dates";
 
 interface Props {
   event: TimelineEvent;
@@ -191,13 +192,18 @@ export default function TimelineEventDot({
 
   const status: EventStatus = event.event_status ?? "completed";
   const sStyle = statusStyle(status);
-  // Use the planning timestamp for planned/confirmed (the event_date
-  // trigger keeps DATE in sync, but we want hour granularity for the
-  // upcoming-event chips). Fall back to the canonical event_date.
+  // The row's anchor, so the chip shows hour granularity and agrees with
+  // the DB's derivation (cancelled / rescheduled are planned-family, not
+  // actual-family).
+  //
+  // When the anchor is missing, the booked time before the bare DATE: a
+  // MISSED appointment has no ``actual_start_at`` (mark-missed never writes
+  // one) but still knows the hour it was booked for, and dropping to the
+  // date alone threw that away. The status glyph beside the time says which
+  // of the two it is. The DATE is the last resort, for rows that genuinely
+  // never had a time (DICOM StudyDate imports, document backfills).
   const displayIso =
-    (status === "planned" || status === "confirmed") && event.planned_start_at
-      ? event.planned_start_at
-      : (event.actual_start_at ?? event.event_date);
+    authoritativeInstant(event) ?? secondaryPlannedInstant(event) ?? event.event_date;
 
   if (variant === "horizontal") {
     return renderHorizontalPill({
@@ -396,10 +402,9 @@ function renderHorizontalPill({
   displayIso,
   tStatus,
 }: HorizontalArgs) {
+  // ``displayIso`` is already resolved by the caller (anchor → booked time →
+  // bare DATE); a DATE yields no time label at all.
   const timeLabel = formatTime(displayIso);
-  // ``planned`` / ``confirmed`` already carry the time in ``displayIso``;
-  // for ``completed`` / ``missed`` we fall back to ``actual_start_at``
-  // when present (handled by the caller setting ``displayIso``).
   const inner = (
     <>
       <span

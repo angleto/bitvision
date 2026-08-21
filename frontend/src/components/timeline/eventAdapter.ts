@@ -5,31 +5,40 @@
 // ``taskAdapter.ts`` for the PatientTask source.
 
 import type { TimelineEvent } from "@/lib/api_records";
+import { authoritativeInstant, derivedEventDate } from "@/lib/event_dates";
 
 import type { TimelineEventItem } from "./types";
 
-/** Pick the best timestamp for ordering within a day. Priority:
- * planned_start_at (for future / confirmed events) > actual_start_at
- * (for completed events with a known clinical time) > null
- * (DATE-only event with no time component). */
+/** Timestamp used for ordering within a day: the event's anchor, i.e. the
+ * one the DB derives ``event_date`` from.
+ *
+ * This used to fall through to ``actual_start_at`` for any status outside
+ * planned/confirmed, which put ``cancelled`` and ``rescheduled`` rows in the
+ * wrong bucket: both belong to the PLANNED family per
+ * ``fn_ce_derive_event_date`` (migration 0047), so a cancelled appointment
+ * sorts by when it was booked for. ``authoritativeInstant`` is that rule.
+ *
+ * Returns null for a date-only row, which the swimlane reads as "no precise
+ * time" and renders with reduced opacity. */
 function pickSortKey(event: TimelineEvent): string | null {
-  const status = event.event_status ?? "completed";
-  if ((status === "planned" || status === "confirmed") && event.planned_start_at) {
-    return event.planned_start_at;
-  }
-  if (event.actual_start_at) return event.actual_start_at;
-  // event_date is DATE-only; we keep null so the swimlane knows to
-  // render this dot with reduced opacity (no precise time).
-  return null;
+  return authoritativeInstant(event);
 }
 
-/** Pick the date bucket. Prefer the planned timestamp when in the
- * future, the actual when completed, and the legacy event_date as
- * a fallback. Returns ``null`` only when the event has no date at
- * all (rare but possible for events backfilled without a date). */
+/** Pick the date bucket: the anchor's day when there is an anchor, the
+ * standalone ``event_date`` otherwise. Returns ``null`` only when the event
+ * has no date at all (rare but possible for events backfilled without
+ * one).
+ *
+ * The anchor's day is taken in the EVENT's timezone, via the same
+ * ``derivedEventDate`` the dialogs preview and the DB trigger computes.
+ * Slicing the first 10 characters of the ISO string instead reads the UTC
+ * day, which is a different day for every row whose local time sits near
+ * midnight: a 00:30 Europe/Rome appointment would be railed under the
+ * previous date while the record itself says otherwise. */
 function pickDateKey(event: TimelineEvent): string | null {
   const sort = pickSortKey(event);
-  if (sort) return sort.slice(0, 10);
+  const derived = sort ? derivedEventDate(sort, event.timezone) : "";
+  if (derived) return derived;
   if (event.event_date) return event.event_date.slice(0, 10);
   return null;
 }

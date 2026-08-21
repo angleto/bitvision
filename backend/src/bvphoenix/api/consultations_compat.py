@@ -40,7 +40,7 @@ delete this module when the frontend switches to the v3 client.
 from __future__ import annotations
 
 import uuid
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 from typing import Annotated, Any
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
@@ -129,6 +129,14 @@ class ConsultationCreateIn(BaseModel):
     # creates a generic ``consultation_event`` for the patient when the
     # caller doesn't pin one.
     clinical_event_id: uuid.UUID | None = None
+    # Date of the auto-minted ``consultation_event``. Defaults to today
+    # because a synthesis produced now genuinely happened now, but a
+    # caller importing an older consultation can say so instead of
+    # having the insertion moment recorded as a clinical fact with no
+    # way back (that path is now
+    # ``POST /clinical-events/{id}/amend-time``). Ignored when
+    # ``clinical_event_id`` pins an existing event.
+    event_date: date | None = None
 
 
 class ConsultationUpdateIn(BaseModel):
@@ -325,7 +333,7 @@ async def create_consultation(
             patient_id=body.patient_id,
             kind="consultation_event",
             title=body.title,
-            event_date=datetime.now(UTC).date(),
+            event_date=body.event_date or datetime.now(UTC).date(),
         )
         db.add(event)
         await db.flush()

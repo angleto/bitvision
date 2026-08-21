@@ -758,6 +758,8 @@ EXPECTED_TOOL_NAMES = {
     "complete_event",
     "cancel_event",
     "mark_event_missed",
+    # Not an FSM verb: corrects the recorded clinical time in place.
+    "amend_event_time",
     "find_upcoming_events",
     "find_overdue_events",
     "find_events_by_date_range",

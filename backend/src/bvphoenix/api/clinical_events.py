@@ -15,6 +15,9 @@ Endpoints (v3 phase 3a):
 - ``GET /api/patients/{patient_id}/clinical-events`` — list for patient
 - ``POST /api/clinical-events`` — create (manual, non-imaging)
 - ``PATCH /api/clinical-events/{id}`` — update mutable metadata
+- ``POST /api/clinical-events/{id}/amend-time`` — correct the recorded
+  clinical date/time (the ONLY writer of clinical time after creation;
+  works on terminal rows too, because a correction is not a status move)
 - ``DELETE /api/clinical-events/{id}`` — delete (refused for imaging_study
   WITH a live imaging_studies row, whose lifecycle is owned by the DICOM
   deletion path because the imaging_studies FK cascades on delete; ALLOWED
@@ -32,9 +35,10 @@ from __future__ import annotations
 import uuid
 from datetime import UTC, date, datetime
 from typing import Annotated, Literal
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request, Response, status
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -163,20 +167,29 @@ class ClinicalEventUpdateIn(BaseModel):
     ``imaging_study`` is enforced server-side: if the row has a live
     ``imaging_studies`` projection the kind cannot change away from
     ``imaging_study``, and a non-imaging row cannot promote to
-    ``imaging_study`` (the ingestion pipeline owns that path)."""
+    ``imaging_study`` (the ingestion pipeline owns that path).
+
+    ``event_date`` / ``planned_start_at`` / ``planned_end_at`` /
+    ``timezone`` are NOT applied here either: they are the row's
+    temporal identity and are corrected through
+    ``POST /clinical-events/{id}/amend-time`` (see
+    ``_AMEND_ONLY_FIELDS``)."""
 
     kind: str | None = None
+    # Temporal fields are DECLARED but not applied: they are accepted so
+    # a caller that sends them gets an explicit 422 pointing at
+    # ``/amend-time`` (pydantic's default ``extra='ignore'`` would drop
+    # them silently, which is the worse failure mode). Echoing back an
+    # unchanged value is still a 200 — see ``_AMEND_ONLY_FIELDS``.
     event_date: date | None = None
+    planned_start_at: datetime | None = None
+    planned_end_at: datetime | None = None
+    timezone: str | None = Field(default=None, max_length=64)
     title: str | None = Field(default=None, min_length=1, max_length=255)
     body_part: str | None = Field(default=None, max_length=64)
     code_loinc: str | None = Field(default=None, max_length=32)
     code_snomed: str | None = Field(default=None, max_length=32)
     narrative: str | None = None
-    # Planning metadata is patchable (when not in a terminal state,
-    # see service-layer FSM in step 2); status itself is not.
-    planned_start_at: datetime | None = None
-    planned_end_at: datetime | None = None
-    timezone: str | None = Field(default=None, max_length=64)
     location_struct: dict | None = None
     recurrence_rule: str | None = Field(default=None, max_length=512)
     recurrence_exdates: list[date] | None = None
@@ -234,6 +247,55 @@ class MarkMissedIn(BaseModel):
     (a no-show often has nothing to add)."""
 
     note: str | None = Field(default=None, max_length=255)
+
+
+class AmendTimeIn(BaseModel):
+    """``POST /clinical-events/{id}/amend-time`` — correct the recorded
+    clinical date/time WITHOUT moving ``event_status``.
+
+    This is not an FSM transition, which is why it is legal on terminal
+    rows (``completed`` / ``cancelled`` / ``rescheduled``): the event
+    still happened, we are fixing *when* we recorded that it happened.
+    ``event_status``, ``status_changed_*`` and the phase assignment are
+    left untouched.
+
+    The START anchor of the matching family can be moved but never
+    cleared: it defines the row's date. An END anchor can be cleared
+    (``null``), because "we do not know when it finished" is a
+    legitimate state.
+
+    Only the anchor family matching the current status is accepted —
+    ``planned_*`` for planned/confirmed/rescheduled/cancelled,
+    ``actual_*`` for completed/missed — because ``event_date`` is
+    derived from exactly that anchor by ``fn_ce_derive_event_date``
+    (migration 0047). ``event_date`` itself is accepted ONLY on
+    date-only rows whose anchor is NULL (DICOM ``StudyDate`` imports and
+    other legacy history that genuinely has no time of day); when an
+    anchor exists the DB owns the date and writing it is refused.
+
+    ``reason`` is required when the amendment touches a **realised**
+    clinical fact (the ``actual_*`` family, or the ``event_date`` of a
+    date-only row): changing the record of what happened is an
+    amendment and must say why. Correcting a *plan* that has not
+    happened yet is ordinary editing and needs no justification.
+    """
+
+    planned_start_at: datetime | None = None
+    planned_end_at: datetime | None = None
+    actual_start_at: datetime | None = None
+    actual_end_at: datetime | None = None
+    event_date: date | None = None
+    timezone: str | None = Field(default=None, max_length=64)
+    reason: str | None = Field(default=None, min_length=1, max_length=255)
+
+    @field_validator("planned_start_at", "planned_end_at", "actual_start_at", "actual_end_at")
+    @classmethod
+    def _default_to_utc(cls, value: datetime | None) -> datetime | None:
+        """A timestamp without an offset is ambiguous. The columns are
+        ``timestamptz`` and asyncpg would silently assume UTC; we do it
+        explicitly so the stored instant matches what the API documents
+        and so naive/aware values never meet in a comparison."""
+        return _aware_dt(value)
 
 
 # ---------------------------------------------------------------------------
@@ -346,6 +408,77 @@ def _author_kind(request: Request) -> str:
     ``clinical_events.status_changed_by_kind`` and
     ``clinical_event_transitions.author_kind``."""
     return "agent" if getattr(request.state, "is_agent", False) else "human"
+
+
+# Statuses whose displayed date comes from ``planned_start_at``. Mirrors
+# ``fn_ce_derive_event_date`` (migration 0047) exactly: if you change one
+# you must change the other, or the API and the DB will disagree about
+# which timestamp owns ``event_date``.
+_PLANNED_ANCHOR_STATUSES: tuple[str, ...] = ("planned", "confirmed", "rescheduled", "cancelled")
+
+
+def _anchor_family(event_status: str) -> str:
+    """``'planned'`` or ``'actual'`` — which timestamp pair defines this
+    row's ``event_date``."""
+    return "planned" if event_status in _PLANNED_ANCHOR_STATUSES else "actual"
+
+
+def _aware_dt(value: datetime | None) -> datetime | None:
+    """Attach UTC to a naive datetime.
+
+    The temporal columns are ``timestamptz``; asyncpg would treat a naive
+    value as UTC anyway, so making it explicit costs nothing and buys
+    two things: the stored instant is never a guess, and an aware DB
+    value can always be compared against an incoming one without
+    ``TypeError: can't compare offset-naive and offset-aware``.
+    """
+    if value is not None and value.tzinfo is None:
+        return value.replace(tzinfo=UTC)
+    return value
+
+
+def _same_value(stored: object, incoming: object) -> bool:
+    """Equality across the mixed types in ``_AMEND_ONLY_FIELDS``.
+
+    Two of the four are not datetimes (``event_date`` is a ``date``,
+    ``timezone`` is a ``str``), so the UTC normalisation must be applied
+    only where it means something. Comparing them through ``_aware_dt``
+    unconditionally dereferenced ``.tzinfo`` on a ``date`` and turned the
+    guard itself into the 500 it exists to prevent.
+    """
+    if isinstance(stored, datetime) and isinstance(incoming, datetime):
+        return _aware_dt(stored) == _aware_dt(incoming)
+    return stored == incoming
+
+
+def _zone(tz_name: str | None) -> ZoneInfo:
+    """Resolve an IANA name, or 422.
+
+    Must be called on every write path that stores a ``timezone``, not
+    only where the API needs to compute a date: the value is read back
+    by ``fn_ce_derive_event_date`` as ``AT TIME ZONE``, and Postgres
+    answers an unknown zone with an error that would surface as a bare
+    500 on user input.
+    """
+    try:
+        return ZoneInfo(tz_name or "UTC")
+    except (ZoneInfoNotFoundError, ValueError) as exc:
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "code": "invalid_timezone",
+                "timezone": tz_name,
+                "message": "timezone must be an IANA name, e.g. 'Europe/Rome'",
+            },
+        ) from exc
+
+
+def _local_date(ts: datetime, tz_name: str | None) -> date:
+    """Project an instant onto the calendar date the DB trigger will
+    derive, i.e. local to ``timezone`` (UTC when unset). Used for the
+    dry-run preview and for the create-time conflict check, so the API
+    never promises a date the trigger would contradict."""
+    return ts.astimezone(_zone(tz_name)).date()
 
 
 from bvphoenix.services.etag import enforce_if_match_value
@@ -644,6 +777,34 @@ async def create_clinical_event(
             ),
         )
 
+    if body.timezone is not None:
+        _zone(body.timezone)
+
+    # ``event_date`` is derived from the status anchor when one exists.
+    # A caller that supplies both must supply a consistent pair,
+    # otherwise the trigger silently discards their event_date and the
+    # row comes back with a date they never asked for.
+    anchor = (
+        body.planned_start_at
+        if body.event_status in _PLANNED_ANCHOR_STATUSES
+        else body.actual_start_at
+    )
+    if body.event_date is not None and anchor is not None:
+        derived = _local_date(_aware_dt(anchor), body.timezone)
+        if derived != body.event_date:
+            raise HTTPException(
+                status_code=422,
+                detail={
+                    "code": "event_date_conflicts_with_anchor",
+                    "event_date": body.event_date.isoformat(),
+                    "derived": derived.isoformat(),
+                    "message": (
+                        "event_date is derived from the status anchor; omit it or "
+                        "send the value the anchor implies"
+                    ),
+                },
+            )
+
     # Status-change provenance: who/when, kind derived from the
     # request actor. ``status_changed_at`` is set on create for any
     # non-default status so the audit chain has the creation moment.
@@ -663,14 +824,16 @@ async def create_clinical_event(
         code_snomed=body.code_snomed,
         narrative=body.narrative,
         event_status=body.event_status,
-        planned_start_at=body.planned_start_at,
-        planned_end_at=body.planned_end_at,
-        actual_start_at=body.actual_start_at,
-        actual_end_at=body.actual_end_at,
+        planned_start_at=_aware_dt(body.planned_start_at),
+        planned_end_at=_aware_dt(body.planned_end_at),
+        actual_start_at=_aware_dt(body.actual_start_at),
+        actual_end_at=_aware_dt(body.actual_end_at),
         timezone=body.timezone,
         location_struct=body.location_struct,
         recurrence_rule=body.recurrence_rule,
-        recurrence_exdates=body.recurrence_exdates,
+        recurrence_exdates=(
+            [d.isoformat() for d in body.recurrence_exdates] if body.recurrence_exdates else None
+        ),
         reminder_offsets_minutes=body.reminder_offsets_minutes,
         meeting_url=body.meeting_url,
         links=body.links,
@@ -720,23 +883,35 @@ async def create_clinical_event(
 
 _UPDATABLE_FIELDS = (
     "kind",
-    "event_date",
     "title",
     "body_part",
     "code_loinc",
     "code_snomed",
     "narrative",
-    # Planning metadata (transition of ``event_status`` itself happens
-    # via the dedicated sub-resources, not via PATCH).
-    "planned_start_at",
-    "planned_end_at",
-    "timezone",
     "location_struct",
     "recurrence_rule",
     "recurrence_exdates",
     "reminder_offsets_minutes",
     "meeting_url",
     "links",
+)
+
+# Temporal fields are deliberately NOT patchable here. They define
+# ``event_date``, which the DB derives (``fn_ce_derive_event_date``,
+# migration 0047), so accepting them on PATCH gave the row two writers
+# for one value: whatever PATCH wrote, the next trigger firing silently
+# reverted. A correction to a clinical time is a record amendment, not a
+# metadata edit, so it goes through ``POST /clinical-events/{id}/
+# amend-time`` which validates the anchor family, records a
+# ``clinical_event_transitions`` row and honours Idempotency-Key.
+#
+# ``timezone`` is in this set because it is one of the trigger's watched
+# columns: moving it moves the derived date by up to a day.
+_AMEND_ONLY_FIELDS: tuple[str, ...] = (
+    "event_date",
+    "planned_start_at",
+    "planned_end_at",
+    "timezone",
 )
 
 
@@ -818,6 +993,38 @@ async def patch_clinical_event(
                     "pipeline; cannot promote a non-imaging event into imaging_study"
                 ),
             )
+    # Temporal correction attempted through the metadata endpoint. Only
+    # a REAL change is refused: clients that echo the whole object back
+    # unchanged (the edit dialog, MCP full-object patches) still get a
+    # 200 instead of a spurious 422.
+    attempted = [
+        f
+        for f in _AMEND_ONLY_FIELDS
+        if f in payload and not _same_value(getattr(ev, f), payload[f])
+    ]
+    if attempted:
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "code": "use_amend_time",
+                "fields": attempted,
+                "endpoint": f"/api/clinical-events/{ev.id}/amend-time",
+                "message": (
+                    "event_date is derived from the status anchor "
+                    "(planned_start_at for planned/confirmed/rescheduled/cancelled, "
+                    "actual_start_at for completed/missed). Correct a clinical time "
+                    "via the amend-time sub-resource, which records the correction."
+                ),
+            },
+        )
+    # ``recurrence_exdates`` is ``list[date]`` on the wire and JSONB in
+    # the DB; normalise so read-after-write has the same shape as
+    # read-from-DB.
+    if payload.get("recurrence_exdates"):
+        payload["recurrence_exdates"] = [
+            d.isoformat() if isinstance(d, date) else d for d in payload["recurrence_exdates"]
+        ]
+
     diff: dict[str, object] = {}
     for field in _UPDATABLE_FIELDS:
         if field not in payload:
@@ -853,9 +1060,11 @@ async def patch_clinical_event(
     # cancelled rather than deleting them, so the audit trail stays
     # intact. materialise_event_dispatches then inserts fresh rows
     # with the new schedule.
-    timing_changed = any(
-        k in diff for k in ("planned_start_at", "reminder_offsets_minutes", "timezone")
-    )
+    # The anchor and the timezone can no longer move through PATCH (see
+    # _AMEND_ONLY_FIELDS); the only reminder-affecting field left here is
+    # the offsets list. Anchor moves re-materialise dispatches in
+    # ``_persist_amendment``.
+    timing_changed = "reminder_offsets_minutes" in diff
     if timing_changed and ev.event_status in ("planned", "confirmed"):
         await cancel_dispatches_for_target(db, "clinical_event", ev.id, reason="rescheduled")
         await materialise_event_dispatches(db, ev)
@@ -1071,6 +1280,71 @@ async def _persist_transition(
         await cancel_dispatches_for_target(
             db, "clinical_event", ev.id, reason=f"transition_{new_status}"
         )
+    await db.commit()
+    await db.refresh(ev)
+    return ev
+
+
+async def _persist_amendment(
+    db: AsyncSession,
+    *,
+    ev: ClinicalEvent,
+    snapshot_before: dict,
+    user: User,
+    request: Request,
+    reason: str | None,
+    idempotency_key: str,
+    diff: dict,
+    reschedule_dispatches: bool,
+) -> ClinicalEvent:
+    """Sibling of :func:`_persist_transition` for a time CORRECTION.
+
+    Same audit shape (etag bump + ``clinical_event_transitions`` row +
+    provenance), but ``event_status``, ``status_changed_*`` and the phase
+    assignment are deliberately NOT touched: an amendment is not a state
+    change. Reusing ``_persist_transition`` here would clobber
+    ``status_change_reason`` (destroying a cancellation reason) and clear
+    ``phase_id``, i.e. it would corrupt the record it is meant to fix.
+
+    ``diff`` carries raw ``date`` / ``datetime`` values on purpose. They
+    reach ``provenance_events.diff`` (JSONB) through the engine's
+    ``json_serializer`` (``bvphoenix.db.engine``), which ISO-formats
+    them. Before that serializer existed this exact shape was the 500 on
+    ``PATCH /clinical-events/{id}``.
+    """
+    ev.etag = uuid.uuid4()
+    await db.flush()
+    # The BEFORE UPDATE trigger recomputes ``event_date`` server-side.
+    # Pull it back BEFORE snapshotting, otherwise ``snapshot_after`` and
+    # the response carry the pre-trigger date and the audit row lies.
+    await db.refresh(ev)
+    snapshot_after = _event_snapshot(ev)
+    db.add(
+        ClinicalEventTransition(
+            event_id=ev.id,
+            action="amend_time",
+            idempotency_key=idempotency_key,
+            snapshot_before=snapshot_before,
+            snapshot_after=snapshot_after,
+            actor_subject_id=user.subject_id,
+            author_kind=_author_kind(request),
+            reason=reason,
+        )
+    )
+    await _record_provenance(
+        db,
+        target_id=ev.id,
+        activity="transition.amend_time",
+        user=user,
+        request=request,
+        diff=diff,
+    )
+    # A moved anchor invalidates every pending reminder: cancel (keeping
+    # the idempotency keys for the audit trail) and re-materialise
+    # against the new schedule.
+    if reschedule_dispatches:
+        await cancel_dispatches_for_target(db, "clinical_event", ev.id, reason="amended")
+        await materialise_event_dispatches(db, ev)
     await db.commit()
     await db.refresh(ev)
     return ev
@@ -1441,5 +1715,216 @@ async def mark_event_missed(
         request=request,
         reason=body.note,
         idempotency_key=idempotency_key,
+    )
+    return _transition_response(ev, None, request, response)
+
+
+@router.post(
+    "/clinical-events/{event_id}/amend-time",
+    response_model=ClinicalEventOut,
+    status_code=status.HTTP_200_OK,
+)
+async def amend_event_time(
+    event_id: uuid.UUID,
+    body: AmendTimeIn,
+    request: Request,
+    response: Response,
+    user: Annotated[User, Depends(require_user)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+    audit: AuditDep,
+    if_match: Annotated[str | None, Header(alias="If-Match")] = None,
+    idempotency_key: Annotated[str | None, Header(alias="Idempotency-Key")] = None,
+    dry_run: Annotated[bool, Query()] = False,
+) -> ClinicalEventOut:
+    """Correct the recorded clinical date/time of an event.
+
+    The only way to correct a recorded clinical time without moving
+    ``event_status``, and the only way to re-date a row that is already
+    terminal (``completed`` / ``cancelled`` / ``rescheduled``): an FSM
+    transition would be wrong there, because nothing about the event's
+    state changed — only our record of *when* it happened. Recording a
+    completion or a move is a different act and still goes through its
+    own transition: ``POST /complete`` writes ``actual_start_at`` /
+    ``actual_end_at``, ``POST /reschedule`` writes
+    ``new_planned_start_at`` / ``new_planned_end_at``.
+
+    Send the anchor family that matches the current status:
+    ``planned_start_at`` / ``planned_end_at`` for planned, confirmed,
+    rescheduled and cancelled; ``actual_start_at`` / ``actual_end_at``
+    for completed and missed. ``event_date`` is writable only on
+    date-only rows whose anchor is NULL; otherwise the DB derives it and
+    a direct write is refused rather than silently reverted.
+    """
+    del audit  # used by middleware via the dependency, not in handler logic
+    if not idempotency_key:
+        raise HTTPException(status_code=428, detail="Idempotency-Key header required")
+    ev = await _load_event_for_transition(db, request=request, event_id=event_id, user=user)
+    await _check_if_match(if_match, str(ev.etag))
+    replay = await _idempotency_replay(
+        db, event_id=event_id, action="amend_time", idempotency_key=idempotency_key
+    )
+    if replay is not None:
+        return _replay_to_out(replay)
+
+    payload = body.model_dump(exclude_unset=True)
+    payload.pop("reason", None)
+    if not payload:
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "code": "nothing_to_amend",
+                "message": "supply at least one of event_date, "
+                "planned_start_at/planned_end_at, actual_start_at/actual_end_at, timezone",
+            },
+        )
+
+    family = _anchor_family(ev.event_status)
+    other = "actual" if family == "planned" else "planned"
+    wrong = [k for k in payload if k.startswith(f"{other}_")]
+    if wrong:
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "code": "wrong_anchor_for_status",
+                "event_status": ev.event_status,
+                "rejected": wrong,
+                "expected_prefix": f"{family}_",
+                "message": (
+                    f"event_status='{ev.event_status}' takes its date from "
+                    f"{family}_start_at; amend that instead"
+                ),
+            },
+        )
+
+    start_field, end_field = f"{family}_start_at", f"{family}_end_at"
+
+    # The START anchor can be moved but never cleared, whatever the
+    # status. Clearing it would degrade the row to "date only" while
+    # leaving ``event_date`` frozen at the value derived from the
+    # timestamp that was just deleted: a date nobody wrote, on a
+    # clinical record. For planned/confirmed the DB CHECK
+    # ``ck_clinical_events_time_required_by_status`` says the same thing
+    # and would otherwise surface as a 500 IntegrityError. An END anchor
+    # IS clearable: "we do not know when it finished" is a legitimate
+    # state.
+    if start_field in payload and payload[start_field] is None:
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "code": "anchor_not_clearable",
+                "field": start_field,
+                "event_status": ev.event_status,
+                "message": (
+                    f"{start_field} defines this event's date and cannot be removed; "
+                    "move it to the right instant instead"
+                ),
+            },
+        )
+
+    anchor_after = payload.get(start_field, getattr(ev, start_field))
+    if "event_date" in payload and anchor_after is not None:
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "code": "event_date_is_derived",
+                "derived_from": start_field,
+                "message": (
+                    "this row has a known clinical timestamp; amend "
+                    f"{start_field} and the DB re-derives event_date"
+                ),
+            },
+        )
+
+    if "event_date" in payload and payload["event_date"] is None:
+        # Same rule as the start anchor: on a date-only row this IS the
+        # row's date, and a clinical event with no date at all is not a
+        # state any caller needs.
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "code": "anchor_not_clearable",
+                "field": "event_date",
+                "event_status": ev.event_status,
+                "message": (
+                    "event_date is the only date this row has and cannot be removed; "
+                    "move it to the right day instead"
+                ),
+            },
+        )
+
+    tz_after = payload.get("timezone", ev.timezone)
+    if "timezone" in payload:
+        # Not only for the preview: the stored value is what the derive
+        # trigger feeds to ``AT TIME ZONE``.
+        _zone(tz_after)
+    new_start = anchor_after
+    new_end = payload.get(end_field, getattr(ev, end_field))
+    if new_start is not None and new_end is not None and new_end < new_start:
+        raise HTTPException(
+            status_code=422,
+            detail={"code": "end_before_start", "message": "the end must follow the start"},
+        )
+    if family == "actual" and new_start is not None and new_start > datetime.now(UTC):
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "code": "future_actual_time",
+                "message": "an event that already happened cannot be dated in the future",
+            },
+        )
+
+    # Amending a REALISED fact (what happened, or the date of a
+    # date-only historical row) is a record amendment and must say why.
+    # Correcting a plan that has not happened yet is ordinary editing.
+    amends_recorded_fact = family == "actual" or "event_date" in payload
+    if amends_recorded_fact and not body.reason:
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "code": "reason_required",
+                "message": (
+                    "correcting the recorded time of an event that already happened "
+                    "requires a reason"
+                ),
+            },
+        )
+
+    snapshot_before = _event_snapshot(ev)
+    if dry_run:
+        preview = _to_out(ev, None).model_dump()
+        for key, value in payload.items():
+            preview[key] = value.isoformat() if isinstance(value, datetime) else value
+        preview["event_date"] = (
+            _local_date(new_start, tz_after)
+            if new_start is not None
+            else payload.get("event_date", ev.event_date)
+        )
+        return ClinicalEventOut(**preview)
+
+    # Compute before mutating: only a MOVED anchor invalidates the
+    # pending reminders. A timezone change relabels the derived date but
+    # leaves the instant, and therefore every scheduled_at, untouched.
+    anchor_moved = "planned_start_at" in payload and not _same_value(
+        ev.planned_start_at, payload["planned_start_at"]
+    )
+    for key, value in payload.items():
+        setattr(ev, key, value)
+
+    diff: dict[str, object] = {
+        key: {"from": snapshot_before.get(key), "to": value} for key, value in payload.items()
+    }
+    if body.reason:
+        diff["reason"] = body.reason
+    reschedule = anchor_moved and ev.event_status in ("planned", "confirmed")
+    ev = await _persist_amendment(
+        db,
+        ev=ev,
+        snapshot_before=snapshot_before,
+        user=user,
+        request=request,
+        reason=body.reason,
+        idempotency_key=idempotency_key,
+        diff=diff,
+        reschedule_dispatches=reschedule,
     )
     return _transition_response(ev, None, request, response)

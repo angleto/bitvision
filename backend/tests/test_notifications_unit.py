@@ -17,6 +17,7 @@ from __future__ import annotations
 import hashlib
 import hmac
 import uuid
+from datetime import UTC, datetime
 
 import pytest
 
@@ -151,12 +152,19 @@ def test_supported_kinds_locales() -> None:
 def test_idempotency_key_deterministic() -> None:
     target = uuid.UUID("11111111-1111-1111-1111-111111111111")
     contact = uuid.UUID("22222222-2222-2222-2222-222222222222")
-    k1 = _idempotency_key(target, contact, -60, "email")
-    k2 = _idempotency_key(target, contact, -60, "email")
+    anchor = datetime(2026, 9, 15, 9, 0, tzinfo=UTC)
+    k1 = _idempotency_key(target, contact, -60, "email", anchor)
+    k2 = _idempotency_key(target, contact, -60, "email", anchor)
     assert k1 == k2
     # Different inputs → different keys
-    assert _idempotency_key(target, contact, -120, "email") != k1
-    assert _idempotency_key(target, contact, -60, "webhook_telegram") != k1
+    assert _idempotency_key(target, contact, -120, "email", anchor) != k1
+    assert _idempotency_key(target, contact, -60, "webhook_telegram", anchor) != k1
+    # The anchor is part of the key: a MOVED appointment is a different
+    # reminder, not the same one rescheduled. Without this, the fresh row
+    # collided with the reminder just cancelled for the old slot and the
+    # ON CONFLICT DO NOTHING dropped it, leaving the patient unnotified.
+    moved = datetime(2026, 9, 16, 9, 0, tzinfo=UTC)
+    assert _idempotency_key(target, contact, -60, "email", moved) != k1
 
 
 def test_normalise_offsets_dedups_caps_filters() -> None:

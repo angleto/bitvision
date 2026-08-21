@@ -52,8 +52,9 @@ SCOPE_CATALOG: tuple[ScopeDef, ...] = (
         "events:write",
         "Create non-imaging clinical events (visit, procedure, admission, "
         "lab batch). Also covers status transitions (confirm/reschedule/"
-        "complete/cancel/mark-missed) since each transition is an audit "
-        "anchor on the event row itself.",
+        "complete/cancel/mark-missed) and time amendments (amend-time, "
+        "which corrects a recorded date without moving the status) since "
+        "each of those is an audit anchor on the event row itself.",
     ),
     # --- Calendar (planning + ICS subscription) -------------------------------
     ScopeDef(
@@ -564,6 +565,12 @@ TOOL_SCOPE: dict[str, str] = {
     "complete_event": "events:write",
     "cancel_event": "events:write",
     "mark_event_missed": "events:write",
+    # Not an FSM transition: amend_event_time corrects the RECORDED
+    # clinical time of an event without moving its status (the only way
+    # to re-date a terminal row). Same blast radius as the transitions
+    # above (one audited write on the event row), so it takes the same
+    # scope.
+    "amend_event_time": "events:write",
     # --- Calendar discovery + feed ---------------------------------------
     "find_upcoming_events": "events:read",
     "find_overdue_events": "events:read",

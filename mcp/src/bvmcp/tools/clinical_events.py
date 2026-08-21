@@ -1,10 +1,11 @@
 """Discovery + Navigation + Write tools — clinical events.
 
 ClinicalEvent is the **temporal axis at the atomic level**: a single
-event in the patient's timeline. Eleven kinds are defined: imaging
+event in the patient's timeline. Twelve kinds are defined: imaging
 study, surgical procedure, outpatient visit, inpatient admission, lab
 batch, consultation event, pathology review, MDT meeting, cardio
-diagnostic, endoscopy, other. Events are not folders (organisational
+diagnostic, endoscopy, radiology appointment, other. Events are not
+folders (organisational
 axis, see ``folders``), not care phases (temporal axis at the
 grouping level, see ``care_phases``), and not tags (cross-cutting
 axis, see ``metadata_writes``). Each axis lives on its own table.
@@ -20,6 +21,19 @@ to ``events:write`` and follow the project-wide write conventions:
 ``If-Match`` on update / delete, response carries the new ETag,
 imaging events are owned by the ingestion pipeline (creation here is
 refused for ``kind='imaging_study'``).
+
+Clinical *time* is corrected in one place: ``amend_event_time``
+(``POST .../amend-time``) is the only way to fix a recorded time
+without moving ``event_status``, and the only way to re-date a row
+that is already terminal. Recording a completion or a move still
+writes timestamps as part of its own transition
+(``complete_event`` takes ``actual_start_at`` / ``actual_end_at``,
+``reschedule_event`` takes ``new_planned_start_at`` /
+``new_planned_end_at``). ``update_clinical_event`` carries metadata
+only, because ``event_date`` is derived by a DB trigger from the
+status anchor: a PATCH writing it would be silently reverted on the
+next trigger firing, so it is refused with 422 ``use_amend_time``
+instead.
 """
 
 from __future__ import annotations
@@ -45,7 +59,8 @@ TOOLS = [
             "every event in the timeline: imaging studies, surgical "
             "procedures, outpatient visits, admissions, lab batches, "
             "consultation events, pathology reviews, MDT meetings, "
-            "cardio diagnostics, endoscopies, and 'other'). Returns "
+            "cardio diagnostics, endoscopies, radiology appointments "
+            "and 'other'). Returns "
             "events newest first by event_date. Filter by ``kind`` to "
             "scope to a single event class, and by ``statuses`` (multi) "
             "to slice the timeline on lifecycle: ``planned`` and "
@@ -158,8 +173,9 @@ TOOLS = [
             "Create a non-imaging ClinicalEvent on a patient's timeline. "
             "Two scenarios:\n\n"
             "1. **Historical event** (default): set ``event_status='completed'`` "
-            "(default) and supply ``event_date`` or ``actual_start_at`` for "
-            "an event that already happened.\n\n"
+            "(default) and supply ``actual_start_at`` for an event that already "
+            "happened, or just ``event_date`` when only the day is known "
+            "(a date-only row, re-datable later via ``amend_event_time``).\n\n"
             "2. **Planned appointment** (calendar): set "
             "``event_status='planned'`` and supply ``planned_start_at`` "
             "(ISO-8601 datetime). Optionally set ``timezone`` (IANA name "
@@ -220,7 +236,9 @@ TOOLS = [
                         "planned events leave this empty and use "
                         "``planned_start_at`` instead — the server "
                         "trigger derives ``event_date`` from the "
-                        "timestamp + timezone."
+                        "timestamp + timezone. Sending it next to an "
+                        "anchor that implies a different date is refused "
+                        "with 422 ``event_date_conflicts_with_anchor``."
                     ),
                 },
                 "body_part": {
@@ -285,11 +303,17 @@ TOOLS = [
                     "type": "string",
                     "format": "date-time",
                     "description": (
-                        "When a completed historical event has a "
-                        "specific start time (visit at 14:30, surgery "
-                        "started 08:15). Optional; the server falls "
-                        "back to ``event_date`` AT 12:00 UTC if you "
-                        "supply only ``event_date``."
+                        "The realised start of an event that already "
+                        "happened (visit at 14:30, surgery started "
+                        "08:15). ``event_status='completed'`` plus "
+                        "``actual_start_at`` is the one-call way to "
+                        "record a past event. There is no time-of-day "
+                        "fallback: supplying only ``event_date`` leaves "
+                        "both anchors NULL, i.e. a date-only row, whose "
+                        "date stays correctable later through "
+                        "``amend_event_time``. An ``event_date`` that "
+                        "disagrees with the anchor is refused with 422 "
+                        "``event_date_conflicts_with_anchor``."
                     ),
                 },
                 "actual_end_at": {
@@ -301,9 +325,10 @@ TOOLS = [
                     "type": "string",
                     "maxLength": 64,
                     "description": (
-                        "IANA timezone (e.g. 'Europe/Rome'). Used by the "
-                        "DB trigger to derive ``event_date`` from "
-                        "timestamps. Defaults to 'UTC' if omitted."
+                        "IANA timezone (e.g. 'Europe/Rome'); anything "
+                        "else is refused with 422 ``invalid_timezone``. "
+                        "Used by the DB trigger to derive ``event_date`` "
+                        "from timestamps. Defaults to 'UTC' if omitted."
                     ),
                 },
                 "location_struct": {
@@ -364,14 +389,22 @@ TOOLS = [
     Tool(
         name="update_clinical_event",
         description=(
-            "Patch a ClinicalEvent's mutable metadata. ``kind`` and "
-            "``patient_id`` are immutable (they define the row's "
-            "identity and ownership). ``etag`` is sent as the "
-            "``If-Match`` header and MUST match the value returned by "
-            "the previous read; a 412 means a concurrent writer "
-            "committed in between, in which case the caller should "
-            "re-read, merge, and retry. ``patch`` carries only the "
-            "fields to change."
+            "Patch a ClinicalEvent's NON-temporal metadata. "
+            "``patient_id`` is immutable (it defines the row's "
+            "ownership). ``etag`` is sent as the ``If-Match`` header and "
+            "MUST match the value returned by the previous read; a 412 "
+            "means a concurrent writer committed in between, in which "
+            "case the caller should re-read, merge, and retry. "
+            "``patch`` carries only the fields to change.\n\n"
+            "Temporal corrections do NOT belong here: ``event_date``, "
+            "``planned_start_at``, ``planned_end_at``, "
+            "``actual_start_at``, ``actual_end_at`` and ``timezone`` go "
+            "through ``amend_event_time``, which validates the anchor "
+            "family and records the correction in the audit chain. The "
+            "``patch`` object below advertises the metadata fields only "
+            "and is closed (``additionalProperties: false``), so those "
+            "six have no slot here; sending one anyway is refused by "
+            "the API with 422 ``{code: 'use_amend_time'}``."
         ),
         inputSchema={
             "type": "object",
@@ -388,12 +421,36 @@ TOOLS = [
                     "type": "object",
                     "description": (
                         "Subset of ``ClinicalEventUpdateIn`` fields. "
-                        "Allowed keys: ``event_date``, ``title``, "
-                        "``body_part``, ``code_loinc``, ``code_snomed``, "
-                        "``narrative``."
+                        "Mirrors the backend's ``_UPDATABLE_FIELDS`` "
+                        "exactly; temporal fields live on "
+                        "``amend_event_time``."
                     ),
                     "properties": {
-                        "event_date": {"type": "string", "format": "date"},
+                        "kind": {
+                            "type": "string",
+                            "enum": [
+                                "surgical_procedure",
+                                "outpatient_visit",
+                                "inpatient_admission",
+                                "lab_batch",
+                                "consultation_event",
+                                "pathology_review",
+                                "mdt_meeting",
+                                "cardio_diagnostic",
+                                "endoscopy",
+                                "radiology_appointment",
+                                "other",
+                            ],
+                            "description": (
+                                "Reclassify the event. ``imaging_study`` "
+                                "is absent on purpose: promoting a "
+                                "non-imaging row into it is refused with "
+                                "422, and a row that still has a live "
+                                "imaging_studies projection cannot leave "
+                                "that kind (409); delete the imaging "
+                                "study through the DICOM path first."
+                            ),
+                        },
                         "title": {
                             "type": "string",
                             "minLength": 1,
@@ -403,10 +460,12 @@ TOOLS = [
                         "code_loinc": {"type": "string", "maxLength": 32},
                         "code_snomed": {"type": "string", "maxLength": 32},
                         "narrative": {"type": "string"},
-                        "planned_start_at": {"type": "string", "format": "date-time"},
-                        "planned_end_at": {"type": "string", "format": "date-time"},
-                        "timezone": {"type": "string", "maxLength": 64},
                         "location_struct": {"type": "object"},
+                        "recurrence_rule": {"type": "string", "maxLength": 512},
+                        "recurrence_exdates": {
+                            "type": "array",
+                            "items": {"type": "string", "format": "date"},
+                        },
                         "reminder_offsets_minutes": {
                             "type": "array",
                             "items": {"type": "integer"},
@@ -587,7 +646,9 @@ TOOLS = [
         name="cancel_event",
         description=(
             "Move a planned/confirmed event to ``cancelled``. Terminal "
-            "state (no further transitions). ``reason`` is mandatory."
+            "state (no further transitions), though its recorded date "
+            "can still be corrected with ``amend_event_time``, which is "
+            "an amendment and not a transition. ``reason`` is mandatory."
         ),
         inputSchema={
             "type": "object",
@@ -615,6 +676,158 @@ TOOLS = [
                 "event_id": {"type": "string"},
                 "etag": {"type": "string"},
                 "note": {"type": "string", "maxLength": 255},
+                "idempotency_key": {"type": "string", "minLength": 1},
+                "dry_run": {"type": "boolean", "default": False},
+            },
+            "required": ["event_id", "etag", "idempotency_key"],
+        },
+    ),
+    # ----- Record amendment (time correction, NOT a transition) -----------
+    Tool(
+        name="amend_event_time",
+        description=(
+            "Correct the recorded clinical date/time of an event WITHOUT "
+            "moving its ``event_status``. This is the only way to "
+            "correct a recorded time without a transition, and the only "
+            "way to re-date a row that is already terminal "
+            "(``completed``, ``cancelled``, ``rescheduled``): an FSM "
+            "transition would be wrong there, because nothing about the "
+            "event's state changed, only our record of when it "
+            "happened. Recording a completion or a move is a different "
+            "act and keeps its own tool: ``complete_event`` writes "
+            "``actual_start_at`` / ``actual_end_at`` and "
+            "``reschedule_event`` writes ``new_planned_start_at`` / "
+            "``new_planned_end_at`` as part of the transition. "
+            "``PATCH`` (see "
+            "``update_clinical_event``) refuses temporal fields with 422 "
+            "``{code: 'use_amend_time'}`` and points here.\n\n"
+            "**Anchor family.** Send only the family matching the current "
+            "status: ``planned_start_at`` / ``planned_end_at`` for "
+            "``planned``, ``confirmed``, ``rescheduled``, ``cancelled``; "
+            "``actual_start_at`` / ``actual_end_at`` for ``completed`` "
+            "and ``missed``. Mixing families is refused with 422 "
+            "``{code: 'wrong_anchor_for_status'}``.\n\n"
+            "**Starts move, ends clear.** The START anchor of the "
+            "family (``planned_start_at`` / ``actual_start_at``) can be "
+            "moved to another instant but never removed: it is what the "
+            "row's date is derived from, so nulling it is refused with "
+            "422 ``{code: 'anchor_not_clearable'}`` whatever the status, "
+            "with the refused field name in ``detail.field``. The same "
+            "refusal covers ``event_date`` on a date-only row, which is "
+            "the only date that row has. The END anchors do accept an "
+            "explicit ``null``, which clears them, because 'we do not "
+            "know when it finished' is a legitimate state.\n\n"
+            "**event_date is derived.** ``event_date`` is writable ONLY "
+            "on date-only rows whose family START anchor is NULL (DICOM "
+            "``StudyDate`` imports, document backfills). When an anchor "
+            "exists, or when the same call also sets one, the DB derives "
+            "the date from it, so a direct write is refused with 422 "
+            "``{code: 'event_date_is_derived'}`` instead of being "
+            "silently reverted by the trigger: amend the anchor "
+            "timestamp and let the date follow.\n\n"
+            "**reason.** The rule keys on the row's STATUS, not on "
+            "which field you send. It is mandatory for EVERY amendment "
+            "of a row whose status is ``completed`` or ``missed`` (the "
+            "actual family), a timezone-only correction included, and "
+            "for any write of ``event_date``: both restate the record of "
+            "something that already happened, so it must say why (422 "
+            "``{code: 'reason_required'}`` otherwise). It is optional "
+            "while the row is in the planned family (``planned``, "
+            "``confirmed``, ``rescheduled``, ``cancelled``), where "
+            "correcting a plan that has not happened yet is ordinary "
+            "editing.\n\n"
+            "Other 422 codes: ``nothing_to_amend`` (no temporal field "
+            "sent), ``end_before_start``, ``future_actual_time`` (an "
+            "event that already happened cannot be dated in the future), "
+            "``invalid_timezone`` (not an IANA zone name). MOVING "
+            "``planned_start_at`` on a planned / confirmed row "
+            "re-materialises its reminder dispatches; a timezone-only "
+            "change does not, because the instant itself is unchanged. Use "
+            "``dry_run=true`` to preview the resulting row (including the "
+            "re-derived ``event_date``) without persisting."
+        ),
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "event_id": {"type": "string"},
+                "etag": {
+                    "type": "string",
+                    "description": (
+                        "Strong ETag from the most recent GET. Sent as "
+                        "``If-Match``; 412 on mismatch."
+                    ),
+                },
+                "planned_start_at": {
+                    "type": "string",
+                    "format": "date-time",
+                    "description": (
+                        "New planned start. Planned family only "
+                        "(planned / confirmed / rescheduled / cancelled). "
+                        "Movable, never clearable: a ``null`` is refused "
+                        "with 422 ``anchor_not_clearable``. A value "
+                        "without an offset is read as UTC."
+                    ),
+                },
+                "planned_end_at": {
+                    "type": ["string", "null"],
+                    "format": "date-time",
+                    "description": "New planned end; explicit ``null`` clears it.",
+                },
+                "actual_start_at": {
+                    "type": "string",
+                    "format": "date-time",
+                    "description": (
+                        "New realised start. Actual family only "
+                        "(completed / missed). Cannot be in the future, "
+                        "and movable but never clearable: a ``null`` is "
+                        "refused with 422 ``anchor_not_clearable``. "
+                        "Requires ``reason``."
+                    ),
+                },
+                "actual_end_at": {
+                    "type": ["string", "null"],
+                    "format": "date-time",
+                    "description": (
+                        "New realised end; explicit ``null`` clears it. "
+                        "Requires ``reason``, like every amendment of a "
+                        "completed / missed row."
+                    ),
+                },
+                "event_date": {
+                    "type": "string",
+                    "format": "date",
+                    "description": (
+                        "ISO date. Accepted only on date-only rows whose "
+                        "family start anchor is NULL; otherwise 422 "
+                        "``event_date_is_derived``. Requires ``reason``."
+                    ),
+                },
+                "timezone": {
+                    "type": "string",
+                    "maxLength": 64,
+                    "description": (
+                        "IANA name (e.g. 'Europe/Rome'); anything else "
+                        "is 422 ``invalid_timezone``. The DB derives "
+                        "``event_date`` from the anchor IN this zone, so "
+                        "moving it can move the date by a day. On a "
+                        "completed / missed row even a timezone-only "
+                        "change needs ``reason``."
+                    ),
+                },
+                "reason": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 255,
+                    "description": (
+                        "Why the recorded time was wrong. Mandatory for "
+                        "ANY amendment of a ``completed`` / ``missed`` "
+                        "row (a timezone-only one included) and for any "
+                        "write of ``event_date``; optional while the row "
+                        "is planned / confirmed / rescheduled / "
+                        "cancelled. Stored on the ``amend_time`` "
+                        "transition row."
+                    ),
+                },
                 "idempotency_key": {"type": "string", "minLength": 1},
                 "dry_run": {"type": "boolean", "default": False},
             },
@@ -912,6 +1125,66 @@ async def handle(name: str, arguments: dict) -> str:
                 extras["_etag_header"] = new_etag
             if extras:
                 payload = {**payload, **extras}
+        return json.dumps(payload, indent=2, ensure_ascii=False)
+
+    if name == "amend_event_time":
+        # Same envelope as the transitions (If-Match + Idempotency-Key +
+        # ?dry_run) but NOT an FSM verb: it corrects the recorded time
+        # and leaves event_status alone.
+        #
+        # A START anchor can be MOVED but never CLEARED: it is what the
+        # DB derives event_date from, so the backend answers 422
+        # ``anchor_not_clearable``. The schema types both starts as plain
+        # strings, so a null here is a caller bug: fail fast with the
+        # same vocabulary instead of spending a round trip on it.
+        for start_field in ("planned_start_at", "actual_start_at"):
+            if start_field in arguments and arguments[start_field] is None:
+                return json.dumps(
+                    {
+                        "error": "anchor_not_clearable",
+                        "field": start_field,
+                        "detail": (
+                            f"{start_field} defines this event's date and cannot be "
+                            "removed; send the corrected instant instead. Only "
+                            "planned_end_at / actual_end_at accept an explicit null."
+                        ),
+                    },
+                    indent=2,
+                )
+
+        # Presence, not truthiness, decides what goes on the wire for the
+        # rest: the backend reads the body with ``exclude_unset=True``, so
+        # an explicit ``null`` for planned_end_at / actual_end_at is the
+        # documented way to CLEAR an end timestamp. Filtering on
+        # ``is not None`` (as the transition tools do, where no field is
+        # clearable) would make that unexpressible.
+        amend_body: dict[str, Any] = {}
+        for k in (
+            "planned_start_at",
+            "planned_end_at",
+            "actual_start_at",
+            "actual_end_at",
+            "event_date",
+            "timezone",
+        ):
+            if k in arguments:
+                amend_body[k] = arguments[k]
+        if arguments.get("reason") is not None:
+            amend_body["reason"] = arguments["reason"]
+        amend_params: dict[str, Any] | None = (
+            {"dry_run": "true"} if arguments.get("dry_run") else None
+        )
+        payload, hdrs = await api_post_with_headers(
+            f"/api/clinical-events/{arguments['event_id']}/amend-time",
+            json=amend_body,
+            params=amend_params,
+            idempotency_key=arguments["idempotency_key"],
+            if_match=arguments["etag"],
+        )
+        if isinstance(payload, dict):
+            new_etag = hdrs.get("etag") or hdrs.get("ETag")
+            if new_etag:
+                payload = {**payload, "_etag_header": new_etag}
         return json.dumps(payload, indent=2, ensure_ascii=False)
 
     if name == "find_upcoming_events":

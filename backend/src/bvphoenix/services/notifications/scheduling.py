@@ -23,7 +23,7 @@ import uuid
 from collections.abc import Sequence
 from datetime import UTC, datetime, timedelta
 
-from sqlalchemy import select
+from sqlalchemy import select, text
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -55,11 +55,21 @@ def _idempotency_key(
     contact_id: uuid.UUID,
     offset_minutes: int,
     channel: str,
+    anchor: datetime,
 ) -> str:
     """Deterministic per-tuple key. Same inputs → same key, so the
     ON CONFLICT DO NOTHING in the bulk insert dedups re-runs after
-    transient failures."""
-    raw = f"{target_id}|{contact_id}|{offset_minutes}|{channel}".encode()
+    transient failures.
+
+    ``anchor`` is part of the hash because a reminder is identified by
+    WHEN it fires, not only by who/which channel. Without it, moving an
+    appointment produced the same key as the reminder that was just
+    cancelled for the old slot, so the fresh row was dropped by the
+    ON CONFLICT and the patient got no reminder at all. With the anchor
+    in the key, a moved appointment is a different reminder; a true
+    re-run of the same schedule still dedups.
+    """
+    raw = f"{target_id}|{contact_id}|{offset_minutes}|{channel}|{anchor.isoformat()}".encode()
     return hashlib.sha256(raw).hexdigest()
 
 
@@ -195,7 +205,9 @@ async def materialise_event_dispatches(db: AsyncSession, event: ClinicalEvent) -
                         "offset_minutes": offset,
                         "scheduled_at": scheduled,
                         "locale": contact.preferred_locale or "it",
-                        "idempotency_key": _idempotency_key(event.id, contact.id, offset, channel),
+                        "idempotency_key": _idempotency_key(
+                            event.id, contact.id, offset, channel, anchor
+                        ),
                         "author_kind": _author_kind_from_event(event),
                     }
                 )
@@ -204,7 +216,13 @@ async def materialise_event_dispatches(db: AsyncSession, event: ClinicalEvent) -
     stmt = (
         pg_insert(NotificationDispatch)
         .values(rows)
-        .on_conflict_do_nothing(index_elements=["idempotency_key"])
+        .on_conflict_do_nothing(
+            index_elements=["idempotency_key"],
+            # Must mirror the partial UNIQUE index from migration 0047: a
+            # cancelled row no longer owns the key, so cancel-then-rebuild
+            # can insert.
+            index_where=text("status <> 'cancelled'"),
+        )
         .returning(NotificationDispatch.id)
     )
     res = await db.execute(stmt)
@@ -251,7 +269,9 @@ async def materialise_task_dispatches(db: AsyncSession, task: PatientTask) -> in
                         "offset_minutes": offset,
                         "scheduled_at": scheduled,
                         "locale": contact.preferred_locale or "it",
-                        "idempotency_key": _idempotency_key(task.id, contact.id, offset, channel),
+                        "idempotency_key": _idempotency_key(
+                            task.id, contact.id, offset, channel, anchor
+                        ),
                         "author_kind": _author_kind_from_task(task),
                     }
                 )
@@ -260,7 +280,13 @@ async def materialise_task_dispatches(db: AsyncSession, task: PatientTask) -> in
     stmt = (
         pg_insert(NotificationDispatch)
         .values(rows)
-        .on_conflict_do_nothing(index_elements=["idempotency_key"])
+        .on_conflict_do_nothing(
+            index_elements=["idempotency_key"],
+            # Must mirror the partial UNIQUE index from migration 0047: a
+            # cancelled row no longer owns the key, so cancel-then-rebuild
+            # can insert.
+            index_where=text("status <> 'cancelled'"),
+        )
         .returning(NotificationDispatch.id)
     )
     res = await db.execute(stmt)
