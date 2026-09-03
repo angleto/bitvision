@@ -5,7 +5,7 @@ import Link from "next/link";
 import { useRouter, useSearchParams } from "next/navigation";
 import { type FormEvent, Suspense, useState } from "react";
 
-import { ApiError, authApi } from "@/lib/api";
+import { ApiError, authApi, errorCode } from "@/lib/api";
 import { useAuth } from "@/lib/auth-context";
 import { safeInternalPath } from "@/lib/safe-redirect";
 
@@ -44,7 +44,28 @@ function LoginForm() {
   const [mfaRequired, setMfaRequired] = useState(false);
   const [totpCode, setTotpCode] = useState("");
   const [err, setErr] = useState<string | null>(null);
+  // A 403 ``email_not_verified`` is not an error the user can retype
+  // their way out of: the credentials were right and the account is
+  // simply unusable until the address is confirmed. It used to render
+  // as the raw English detail with no way forward, which is how an
+  // account created by the share-link claim flow looked exactly like a
+  // forgotten password. This is the actionable state instead.
+  const [needsVerification, setNeedsVerification] = useState(false);
+  const [resendState, setResendState] = useState<"idle" | "sending" | "sent">("idle");
   const [busy, setBusy] = useState(false);
+
+  async function resendVerification() {
+    setResendState("sending");
+    try {
+      await authApi.resendVerification(email.trim().toLowerCase());
+    } catch {
+      // The endpoint answers 202 whether or not the address is
+      // registered — deliberately, so it cannot be used to discover
+      // accounts. There is correspondingly nothing useful to report on
+      // failure beyond "we tried".
+    }
+    setResendState("sent");
+  }
 
   async function onSubmit(e: FormEvent) {
     e.preventDefault();
@@ -105,10 +126,64 @@ function LoginForm() {
           return;
         }
       }
+      if (errorCode(e) === "email_not_verified") {
+        setNeedsVerification(true);
+        setResendState("idle");
+        setErr(null);
+        setBusy(false);
+        return;
+      }
       setErr(e instanceof ApiError ? e.message : t("errorGeneric"));
     } finally {
       setBusy(false);
     }
+  }
+
+  // The address is right, the password is right, and the account still
+  // cannot be used. Nothing on the login form can fix that, so the form
+  // steps aside for the one action that can.
+  if (needsVerification) {
+    return (
+      <div className="form">
+        <h1>{t("title")}</h1>
+        {/* <output> carries role="status" implicitly, so a screen
+            reader announces the state change without an explicit role. */}
+        <output
+          style={{
+            display: "block",
+            padding: "0.75rem 0.9rem",
+            borderRadius: "var(--bv-r-sm)",
+            background: "var(--bv-info-soft)",
+            color: "var(--bv-fg)",
+            fontSize: "0.9rem",
+          }}
+        >
+          <p style={{ margin: 0 }}>{t("verifyRequiredTitle")}</p>
+          <p style={{ margin: "0.4rem 0 0", color: "var(--bv-fg-soft)" }}>
+            {t("verifyRequiredBody", { email: email.trim().toLowerCase() })}
+          </p>
+        </output>
+        {resendState === "sent" ? (
+          <output className="meta">
+            {t("verifyResendDone", { email: email.trim().toLowerCase() })}
+          </output>
+        ) : (
+          <button type="button" onClick={resendVerification} disabled={resendState === "sending"}>
+            {resendState === "sending" ? t("verifyResendSending") : t("verifyResendAction")}
+          </button>
+        )}
+        <button
+          type="button"
+          className="ghost"
+          onClick={() => {
+            setNeedsVerification(false);
+            setResendState("idle");
+          }}
+        >
+          {t("verifyBack")}
+        </button>
+      </div>
+    );
   }
 
   return (

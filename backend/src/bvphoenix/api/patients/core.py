@@ -223,13 +223,24 @@ async def create_patient(
     # Persist the initial contact list into the dedicated 1:N table so
     # the new schema is the source of truth from the very first save.
     if body.contacts:
-        from bvphoenix.services.patient_contacts import replace_all_contacts
-
-        await replace_all_contacts(
-            db,
-            patient_id=patient.id,
-            incoming=[c.model_dump() for c in body.contacts],
+        from bvphoenix.services.patient_contacts import (
+            DuplicateContactEmailError,
+            replace_all_contacts,
         )
+
+        try:
+            await replace_all_contacts(
+                db,
+                patient_id=patient.id,
+                incoming=[c.model_dump() for c in body.contacts],
+            )
+        except DuplicateContactEmailError as exc:
+            raise problem(
+                409,
+                "contact_email_duplicate",
+                "two contacts in this payload share the same email address",
+                extra={"email": exc.email},
+            ) from exc
     await db.commit()
     await db.refresh(patient)
     await enqueue_text_embed(
@@ -457,13 +468,27 @@ async def update_patient(
         patient.external_identifiers = new_array
     await db.flush()
     if contacts_payload is not None:
-        from bvphoenix.services.patient_contacts import replace_all_contacts
-
-        await replace_all_contacts(
-            db,
-            patient_id=patient.id,
-            incoming=contacts_payload,
+        from bvphoenix.services.patient_contacts import (
+            DuplicateContactEmailError,
+            replace_all_contacts,
         )
+
+        try:
+            await replace_all_contacts(
+                db,
+                patient_id=patient.id,
+                incoming=contacts_payload,
+            )
+        except DuplicateContactEmailError as exc:
+            # Two entries in one array naming the same mailbox. Folding
+            # them would discard whichever the caller meant to keep, so
+            # the whole PATCH is refused and the address is named.
+            raise problem(
+                409,
+                "contact_email_duplicate",
+                "two contacts in this payload share the same email address",
+                extra={"email": exc.email},
+            ) from exc
     fields_in_message = sorted(list(updates.keys()) + list(legacy_identifier_updates.keys()))
     commit = await record_versioned_change(
         db,

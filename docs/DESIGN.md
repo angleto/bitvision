@@ -38,7 +38,7 @@ a consent-first model for medical imaging data.
   embeddings at upload time.
 - **Search**: full-text on metadata, structured filters (modality,
   anatomy, tags), vector similarity search (image + text). **No
-  ontologies**.
+  ontologies** — see the qualification in §2.
 - **Advanced in-browser DICOM viewer**: 2D, multi-planar reconstruction
   (MPR), 3D volume rendering, annotation management.
 - **Annotations**: manual (drawings, bounding boxes, segmentations, text)
@@ -90,7 +90,36 @@ a consent-first model for medical imaging data.
   list: no military use, surveillance, social scoring,
   insurance underwriting, employment decisions, discriminatory
   screening.
-- **No ontologies**. Flat tags + vectors + DICOM metadata are sufficient.
+- **No ontologies for indexing and retrieval**. Flat tags + vectors +
+  DICOM metadata are sufficient; nothing is stored under, or looked up
+  by, a coded concept. This is a claim about *search*, not about
+  *interoperability* — see the terminology-binding carve-out below.
+- **Terminology binding at the export boundary only**. Standard codes
+  (SNOMED CT, LOINC, UCUM) may appear where the platform speaks to
+  something else — the FHIR and DICOM SR exports — and nowhere else.
+  Four rules make this a boundary and not the thin end of an ontology
+  programme:
+  1. **Never a storage or lookup key.** Internal rows stay keyed by our
+     own identifiers; the code is resolved at serialization time.
+     Dropping every code must leave the platform fully functional.
+  2. **Verified or absent.** Each code carries its source and the date
+     it was checked, as an inline audit trail. A concept with no clean
+     1:1 match is left NULL rather than approximated — a wrong code is
+     worse than no code. `CodeableConcept.text` alone is valid FHIR.
+  3. **Three systems, frozen in code.** SNOMED CT, LOINC, UCUM. No
+     terminology server, no value-set expansion, no runtime lookup, and
+     no ICD / ATC / RxNorm without a fresh decision.
+  4. **Pinned by a test.** Every emitted code system sits on an
+     allowlist enforced by
+     `backend/tests/test_terminology_binding_allowlist.py`, over both the
+     FHIR builders and the DICOM SR coding tables. Widening the list is a
+     deliberate diff, which is the point.
+  This is descriptive, not aspirational: migration
+  `0040_finding_vocab_snomed_codes` already maps the Finding vocabulary
+  onto SNOMED CT with every concept id verified against OLS4 and the
+  unmatched terms deliberately left NULL, `DocumentKind` already carries
+  `loinc_code` / `fhir_resource`, and the DICOM SR export already emits
+  UCUM units. The rules above name the discipline those already follow.
 - **Descriptors-first**: every indexed object has tags and at least one
   vector embedding.
 - **Series is the logical unit**, not the file: volumetric DICOMs
@@ -625,7 +654,7 @@ Italian and EU public sector.
 | FHIR R4 server or gateway | Absent | Zero `fhir`, `Patient resource` references | Patient, Encounter, Observation, ImagingStudy, DiagnosticReport. Required for hospital integration |
 | FSE 2.0 Italian integration (INI / Tessera Sanitaria / ANA) | Absent | `docs/fascicolo.md` says "FSE 2.0 inspired", zero INI code | Decisive for Italian public-sector deals |
 | IHE profiles (XDS, PIX, PDQ, ATNA, BPPC, XCA) | Absent | Zero references | Standard in regional HIE |
-| Terminology services (SNOMED CT, LOINC, ICD-10/11, ATC, RxNorm) | Absent | No code mapping tables | Required for structured data exchange. Tension with §2 "no ontologies" principle to be resolved |
+| Terminology services (SNOMED CT, LOINC, ICD-10/11, ATC, RxNorm) | Partial | SNOMED CT on the Finding vocabulary (migration 0040, OLS4-verified); LOINC on `DocumentKind`; UCUM in the DICOM SR export | Bounded by the §2 export-boundary carve-out: three systems, verified-or-absent, never a storage key. ICD / ATC / RxNorm still absent and still need a decision |
 | Worklist plus DICOM MWL | Absent | Explicitly out of MVP per §1 (no automatic PACS ingestion) | If scope expands to clinical reporting this becomes mandatory |
 | CDA R2 / IPS export | Absent | Zero references | Cross-border health record portability |
 | MDR / AI Act / ISO 13485 process | Absent | §2 positions the product as "research / educational, not for primary diagnosis" | Decision: stay outside MDR or invest in certification |
@@ -660,8 +689,14 @@ scope" requires a positioning change.
 - **MDR / CE-marked medical device**: §2 declares "research /
   educational, not for primary diagnosis". Reopen if a lighthouse
   customer or grant requires diagnostic claims.
-- **Ontologies**: §2 states "no ontologies". Strong design call.
-  Revisit if interop with FHIR / IHE forces SNOMED / LOINC bindings.
+- **Ontology-driven indexing and retrieval**: §2 keeps coded concepts
+  out of storage and search. Note that terminology *binding at the
+  export boundary* is no longer out of scope — §2 carves it out
+  explicitly, and the codebase already relies on it. What stays out:
+  coded concepts as storage or lookup keys, a terminology server,
+  value-set expansion, runtime code lookup, and the ICD / ATC / RxNorm
+  families. Reopen the first of those only if search itself needs
+  concept expansion, which vectors have so far made unnecessary.
 
 ### 10.6 Suggested first iteration
 

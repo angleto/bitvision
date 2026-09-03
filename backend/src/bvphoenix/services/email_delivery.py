@@ -247,10 +247,34 @@ async def requeue(
     return row
 
 
+async def run_in_background(delivery_id: uuid.UUID, message: EmailMessage) -> None:
+    """Attempt a queued delivery from a FastAPI background task.
+
+    Opens its own session: the request's session is closed by the time
+    background tasks run. Never raises — a background task that throws
+    is logged by starlette and nothing else, and the ledger row already
+    records the failure for the drain cron to pick up.
+
+    Lives here rather than in an API module because more than one
+    adapter dispatches queued mail (registration, resend-verification,
+    the share-link claim), and a second copy would be a second set of
+    error semantics.
+    """
+    from bvphoenix.db.session import SessionFactory
+
+    try:
+        async with SessionFactory() as db:
+            await attempt(db, delivery_id, message=message)
+            await db.commit()
+    except Exception:
+        logger.exception("ledger delivery %s could not be attempted", delivery_id)
+
+
 __all__ = [
     "attempt",
     "claim_due",
     "enqueue",
     "register_builder",
     "requeue",
+    "run_in_background",
 ]

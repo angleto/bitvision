@@ -48,6 +48,14 @@ from bvphoenix.db.models import (
 from bvphoenix.db.models.gdpr import REQUIRED_CONSENT_KINDS
 from bvphoenix.db.session import get_db
 from bvphoenix.middleware.audit_dependency import AuditDep
+from bvphoenix.middleware.problem_details import problem
+from bvphoenix.services.account_provisioning import (
+    build_verification_url,
+    hash_verification_token,
+    issue_verification_token,
+    record_required_consents,
+    start_email_verification,
+)
 from bvphoenix.services.email import (
     EmailMessage,
     build_password_reset_email,
@@ -61,6 +69,9 @@ from bvphoenix.services.email_delivery import (
 )
 from bvphoenix.services.email_delivery import (
     register_builder as register_delivery_builder,
+)
+from bvphoenix.services.email_delivery import (
+    run_in_background as run_email_delivery,
 )
 from bvphoenix.services.quota import (
     STORAGE_FREE_TIER_BYTES,
@@ -84,6 +95,13 @@ router = APIRouter(prefix="/auth", tags=["auth"])
 # Redis-backed today.
 _forgot_limiter = SlidingWindowRateLimiter(max_hits=10, window_seconds=60.0)
 _reset_limiter = SlidingWindowRateLimiter(max_hits=10, window_seconds=60.0)
+# ``resend-verification`` is unauthenticated and causes the server to
+# send mail to an address the caller chose. Unbounded, that is a mail
+# amplifier pointed at any inbox: same shape as forgot-password, same
+# bound. Per network origin, because the endpoint deliberately refuses
+# to say whether the address exists, so a per-identity bound would be
+# an existence oracle.
+_resend_verification_limiter = SlidingWindowRateLimiter(max_hits=10, window_seconds=60.0)
 
 
 # ---------------------------------------------------------------------
@@ -98,6 +116,30 @@ _reset_limiter = SlidingWindowRateLimiter(max_hits=10, window_seconds=60.0)
 SESSION_COOKIE_NAME = "bvp_session"
 
 logger = logging.getLogger(__name__)
+
+
+async def _attach_pending_invitations(db: AsyncSession, *, user: User, audit: AuditDep) -> None:
+    """Hand this account every invitation addressed to its mailbox.
+
+    Thin wrapper over :mod:`bvphoenix.services.invitations` so login and
+    verify-email share one call shape and one audit action. The service
+    refuses to do anything for an unverified address, so this is safe to
+    call from anywhere authentication has already succeeded.
+
+    Flushes, never commits: the attachment belongs to the caller's
+    transaction.
+    """
+    from bvphoenix.services.invitations import reconcile_invitations_for_user
+
+    attached = await reconcile_invitations_for_user(db, user=user)
+    for item in attached:
+        await audit.log(
+            action="invitation_attached",
+            actor_subject_id=user.subject_id,
+            resource_kind=item.resource_kind,
+            resource_id=item.resource_id,
+            metadata=item.as_audit_metadata(),
+        )
 
 
 def _set_session_cookie(
@@ -195,32 +237,19 @@ def _hash_reset_token(plaintext: str) -> str:
     return hashlib.sha256(plaintext.encode("utf-8")).hexdigest()
 
 
-def _hash_token(raw: str) -> str:
-    """SHA-256 hex digest — what we persist in the DB."""
-    return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+# Verification-token mechanics live in ``services.account_provisioning``
+# so that every path which creates an account — this module, the
+# share-link claim in ``api/sharing``, the admin CLI — mints the same
+# token against the same ledger. They are re-exported under the private
+# names this module already used so the call sites read unchanged.
+_hash_token = hash_verification_token
+_build_verification_url = build_verification_url
 
 
-def _build_verification_url(raw_token: str, settings: Settings) -> str:
-    base = settings.frontend_base_url.rstrip("/")
-    return f"{base}/verify-email?{urlencode({'token': raw_token})}"
-
-
-async def _run_delivery(delivery_id: uuid.UUID, message: EmailMessage) -> None:
-    """Attempt a queued delivery from a background task.
-
-    Opens its own session: the request's session is closed by the time
-    FastAPI runs background tasks. Never raises — a background task that
-    throws is logged by starlette and nothing else, and the ledger row
-    already records the failure for the drain cron to pick up.
-    """
-    from bvphoenix.db.session import SessionFactory
-
-    try:
-        async with SessionFactory() as db:
-            await attempt_delivery(db, delivery_id, message=message)
-            await db.commit()
-    except Exception:
-        logger.exception("ledger delivery %s could not be attempted", delivery_id)
+# Dispatching a queued delivery is shared with ``api/sharing`` (the
+# share-link claim mails its own verification), so the implementation
+# lives in the service and this is the name the module already used.
+_run_delivery = run_email_delivery
 
 
 async def _rebuild_verification_email(db: AsyncSession, row) -> EmailMessage | None:
@@ -266,23 +295,8 @@ register_delivery_builder("password_reset", _rebuild_password_reset_email)
 
 
 async def _issue_verification_token(db: AsyncSession, user: User, settings: Settings) -> str:
-    """Mint a new one-shot verification token and persist its hash.
-
-    Returns the raw token so the caller can mail it — the raw value is
-    never logged and never stored.
-    """
-    raw = secrets.token_urlsafe(32)
-    token_hash = _hash_token(raw)
-    expires_at = datetime.now(UTC) + timedelta(seconds=settings.email_verification_ttl_seconds)
-    db.add(
-        EmailVerificationToken(
-            user_subject_id=user.subject_id,
-            token_hash=token_hash,
-            expires_at=expires_at,
-        )
-    )
-    await db.flush()
-    return raw
+    """Delegates to ``services.account_provisioning.issue_verification_token``."""
+    return await issue_verification_token(db, user, settings)
 
 
 @router.post("/register", response_model=RegisterOut, status_code=status.HTTP_201_CREATED)
@@ -315,35 +329,20 @@ async def register(
     # Required consents (ToS, Privacy Policy) are a precondition to
     # using the platform; record explicit rows so the audit trail
     # carries a real grant, not a synthesised one.
-    for kind in REQUIRED_CONSENT_KINDS:
-        db.add(
-            Consent(
-                user_subject_id=user.subject_id,
-                kind=kind,
-                metadata_={"source": "registration"},
-            )
-        )
+    await record_required_consents(db, user=user, source="registration")
 
-    raw_token = await _issue_verification_token(db, user, settings)
-    url = _build_verification_url(raw_token, settings)
-    verification_msg = build_verification_email(to=user.email, token_url=url)
-    # Queue in the same transaction as the token. With
+    # Queue the verification in the same transaction as its token. With
     # ``require_email_verification`` on, a signup whose email never
     # arrives is a permanent lockout: ``email_verified_at`` has no other
     # write path. The ledger turns a relay outage into a delayed
     # verification instead of a dead account.
-    delivery = await enqueue_delivery(
-        db,
-        purpose="email_verification",
-        recipient_email=user.email,
-        subject_line=verification_msg.subject,
-        subject_id=user.subject_id,
-    )
+    pending = await start_email_verification(db, user=user, settings=settings)
     await db.commit()
 
     # Dispatch in the background so a slow SMTP relay does not delay the
     # HTTP response. The outcome lands on the ledger row either way.
-    background_tasks.add_task(_run_delivery, delivery.id, verification_msg)
+    if pending is not None:
+        background_tasks.add_task(_run_delivery, pending.delivery_id, pending.message)
 
     access_token: str | None = None
     if not settings.require_email_verification:
@@ -408,10 +407,15 @@ async def login(
     await clear_login_failures(email)
     if settings.require_email_verification and user.email_verified_at is None:
         # 403 rather than 401 so the client can distinguish "bad
-        # password" from "please verify".
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="email not verified",
+        # password" from "please verify", and a stable slug rather than
+        # prose so the login screen can offer the resend action instead
+        # of printing an English sentence at a dead end. The credentials
+        # were correct, so naming the state leaks nothing the caller
+        # does not already hold.
+        raise problem(
+            status.HTTP_403_FORBIDDEN,
+            "email_not_verified",
+            "this address has not been verified yet",
         )
     # MFA gating: active MFA → 401 mfa_required (frontend pivots to
     # /auth/login-mfa); unenrolled admin → 403 when enforcement is on.
@@ -432,6 +436,31 @@ async def login(
         resource_kind="user",
         resource_id=user.subject_id,
     )
+    # Collect anything addressed to this mailbox that is still waiting on
+    # PUBLIC. Cheap (one indexed lookup, almost always zero rows) and it
+    # is what makes a fascicolo shared with somebody who signed up
+    # separately show up in their account instead of only behind the
+    # link. Runs after the verification gate on purpose: an unverified
+    # address is not proof of anything.
+    #
+    # Committed here and not left to the session: ``get_db`` does not
+    # commit, so a flush alone would be discarded when the request ends.
+    #
+    # Best-effort on purpose. This is a data repair that happens to have
+    # a convenient trigger point, not part of authenticating anybody: a
+    # defect in it must not lock every user out. The canonical attachment
+    # point is ``/auth/verify-email``, where it shares a transaction with
+    # the proof it depends on; here a failure is logged and retried on
+    # the next sign-in.
+    try:
+        await _attach_pending_invitations(db, user=user, audit=audit)
+        await db.commit()
+    except Exception:
+        await db.rollback()
+        logger.exception(
+            "invitation reconciliation failed for subject %s; login proceeds",
+            user.subject_id,
+        )
     token = issue_access_token(subject_id=user.subject_id, email=user.email, is_admin=user.is_admin)
     _set_session_cookie(response, request, token, max_age=settings.jwt_expires_seconds)
     return TokenOut(access_token=token)
@@ -444,6 +473,7 @@ async def verify_email(
     body: VerifyEmailIn,
     db: Annotated[AsyncSession, Depends(get_db)],
     settings: Annotated[Settings, Depends(get_settings)],
+    audit: AuditDep,
 ) -> TokenOut:
     token_hash = _hash_token(body.token)
     row = (
@@ -472,6 +502,12 @@ async def verify_email(
     row.used_at = now
     if user.email_verified_at is None:
         user.email_verified_at = now
+    await db.flush()
+    # Proof of mailbox control has just been established, which is the
+    # precondition every pending invitation addressed to this address was
+    # waiting on. Same transaction as the verification itself: either the
+    # address is verified and the invitations are attached, or neither.
+    await _attach_pending_invitations(db, user=user, audit=audit)
     await db.commit()
 
     token = issue_access_token(subject_id=user.subject_id, email=user.email, is_admin=user.is_admin)
@@ -482,6 +518,7 @@ async def verify_email(
 @router.post("/resend-verification", status_code=status.HTTP_202_ACCEPTED)
 async def resend_verification(
     body: ResendVerificationIn,
+    request: Request,
     background_tasks: BackgroundTasks,
     db: Annotated[AsyncSession, Depends(get_db)],
     settings: Annotated[Settings, Depends(get_settings)],
@@ -491,23 +528,20 @@ async def resend_verification(
     Always returns 202 regardless of whether the email is registered —
     account-enumeration avoidance. The concrete outcome is visible only
     via the email inbox of the address provided.
+
+    This is the recovery path for an account that cannot log in because
+    ``email_verified_at`` is NULL, including the accounts created by the
+    share-link claim flow before it started issuing a token of its own.
     """
+    _resend_verification_limiter.check(client_ip(request))
     user = (
         await db.execute(select(User).where(User.email == body.email.lower()))
     ).scalar_one_or_none()
-    if user is not None and user.email_verified_at is None:
-        raw_token = await _issue_verification_token(db, user, settings)
-        url = _build_verification_url(raw_token, settings)
-        verification_msg = build_verification_email(to=user.email, token_url=url)
-        delivery = await enqueue_delivery(
-            db,
-            purpose="email_verification",
-            recipient_email=user.email,
-            subject_line=verification_msg.subject,
-            subject_id=user.subject_id,
-        )
-        await db.commit()
-        background_tasks.add_task(_run_delivery, delivery.id, verification_msg)
+    if user is not None:
+        pending = await start_email_verification(db, user=user, settings=settings)
+        if pending is not None:
+            await db.commit()
+            background_tasks.add_task(_run_delivery, pending.delivery_id, pending.message)
     return {"status": "accepted"}
 
 

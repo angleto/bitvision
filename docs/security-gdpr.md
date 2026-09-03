@@ -4,7 +4,9 @@ Bitvision phoenix is designed for deployment in the European Union and
 must comply with the General Data Protection Regulation (Regulation
 (EU) 2016/679, "GDPR"). This document is the authoritative reference
 for how the platform discharges those obligations. For the broader
-security posture (auth, RLS, audit) see `authorization.md`.
+security posture (auth, RLS, audit) see `authorization.md`. Section 9
+covers the one store that lives on the data subject's own device rather
+than on the server.
 
 ## 1. Data subject rights implemented
 
@@ -221,7 +223,38 @@ Before every release, verify:
       passes — exhaustive proof that erasure strips clinical content
       from `entity_objects` while preserving cross-patient dedup.
 
-## 9. Open items
+## 9. Device-side storage in the installed app
+
+The frontend is installable as a Progressive Web App
+(`frontend/src/app/manifest.ts`), which means it registers a service
+worker (`frontend/public/sw.js`), and a service-worker cache is a store
+of whatever passes through it. It is enumerated here because a store of
+personal data has to be named even when the answer is "it holds none".
+
+| What | Where | Contents | Retention bound | Erasure path |
+|---|---|---|---|---|
+| Application-shell cache | The viewer's browser, origin-scoped | The content-hashed JS/CSS bundle, the installed-app icons, and the static `/offline` page. **No personal data by construction.** | Until sign-out, or until the browser evicts it | Signing out (`clearServiceWorkerCaches`, called from `lib/auth-context`), clearing site data, or uninstalling the app |
+
+The exclusions are enforced in the worker rather than assumed:
+`/api/**`, `/shared/**`, `/viewer/**` and `/_next/image` are passed
+straight to the network and never written to a cache, and a navigation
+response — which for `/patients/{id}` is the record itself, server
+rendered — is fetched fresh every time and never stored. The
+`/offline` page exists so a failed navigation is legible; it is the
+only mutable thing in the cache and it is static.
+
+This is why the installed app has no offline mode for clinical
+content. Making a record readable without a connection means writing it
+to the device, which is a data-protection decision with its own
+retention bound and its own erasure path, not a caching tweak. It has
+deliberately not been taken.
+
+**Not covered here**: `localStorage` and `sessionStorage` usage by
+individual components (viewer layout preferences, the theme choice).
+Those predate this section and hold interface state rather than
+personal data; a sweep confirming that is an open item below.
+
+## 10. Open items
 
 - Legal-hold table (`legal_holds`) is a placeholder; the predicate in
   `services.erasure._user_has_legal_hold` returns `False` today. A
@@ -233,3 +266,7 @@ Before every release, verify:
   visible only to callers who hold research_use consent") will land
   once the application-layer predicates in `services/permissions.py`
   are ported to RLS.
+- A sweep of every `localStorage` / `sessionStorage` key the frontend
+  writes, confirming each holds interface state rather than personal
+  data, and listing them in section 9 alongside the service-worker
+  cache.

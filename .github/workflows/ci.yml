@@ -103,7 +103,7 @@ jobs:
         run: |
           uv sync --extra dev
           uv run alembic upgrade head
-          uv run pytest tests/test_db_gate.py tests/test_clinical_event_documents.py tests/integration/test_catalog_db.py tests/test_hybrid_text_dense.py tests/test_clinical_events_calendar_v1.py tests/test_clinical_events_patch_api.py tests/test_clinical_events_amend_time.py tests/test_clinical_events_create_api.py tests/test_collab_fixes.py -q
+          uv run pytest tests/test_db_gate.py tests/test_clinical_event_documents.py tests/integration/test_catalog_db.py tests/test_hybrid_text_dense.py tests/test_clinical_events_calendar_v1.py tests/test_clinical_events_patch_api.py tests/test_clinical_events_amend_time.py tests/test_clinical_events_create_api.py tests/test_collab_fixes.py tests/test_contact_identity.py tests/test_invitation_reconciliation.py -q
 
   search-eval:
     name: Search relevance gate
@@ -204,6 +204,12 @@ jobs:
       - working-directory: frontend
         run: |
           pnpm install --frozen-lockfile
+          # A missing translation key is neither a build error nor a type
+          # error: next-intl renders the key path, so the page ships and
+          # the user reads "patient.contactDelete.action" where a button
+          # label belongs. Gated here because nothing else catches it.
+          pnpm i18n:check
+          pnpm test
           pnpm build
 
   docker-images:

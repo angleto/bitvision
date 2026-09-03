@@ -1251,7 +1251,8 @@
       "moveDialogSubmit": "Sposta qui",
       "moveDialogSubmitInside": "Sposta qui (dentro questa cartella)",
       "moveDialogSubmitRoot": "Sposta alla radice del fascicolo"
-    }
+    },
+    "searchPlaceholder": "Cerca in questo fascicolo"
   },
   "studyTags": {
     "sectionTitle": "Tag",
@@ -1402,6 +1403,7 @@
   "sharedLanding": {
     "brandTag": "bitvision phoenix · clinical share",
     "fallbackTitle": "Studio condiviso",
+    "fallbackTitleRecord": "Fascicolo paziente",
     "loading": "Caricamento…",
     "linkInvalid": "Il link potrebbe essere scaduto, revocato o non valido. Contatta chi te l'ha inviato.",
     "linkNoLongerValid": "Questo link non è più valido.",
@@ -1889,7 +1891,14 @@
     "documentsAdded": "{n, plural, one {# documento aggiunto} other {# documenti aggiunti}}",
     "instancesNew": "{n, plural, one {# istanza DICOM nuova} other {# istanze DICOM nuove}}",
     "instancesExisting": " · {n} già presenti",
-    "studiesCreated": "{n, plural, one {# studio creato} other {# studi creati}}"
+    "studiesCreated": "{n, plural, one {# studio creato} other {# studi creati}}",
+    "destFolder": "Carico dentro questa cartella",
+    "destRoot": "Carico nel fascicolo",
+    "summaryFiles": "{n, plural, one {# file} other {# file}} · {mib} MiB",
+    "noFilesQueued": "Nessun file selezionato.",
+    "removeAria": "Togli {name} dal caricamento",
+    "andMore": "e altri {n, plural, one {# file} other {# file}}",
+    "interrupt": "Interrompi il caricamento"
   },
   "fascicoloSearch": {
     "kindStudies": "Studi",
@@ -2367,14 +2376,23 @@
       "submitting": "Creazione…",
       "cancel": "Annulla",
       "successTitle": "Delega creata",
-      "successIntro": "Invia queste due informazioni al destinatario tramite un canale sicuro (di persona, email cifrata, messaggistica firmata). La password viene mostrata una sola volta.",
       "shareUrlLabel": "Magic link",
-      "passwordLabel": "Password monouso",
-      "passwordOnceWarning": "Questa password non sarà più mostrata. Copiala adesso.",
       "copy": "Copia",
       "copied": "Copiato",
       "successClose": "Fatto",
-      "errorGeneric": "Operazione non riuscita. Riprova."
+      "errorGeneric": "Operazione non riuscita. Riprova.",
+      "sendEmailLabel": "Manda l’invito a {email}",
+      "sendEmailHint": "Riceve un link per aprire il fascicolo. Lascia attivo, a meno che non voglia consegnare il link di persona.",
+      "linkPasswordLabel": "Proteggi il link anche con una password",
+      "linkPasswordHint": "Questa password sblocca il link, non un account: non dà a questa persona un modo per accedere. Non viene mai messa nell’email, quindi devi comunicarla per altra via. Serve solo se il link rischia di finire dove non volevi.",
+      "noEmailHint": "Questo contatto non ha un indirizzo email, quindi l’invito non può essere spedito dalla piattaforma. Il link qui sotto è protetto da password: consegna entrambi di persona o su un canale di cui ti fidi.",
+      "successExistingAccount": "Fatto. {email} ha già un account sulla piattaforma, quindi il fascicolo adesso è semplicemente lì quando accede come sempre. Non ha bisogno del link.",
+      "successNewAccount": "Fatto. {email} non ha ancora un account. Il link qui sotto è il modo in cui se lo crea; finché non lo fa, è l’unica via d’accesso. Una volta registrata e confermato quell’indirizzo, il fascicolo compare nel suo account da solo.",
+      "emailSent": "Invito inviato a {email}.",
+      "emailQueued": "L’invito a {email} non è ancora partito e verrà ritentato automaticamente. Se è urgente, mandagli il link qui sotto.",
+      "emailFailed": "Non è stato possibile inviare l’invito a {email}. Consegna tu il link qui sotto.",
+      "linkPasswordResultLabel": "Password del link",
+      "linkPasswordResultWarning": "Mostrata una volta sola. Sblocca solo il link: non è una password per accedere."
     },
     "btnSharingMenu": "Condivisioni",
     "btnSharingMenuTitle": "Crea, gestisci e configura le condivisioni del fascicolo",
@@ -2383,7 +2401,20 @@
     "btnSharingManage": "Gestisci condivisioni attive",
     "btnSharingManageHint": "Vedi, revoca, estendi o rinvia i link emessi su questo fascicolo",
     "btnSharingAi": "Assistenti AI personali",
-    "btnSharingAiHint": "Decidi quali tuoi assistenti AI possono leggere questo fascicolo via MCP"
+    "btnSharingAiHint": "Decidi quali tuoi assistenti AI possono leggere questo fascicolo via MCP",
+    "contactDuplicateEmail": "Due contatti hanno lo stesso indirizzo {email}. Un indirizzo appartiene a una persona sola: la piattaforma lo usa per capire a chi una delega dà accesso, dove mandare i promemoria e a chi appartiene un link di disiscrizione. Elimina uno dei due, oppure lascia a uno solo il numero di telefono.",
+    "contactDelete": {
+      "action": "Elimina",
+      "title": "Elimina {name} dai contatti",
+      "dialogTitle": "Eliminare {name}?",
+      "plainIntro": "Il contatto viene tolto da questo fascicolo. Non cambia nient’altro, e puoi riaggiungerlo quando vuoi.",
+      "delegatedWarning": "{name} ha accesso a questo fascicolo. Eliminando il contatto revochi anche l’accesso: non potrà più aprire il fascicolo e il link che gli hai mandato smette di funzionare. Il suo account, se ne ha uno, resta intatto.",
+      "cancel": "Annulla",
+      "confirm": "Elimina",
+      "confirmWithRevoke": "Elimina e revoca l’accesso",
+      "submitting": "Elimino…",
+      "errorGeneric": "Non è stato possibile eliminare il contatto. Riprova."
+    }
   },
   "upload": {
     "pageTitle": "Carica",
@@ -2507,7 +2538,13 @@
     "mfaVerify": "Verifica",
     "mfaUseDifferentAccount": "Usa un altro account",
     "errorInvalidTotp": "codice TOTP non valido",
-    "errorGeneric": "accesso non riuscito"
+    "errorGeneric": "accesso non riuscito",
+    "verifyRequiredTitle": "Conferma il tuo indirizzo email per continuare",
+    "verifyRequiredBody": "La password è giusta. All’account di {email} manca ancora la conferma dell’indirizzo prima di poter accedere. Cerca l’email di conferma, anche nello spam.",
+    "verifyResendAction": "Rimanda l’email di conferma",
+    "verifyResendSending": "Invio…",
+    "verifyResendDone": "Se esiste un account per {email}, l’email di conferma sta arrivando. Il link vale 24 ore.",
+    "verifyBack": "Torna all’accesso"
   },
   "aiShare": {
     "pageTitle": "I miei AI assistant",
@@ -3668,5 +3705,11 @@
     "copyVersion": "Copia il numero di versione",
     "copySha": "Copia lo SHA del commit",
     "loadError": "Impossibile leggere la versione: {detail}"
+  },
+  "offline": {
+    "title": "Nessuna connessione",
+    "body": "Il fascicolo non è stato caricato perché il dispositivo è offline. È tutto lì, serve solo una connessione per raggiungerlo.",
+    "why": "Sul dispositivo non viene tenuto nulla di clinico, di proposito: un telefono perso o condiviso non deve portarsi dietro una copia del fascicolo di qualcuno.",
+    "retry": "Riprova"
   }
 }

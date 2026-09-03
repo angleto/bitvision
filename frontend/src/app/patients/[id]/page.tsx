@@ -17,6 +17,12 @@ import SendStudyDialog from "@/components/SendStudyDialog";
 import ShareWithAiModal from "@/components/ShareWithAiModal";
 import { ApiError, type Patient, type PatientContact, patientsApi } from "@/lib/api";
 import { useAuth } from "@/lib/auth-context";
+import { isDeepLinkView, parseView } from "@/lib/fascicoloViews";
+import {
+  type EditableContact,
+  buildContactPayload,
+  findDuplicateEmail,
+} from "@/lib/patientContacts";
 
 // Closed set of dialog names this page knows about. Anything else in
 // ``?dialog=`` is ignored (treated as "no dialog open"). Keeping this
@@ -54,16 +60,7 @@ export default function PatientFascicoloPage() {
   const router = useRouter();
   const pathname = usePathname();
   const searchParams = useSearchParams();
-  const initialView = (() => {
-    const v = searchParams.get("view");
-    return v === "events" ||
-      v === "documents" ||
-      v === "provenance" ||
-      v === "evidence" ||
-      v === "drive"
-      ? v
-      : "drive";
-  })();
+  const initialView = parseView(searchParams.get("view"));
   // Single source of truth for which auxiliary dialog/drawer is on
   // screen: ``?dialog=edit|share|history|ai-share`` in the URL. Putting
   // this in the URL means: (1) the browser back button closes the
@@ -134,9 +131,7 @@ export default function PatientFascicoloPage() {
   useEffect(() => {
     if (!patient || didInitialScrollRef.current) return;
     didInitialScrollRef.current = true;
-    const hasDeepLink =
-      searchParams.has("path") ||
-      (searchParams.has("view") && searchParams.get("view") !== "drive");
+    const hasDeepLink = searchParams.has("path") || isDeepLinkView(searchParams.get("view"));
     if (!hasDeepLink) return;
     // Defer one frame so the FascicoloViewToggle has had a chance to
     // mount its tab content, otherwise scrollIntoView lands at a
@@ -486,10 +481,10 @@ function EditProfileForm({
   // Stable per-row UI key so React reconciliation survives reorder /
   // remove without confusing input focus or controlled-state. Backend
   // ``id`` is the natural choice when present (persisted contact);
-  // newly-added rows get a fresh UUID. The field is stripped out
-  // before POST in ``handleSave``.
-  type LocalContact = PatientContact & { _uiKey: string };
-  const [contacts, setContacts] = useState<LocalContact[]>(() =>
+  // newly-added rows get a fresh UUID. ``_uiKey`` is local state and is
+  // stripped by ``buildContactPayload``; the backend ``id`` is NOT — see
+  // lib/patientContacts for what dropping it used to cost.
+  const [contacts, setContacts] = useState<EditableContact[]>(() =>
     (patient.contacts ?? []).map((c) => ({
       ...c,
       _uiKey: c.id ?? crypto.randomUUID(),
@@ -509,16 +504,17 @@ function EditProfileForm({
       }
       // display_name cannot be null.
       updates.display_name = form.display_name;
-      // Drop empty contact rows (no label) and normalise empty strings
-      // to null so the backend persists ``null`` consistently.
-      updates.contacts = contacts
-        .filter((c) => c.label.trim().length > 0)
-        .map((c) => ({
-          label: c.label.trim(),
-          relationship: c.relationship?.trim() || null,
-          email: c.email?.trim() || null,
-          phone: c.phone?.trim() || null,
-        }));
+      // One contact per mailbox is a database constraint. Catching it
+      // here names the offending address while both rows are still on
+      // screen, instead of letting the server answer 409 about an
+      // address the user then has to go and find.
+      const duplicate = findDuplicateEmail(contacts);
+      if (duplicate) {
+        setSaveErr(t("contactDuplicateEmail", { email: duplicate }));
+        setBusy(false);
+        return;
+      }
+      updates.contacts = buildContactPayload(contacts);
       await patientsApi.update(patient.id, updates, patient.etag);
       onSaved();
     } catch (e) {
