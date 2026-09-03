@@ -57,6 +57,8 @@ ADR principali (status: tutti accepted salvo dove indicato).
 - [x] [P2][S3] [ADR 0017: File ownership transfer al merge documenti](decisions/0017-merge-file-ownership.md)
 - [x] [P0][S1.5] [ADR 0018: Remote MCP transport + OAuth 2.1 via Authentik](decisions/0018-remote-mcp-oauth-authentik.md) (superseded)
 - [x] [P0][S1.5] [ADR 0019: Remote MCP transport with per-assistant bearer secrets](decisions/0019-remote-mcp-per-assistant-bearer.md)
+- [x] [P1][S3] [ADR 0020: Hardlink documenti e invariante no-orphan](decisions/0020-documents-hardlinks-and-no-orphan-invariant.md)
+- [x] [P0][S1] [ADR 0021: Riconciliazione degli inviti per email e identità del contatto](decisions/0021-invitation-reconciliation-and-contact-identity.md)
 
 ## Sprint 1: Foundation cross-cutting
 

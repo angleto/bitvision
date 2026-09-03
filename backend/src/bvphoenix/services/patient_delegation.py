@@ -82,6 +82,14 @@ class DelegationResult:
     generated_password: str | None
     delegation_level: str
     expires_at: datetime | None
+    # Whether the contact's address already belonged to an account. When
+    # it did, the grant went straight onto that subject and the
+    # recipient signs in as usual; when it did not, the grant sits on
+    # PUBLIC and the link is the only way in until they claim it (or
+    # register and verify the same address, at which point
+    # ``services.invitations`` attaches it).
+    recipient_has_account: bool = False
+    recipient_email: str | None = None
 
 
 def _autogen_password(length: int = 24) -> str:
@@ -169,7 +177,9 @@ async def promote_contact_to_delegate(
 
     perms = level_to_permissions(access_level, download=True)
 
-    grantee_subject_id, _ = await _resolve_or_create_grantee(db, email=row.email)
+    grantee_subject_id, recipient_has_account = await _resolve_or_create_grantee(
+        db, email=row.email
+    )
 
     deidentify = await resolve_deidentify_default(
         db,
@@ -231,6 +241,8 @@ async def promote_contact_to_delegate(
         generated_password=generated_password,
         delegation_level=access_level,
         expires_at=valid_until,
+        recipient_has_account=recipient_has_account,
+        recipient_email=link.recipient_email,
     )
 
 

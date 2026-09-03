@@ -24,16 +24,30 @@ import uuid
 from datetime import UTC, datetime
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
+from fastapi import (
+    APIRouter,
+    BackgroundTasks,
+    Depends,
+    HTTPException,
+    Query,
+    Request,
+    status,
+)
 from pydantic import BaseModel, Field
 from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from bvphoenix.auth.deps import require_admin
+from bvphoenix.config import Settings, get_settings
 from bvphoenix.db.models import Job, User
 from bvphoenix.db.session import get_db
 from bvphoenix.middleware.audit_dependency import AuditDep
+from bvphoenix.middleware.problem_details import problem
+from bvphoenix.services.account_provisioning import start_email_verification
 from bvphoenix.services.credits import get_balance_cents
+from bvphoenix.services.email_delivery import (
+    run_in_background as run_email_delivery,
+)
 from bvphoenix.services.quota import (
     STORAGE_FREE_TIER_BYTES,
     get_user_storage_usage,
@@ -230,6 +244,67 @@ async def get_user(
         resource_id=user.subject_id,
     )
     return out
+
+
+class VerificationEmailOut(BaseModel):
+    """Result of re-sending a verification email to one account."""
+
+    subject_id: str
+    email: str
+    delivery_id: str
+
+
+@router.post(
+    "/admin/users/{subject_id}/verification-email",
+    response_model=VerificationEmailOut,
+    status_code=status.HTTP_202_ACCEPTED,
+)
+async def resend_user_verification_email(
+    subject_id: uuid.UUID,
+    background_tasks: BackgroundTasks,
+    db: Annotated[AsyncSession, Depends(get_db)],
+    settings: Annotated[Settings, Depends(get_settings)],
+    admin: Annotated[User, Depends(require_admin)],
+    audit: AuditDep,
+) -> VerificationEmailOut:
+    """Re-send the verification email for one account, by subject id.
+
+    ``POST /api/auth/resend-verification`` already does this and stays
+    the self-service path, but it is unauthenticated and therefore
+    deliberately blind: it answers 202 whether or not the address exists,
+    so an operator helping somebody who is locked out learns nothing
+    about whether anything happened. This one is admin-only, addresses
+    the account by id rather than by a typed address, and returns the
+    ledger row so the outcome can be followed
+    (``SELECT status, error_code FROM email_deliveries WHERE id = ...``).
+
+    It does **not** mark the address verified. Only the recipient
+    clicking the link does that, which is the whole point of the
+    verification: an operator attesting on somebody else's behalf would
+    be attesting to control of a mailbox they do not hold.
+    """
+    user = await _resolve_user_or_404(db, subject_id)
+    pending = await start_email_verification(db, user=user, settings=settings)
+    if pending is None:
+        raise problem(
+            409,
+            "email_already_verified",
+            "this address is already verified; nothing to send",
+        )
+    await db.commit()
+    background_tasks.add_task(run_email_delivery, pending.delivery_id, pending.message)
+    await audit.log(
+        action="admin_user_verification_email",
+        actor_subject_id=admin.subject_id,
+        resource_kind="user",
+        resource_id=user.subject_id,
+        metadata={"delivery_id": str(pending.delivery_id)},
+    )
+    return VerificationEmailOut(
+        subject_id=str(user.subject_id),
+        email=user.email,
+        delivery_id=str(pending.delivery_id),
+    )
 
 
 @router.patch("/admin/users/{subject_id}", response_model=AdminUserOut)

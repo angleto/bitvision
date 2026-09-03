@@ -10,6 +10,7 @@ import {
   useState,
 } from "react";
 
+import { clearServiceWorkerCaches } from "@/components/ServiceWorkerRegistrar";
 import { ApiError, type Me, authApi, request } from "@/lib/api";
 
 export interface RegisterResult {
@@ -110,6 +111,11 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       // Best-effort: even if the call fails, we still drop the local
       // user state so the chrome reflects the logout intent.
     }
+    // The service worker holds the application shell, not any record —
+    // but on a shared or installed device even that is a trace of who
+    // was here, and a signed-out session should leave nothing of its
+    // own behind.
+    await clearServiceWorkerCaches();
     setUser(null);
   }, []);
 

@@ -222,7 +222,13 @@ TOOLS: list[Tool] = [
     Tool(
         name="add_patient_contact",
         description=(
-            "Append a single contact to a patient's contacts list — "
+            "Append a single contact to a patient's contacts list. "
+            "One email address per patient: a second contact carrying "
+            "an address already on this record is refused with 409 "
+            "``contact_email_duplicate``, because the address is what "
+            "resolves a delegation to an account, targets a "
+            "notification, and identifies an opt-out. Patch the "
+            "existing contact instead. — "
             "ergonomic wrapper around ``update_patient`` so the agent "
             "doesn't have to read-modify-write the whole array. "
             "Each contact must have at least a ``name``; ``relation`` "
@@ -255,15 +261,18 @@ TOOLS: list[Tool] = [
             "Remove a single contact (identified by ``contact_id``) "
             "from a patient's contacts list. The contact id is "
             "returned by ``get_patient`` on each contact entry. "
-            "Idempotent — removing an already-absent id is a no-op "
-            "and returns the unchanged patient. Requires the "
-            "``patient:write`` scope. NOTE: a contact that has been "
-            "promoted to a delegate (carries a ``grant_id``) cannot "
-            "be removed via this tool — the operator must revoke the "
-            "delegation first via ``DELETE "
-            "/api/patients/{id}/contacts/{cid}/delegate`` (no MCP "
-            "tool wraps this on purpose: revoking access is human-"
-            "only, like ``consultations:finalize``)."
+            "Requires the ``patient:write`` scope. Answers 404 "
+            "``not_found`` for an id that is not on this patient. "
+            "NOTE: a contact holding a LIVE delegation is refused "
+            "with 409 ``delegation_active`` — the human operator must "
+            "revoke the delegation first via ``DELETE "
+            "/api/patients/{id}/contacts/{cid}/delegate``, or delete "
+            "both at once from the fascicolo UI. Neither is reachable "
+            "from MCP on purpose: revoking somebody's access to a "
+            "health record is a human decision, like "
+            "``consultations:finalize``. A delegation that was already "
+            "revoked no longer blocks the removal — stale pointers are "
+            "cleared by the datastore since alembic 0048."
         ),
         inputSchema={
             "type": "object",
@@ -328,8 +337,14 @@ async def _add_patient_contact(args: dict[str, Any]) -> str:
 
 async def _remove_patient_contact(args: dict[str, Any]) -> str:
     """Hit the dedicated ``DELETE /api/patients/{id}/contacts/{cid}``
-    endpoint. Refuses delegated contacts (HTTP 409) — the agent must
-    revoke delegation first via the human-only delegation endpoint.
+    endpoint.
+
+    Deliberately does not pass ``revoke_delegation``: the endpoint
+    accepts it, and the fascicolo UI uses it, but taking away a
+    person's access to a health record is a decision that belongs to a
+    human. An agent that hits the 409 should say so and stop, not look
+    for a way through. Recorded as a declared asymmetry between the two
+    surfaces in ``docs/agents-api/decisions/0021``.
     """
     patient_id = args["patient_id"]
     contact_id = args["contact_id"]

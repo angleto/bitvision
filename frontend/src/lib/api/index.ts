@@ -1264,12 +1264,36 @@ export interface ContactDelegateResponse {
   delegation_share_link_token: string;
   delegation_level: string;
   expires_at: string | null;
-  /** Plaintext password — returned ONCE (autogen path) and never
-   *  again. Capture it on the response and surface it once with a
-   *  copy-to-clipboard affordance. */
+  /** True when an account already existed for the contact's address:
+   *  the grant went straight onto it and the recipient signs in the way
+   *  they always have. False means the link is how they create their
+   *  account, and until they do it is the only way in. */
+  recipient_has_account: boolean;
+  /** The address the invitation is bound to. ``null`` means the contact
+   *  has no email, so the invitation cannot be sent by the platform and
+   *  the link has to be handed over by other means. */
+  recipient_email: string | null;
+  /** Plaintext password for the LINK — not an account password. It
+   *  gates the share URL and nothing else; setting one does not give
+   *  the recipient a way to sign in. Returned once, only when asked
+   *  for, and never again. */
   generated_password: string | null;
   /** URL the operator should deliver to the recipient OOB. */
   share_url: string;
+}
+
+/** Outcome of ``POST /api/share-links/{id}/notify``.
+ *
+ *  ``sent`` is an observation, not a hard-coded true: ``queued`` means
+ *  the relay refused in a way a retry can fix and the ledger will try
+ *  again, ``failed`` means it will not. ``error_code`` distinguishes a
+ *  bad address from a dead relay so the UI can say which. */
+export interface NotifyShareLinkResult {
+  sent: boolean;
+  to: string;
+  delivery_id: string;
+  status: "sent" | "queued" | "failed";
+  error_code?: string | null;
 }
 
 export interface Patient {
@@ -1565,6 +1589,32 @@ export const patientsApi = {
   revokeContactDelegation: (patientId: string, contactId: string) =>
     request<void>(`/api/patients/${patientId}/contacts/${contactId}/delegate`, {
       method: "DELETE",
+    }),
+  /** Remove one contact.
+   *
+   *  A contact holding a live delegation is refused with 409
+   *  ``delegation_active`` unless ``revokeDelegation`` is passed, which
+   *  drops the access and the contact together. The caller is expected
+   *  to have asked a human first: taking somebody off the contact list
+   *  while they keep a working grant would hide their access from the
+   *  only screen that shows it. */
+  removeContact: (patientId: string, contactId: string, revokeDelegation = false) =>
+    request<void>(
+      `/api/patients/${patientId}/contacts/${contactId}${
+        revokeDelegation ? "?revoke_delegation=true" : ""
+      }`,
+      { method: "DELETE" },
+    ),
+  /** Email the invitation for a share link to its addressee.
+   *
+   *  Used right after ``delegateContact`` so the recipient gets the
+   *  link in their inbox instead of the operator having to copy-paste
+   *  it. The message never carries the link password (when one is set,
+   *  it is delivered out of band on purpose). */
+  notifyShareLink: (linkId: string, body: { locale?: string; message?: string } = {}) =>
+    request<NotifyShareLinkResult>(`/api/share-links/${linkId}/notify`, {
+      method: "POST",
+      json: body,
     }),
   // ---- Notification channels (v3.5 sprint D) -------------------------
   configureContactChannel: (

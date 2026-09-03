@@ -7,10 +7,19 @@ import NativeDialog from "@/components/NativeDialog";
 import {
   ApiError,
   type ContactDelegateResponse,
+  type NotifyShareLinkResult,
   type Patient,
   type PatientContact,
   patientsApi,
 } from "@/lib/api";
+
+/** What the promote flow produced: the delegation, plus the outcome of
+ *  the invitation email when one was sent. ``delivery === null`` means
+ *  either no email was attempted or the relay did not take it — the
+ *  banner then falls back to handing the operator the link. */
+type DelegationOutcome = ContactDelegateResponse & {
+  delivery?: NotifyShareLinkResult | null;
+};
 
 interface Props {
   patient: Patient;
@@ -36,7 +45,8 @@ export default function PatientContactsPanel({ patient, isOwner, onChanged }: Pr
   const t = useTranslations("patient");
   const [openDialogFor, setOpenDialogFor] = useState<string | null>(null);
   const [openChannelsFor, setOpenChannelsFor] = useState<string | null>(null);
-  const [pendingResult, setPendingResult] = useState<ContactDelegateResponse | null>(null);
+  const [confirmDeleteFor, setConfirmDeleteFor] = useState<string | null>(null);
+  const [pendingResult, setPendingResult] = useState<DelegationOutcome | null>(null);
   const [actionErr, setActionErr] = useState<string | null>(null);
 
   if (!patient.contacts || patient.contacts.length === 0) return null;
@@ -48,6 +58,22 @@ export default function PatientContactsPanel({ patient, isOwner, onChanged }: Pr
       onChanged();
     } catch (e) {
       setActionErr(e instanceof ApiError ? e.message : t("delegation.errorGeneric"));
+    }
+  };
+
+  // Deleting a contact used to be impossible from any screen: the row
+  // could only be removed by re-sending the whole patient record, and
+  // that path duplicated the delegated contacts instead of removing
+  // anything. The per-contact endpoint has always existed; this is the
+  // affordance that reaches it.
+  const handleDelete = async (contactId: string, revokeDelegation: boolean) => {
+    setActionErr(null);
+    try {
+      await patientsApi.removeContact(patient.id, contactId, revokeDelegation);
+      setConfirmDeleteFor(null);
+      onChanged();
+    } catch (e) {
+      setActionErr(e instanceof ApiError ? e.message : t("contactDelete.errorGeneric"));
     }
   };
 
@@ -71,6 +97,7 @@ export default function PatientContactsPanel({ patient, isOwner, onChanged }: Pr
             onPromote={() => c.id && setOpenDialogFor(c.id)}
             onRevoke={() => c.id && handleRevoke(c.id)}
             onOpenChannels={() => c.id && setOpenChannelsFor(c.id)}
+            onDelete={() => c.id && setConfirmDeleteFor(c.id)}
           />
         ))}
       </div>
@@ -102,6 +129,13 @@ export default function PatientContactsPanel({ patient, isOwner, onChanged }: Pr
           onChanged={onChanged}
         />
       )}
+      {confirmDeleteFor && (
+        <DeleteContactDialog
+          contact={patient.contacts.find((c) => c.id === confirmDeleteFor) ?? null}
+          onCancel={() => setConfirmDeleteFor(null)}
+          onConfirm={(revokeDelegation) => handleDelete(confirmDeleteFor, revokeDelegation)}
+        />
+      )}
     </div>
   );
 }
@@ -114,12 +148,14 @@ function ContactChip({
   onPromote,
   onRevoke,
   onOpenChannels,
+  onDelete,
 }: {
   contact: PatientContact;
   isOwner: boolean;
   onPromote: () => void;
   onRevoke: () => void;
   onOpenChannels: () => void;
+  onDelete: () => void;
 }) {
   const t = useTranslations("patient");
   const isDelegated = !!contact.delegation_share_link_id;
@@ -230,9 +266,107 @@ function ContactChip({
           >
             {isDelegated ? t("delegation.revokeAction") : t("delegation.promoteAction")}
           </button>
+          <button
+            type="button"
+            className="ghost"
+            onClick={onDelete}
+            style={{
+              fontSize: "0.74rem",
+              padding: "2px 8px",
+              // --bv-danger is a foreground red; used as a background it
+              // renders dark-on-dark in the dark theme.
+              color: "var(--bv-danger)",
+            }}
+            title={t("contactDelete.title", { name: contact.label })}
+          >
+            {t("contactDelete.action")}
+          </button>
         </>
       )}
     </div>
+  );
+}
+
+// --- Delete confirmation ----------------------------------------------
+
+/**
+ * Confirms removing a contact, and says plainly what else goes with it.
+ *
+ * A contact holding a live delegation is two things at once: a name in
+ * a list, and somebody with a working grant on the health record. The
+ * server refuses to remove the first while the second stands, unless
+ * the caller says explicitly that the access goes too — because a
+ * contact list that quietly stops mentioning a person who can still
+ * read the record is worse than no list. So the dialog asks, once, in
+ * the words that describe the consequence.
+ */
+function DeleteContactDialog({
+  contact,
+  onCancel,
+  onConfirm,
+}: {
+  contact: PatientContact | null;
+  onCancel: () => void;
+  onConfirm: (revokeDelegation: boolean) => void;
+}) {
+  const t = useTranslations("patient");
+  const [busy, setBusy] = useState(false);
+  if (!contact) return null;
+  const isDelegated = !!contact.delegation_share_link_id;
+
+  return (
+    <NativeDialog open onClose={onCancel} className="bv-dialog">
+      <div
+        style={{
+          background: "var(--bv-card-bg)",
+          color: "var(--bv-fg)",
+          border: "1px solid var(--bv-card-border)",
+          borderRadius: "var(--bv-r-md)",
+          padding: "1.25rem 1.4rem",
+          maxWidth: 460,
+          width: "100%",
+          display: "flex",
+          flexDirection: "column",
+          gap: "0.75rem",
+        }}
+      >
+        <h3 style={{ margin: 0, fontSize: "1rem" }}>
+          {t("contactDelete.dialogTitle", { name: contact.label })}
+        </h3>
+        <p style={{ margin: 0, fontSize: "0.85rem", color: "var(--bv-fg-soft)" }}>
+          {isDelegated
+            ? t("contactDelete.delegatedWarning", { name: contact.label })
+            : t("contactDelete.plainIntro")}
+        </p>
+        <div
+          style={{
+            display: "flex",
+            justifyContent: "flex-end",
+            gap: "0.5rem",
+            marginTop: "0.4rem",
+          }}
+        >
+          <button type="button" className="ghost" onClick={onCancel} disabled={busy}>
+            {t("contactDelete.cancel")}
+          </button>
+          <button
+            type="button"
+            onClick={() => {
+              setBusy(true);
+              onConfirm(isDelegated);
+            }}
+            disabled={busy}
+            style={{ color: "var(--bv-danger)" }}
+          >
+            {busy
+              ? t("contactDelete.submitting")
+              : isDelegated
+                ? t("contactDelete.confirmWithRevoke")
+                : t("contactDelete.confirm")}
+          </button>
+        </div>
+      </div>
+    </NativeDialog>
   );
 }
 
@@ -247,15 +381,23 @@ function DelegateContactDialog({
   patientId: string;
   contact: PatientContact | null;
   onClose: () => void;
-  onSuccess: (result: ContactDelegateResponse) => void;
+  onSuccess: (result: DelegationOutcome) => void;
 }) {
   const t = useTranslations("patient");
   const [accessLevel, setAccessLevel] = useState<"viewer" | "editor" | "manager">("editor");
   const [expiresInDays, setExpiresInDays] = useState<string>(""); // empty = permanent
+  // Emailing the invitation is the default when the contact has an
+  // address. The alternative — mint a link password and read it out to
+  // the recipient — is what made operators believe they had set an
+  // account password for that person. They had not: it unlocks the
+  // link and nothing else.
+  const [sendEmail, setSendEmail] = useState(true);
+  const [withLinkPassword, setWithLinkPassword] = useState(false);
   const [submitting, setSubmitting] = useState(false);
   const [err, setErr] = useState<string | null>(null);
 
   if (!contact) return null;
+  const hasEmail = !!contact.email?.trim();
 
   const submit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -268,9 +410,24 @@ function DelegateContactDialog({
       const result = await patientsApi.delegateContact(patientId, contact.id, {
         access_level: accessLevel,
         expires_in_hours,
-        autogen_password: true,
+        // Without an address there is nobody to email, so the link has
+        // to be handed over by other means and a password on it is the
+        // only thing standing between a forwarded URL and the record.
+        autogen_password: withLinkPassword || !hasEmail,
       });
-      onSuccess(result);
+      let delivery: NotifyShareLinkResult | null = null;
+      if (sendEmail && hasEmail) {
+        try {
+          delivery = await patientsApi.notifyShareLink(result.delegation_share_link_id);
+        } catch {
+          // The delegation itself succeeded and is the thing that
+          // matters; a relay problem must not read as "it did not
+          // work". The banner says the mail did not go out and offers
+          // the link to hand over instead.
+          delivery = null;
+        }
+      }
+      onSuccess({ ...result, delivery });
     } catch (ex) {
       setErr(ex instanceof ApiError ? ex.message : t("delegation.errorGeneric"));
     } finally {
@@ -334,9 +491,67 @@ function DelegateContactDialog({
           </span>
         </label>
 
-        {err && (
-          <p style={{ color: "var(--bv-error, #cf6e6e)", fontSize: "0.82rem", margin: 0 }}>{err}</p>
+        {hasEmail ? (
+          <>
+            <label style={{ display: "flex", alignItems: "flex-start", gap: "0.5rem" }}>
+              <input
+                type="checkbox"
+                checked={sendEmail}
+                onChange={(e) => setSendEmail(e.target.checked)}
+                disabled={submitting}
+                style={{ marginTop: "0.2rem" }}
+              />
+              <span style={{ fontSize: "0.82rem" }}>
+                {t("delegation.sendEmailLabel", { email: contact.email ?? "" })}
+                <span
+                  style={{
+                    display: "block",
+                    fontSize: "0.72rem",
+                    color: "var(--bv-fg-soft)",
+                  }}
+                >
+                  {t("delegation.sendEmailHint")}
+                </span>
+              </span>
+            </label>
+            <label style={{ display: "flex", alignItems: "flex-start", gap: "0.5rem" }}>
+              <input
+                type="checkbox"
+                checked={withLinkPassword}
+                onChange={(e) => setWithLinkPassword(e.target.checked)}
+                disabled={submitting}
+                style={{ marginTop: "0.2rem" }}
+              />
+              <span style={{ fontSize: "0.82rem" }}>
+                {t("delegation.linkPasswordLabel")}
+                <span
+                  style={{
+                    display: "block",
+                    fontSize: "0.72rem",
+                    color: "var(--bv-fg-soft)",
+                  }}
+                >
+                  {t("delegation.linkPasswordHint")}
+                </span>
+              </span>
+            </label>
+          </>
+        ) : (
+          <p
+            style={{
+              margin: 0,
+              fontSize: "0.8rem",
+              color: "var(--bv-fg-soft)",
+              padding: "0.5rem 0.65rem",
+              background: "var(--bv-info-soft)",
+              borderRadius: "var(--bv-r-sm)",
+            }}
+          >
+            {t("delegation.noEmailHint")}
+          </p>
         )}
+
+        {err && <p style={{ color: "var(--bv-danger)", fontSize: "0.82rem", margin: 0 }}>{err}</p>}
 
         <div
           style={{
@@ -364,7 +579,7 @@ function DelegationResultBanner({
   result,
   onClose,
 }: {
-  result: ContactDelegateResponse;
+  result: DelegationOutcome;
   onClose: () => void;
 }) {
   const t = useTranslations("patient");
@@ -399,9 +614,34 @@ function DelegationResultBanner({
         }}
       >
         <h3 style={{ margin: 0, fontSize: "1rem" }}>{t("delegation.successTitle")}</h3>
+        {/* The two outcomes are genuinely different and the screen used
+            to describe only one of them. When the address already
+            belongs to an account, the grant went onto it and the person
+            just signs in — telling them to keep the link would be
+            wrong. When it does not, the link is how they create the
+            account, and it is the only way in until they do. */}
         <p style={{ margin: 0, fontSize: "0.85rem", color: "var(--bv-fg-soft)" }}>
-          {t("delegation.successIntro")}
+          {result.recipient_has_account
+            ? t("delegation.successExistingAccount", { email: result.recipient_email ?? "" })
+            : t("delegation.successNewAccount", { email: result.recipient_email ?? "" })}
         </p>
+
+        {result.delivery?.status === "sent" && (
+          <p style={{ margin: 0, fontSize: "0.85rem", color: "var(--bv-success)" }}>
+            {t("delegation.emailSent", { email: result.delivery.to })}
+          </p>
+        )}
+        {result.delivery?.status === "queued" && (
+          <p style={{ margin: 0, fontSize: "0.85rem", color: "var(--bv-fg-soft)" }}>
+            {t("delegation.emailQueued", { email: result.delivery.to })}
+          </p>
+        )}
+        {(result.delivery === null || result.delivery?.status === "failed") &&
+          result.recipient_email && (
+            <p style={{ margin: 0, fontSize: "0.85rem", color: "var(--bv-danger)" }}>
+              {t("delegation.emailFailed", { email: result.recipient_email })}
+            </p>
+          )}
 
         <CopyRow
           label={t("delegation.shareUrlLabel")}
@@ -411,11 +651,11 @@ function DelegationResultBanner({
         />
         {result.generated_password && (
           <CopyRow
-            label={t("delegation.passwordLabel")}
+            label={t("delegation.linkPasswordResultLabel")}
             value={result.generated_password}
             onCopy={() => copy(result.generated_password ?? "", "password")}
             copied={copiedField === "password"}
-            warn={t("delegation.passwordOnceWarning")}
+            warn={t("delegation.linkPasswordResultWarning")}
           />
         )}
 

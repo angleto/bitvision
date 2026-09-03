@@ -5,6 +5,164 @@ project follows semantic versioning; pre-release suffixes (`alpha`,
 `beta`) gate Kubernetes deployments via the GHCR image tag (without
 the leading `v`, see deployment guide).
 
+## 4.4.118 (2026-09-03)
+
+### Sharing a health record with a family member, made usable
+
+Four defects reported on one real fascicolo, three of them with the same
+root: an email address is the identity by which a person is attached to a
+record, and no layer treated it as one. Verified against production
+before and after.
+
+#### Duplicate contacts that could not be deleted
+
+The patient edit form rebuilt every contact as
+`{label, relationship, email, phone}` and dropped the `id`.
+`replace_all_contacts` matched on `id`, so each save inserted a fresh row
+for every contact while the rows carrying a delegation were held back
+from deletion (dropping somebody's access silently is worse than leaving
+a stale row). Five contacts became eight in one PATCH, and removing a
+duplicate through the same form produced two more. On top of that
+`PatientContactsPanel` had no delete affordance at all, and
+`delete_contact` read the `delegation_*` pointer columns without asking
+whether the grant behind them was still alive: a grant revoked by any
+path other than `revoke_contact_delegation` left the pointers populated
+and the contact answered 409 forever, with nothing left to revoke.
+
+* The payload carries the `id`, with `frontend/src/lib/patientContacts.ts`
+  and a unit test holding it there; the diff falls back to matching on the
+  canonical address when a client still sends none.
+* `uq_patient_contacts_patient_email` (alembic `0049`) makes the duplicate
+  unstorable. The migration merges the existing groups first: the row with
+  a live delegation wins, else the oldest; non-null fields and consents are
+  folded in, the delivery state takes the most restrictive value, and two
+  guards abort rather than lose a mailed opt-out token or pick between two
+  live delegations.
+* `trg_grants_revoked_clear_contact_delegation` and its DELETE twin
+  (alembic `0048`) clear the pointers at the moment a grant dies, so the
+  undeletable state is no longer representable. Existing stranded rows are
+  repaired by the same migration.
+* Per-contact delete in the fascicolo, with a confirmation that says what
+  else goes: for a delegated contact, `?revoke_delegation=true` removes the
+  access in the same operation and the dialog names that consequence.
+
+#### A delegation that never reached the account it was for
+
+`_resolve_or_create_grantee` issues the grant to `PUBLIC_SUBJECT_ID` when
+no account exists for the contact's address, which makes the link the
+credential. That was a one-way door: if the recipient later registered
+with the very address the link named, nothing connected the two. The
+grant stayed on PUBLIC, the record was invisible from their account, and
+the only way in remained the URL — forever, and for every future share.
+
+New `services/invitations.py`. An invitation attaches to a subject when
+that subject has **proven** control of the addressed mailbox, and
+`users.email_verified_at` is what proof means. Matching on
+`share_links.recipient_email` alone would be an account-takeover
+primitive; two datastore invariants hold the rule up: an address change
+clears its own verification and burns outstanding tokens, and both sides
+of the join are stored canonically. The sweep runs at
+`/auth/verify-email` (transactional, the moment proof exists), at
+`/auth/login` (best-effort, picking up accounts verified before this
+release), and on claim/bind. `grants.grantee_subject_id` is now
+write-once off PUBLIC: a move between two real subjects is an ownership
+transfer wearing an UPDATE, and the datastore refuses it.
+
+#### An account created by the share link could never log in
+
+`_perform_claim` created its `User` with `email_verified_at` NULL and
+issued no verification token. With `require_email_verification` on,
+`/auth/login` answered 403 to every subsequent attempt while
+`/auth/verify-email` had nothing to consume: locked out permanently, with
+the correct password. The claim hands back a session, so the lockout only
+surfaced twelve hours later, looking like a forgotten password. One real
+person hit this — the patient, on her own record.
+
+`services/account_provisioning.py` now owns the two things a usable local
+account needs (a verification token on the delivery ledger, the required
+consent rows) and register, resend and claim all go through it. The 403
+carries a stable `email_not_verified` slug and the login screen offers to
+resend instead of printing an English sentence at a dead end.
+`/auth/resend-verification` gains the per-origin rate limit it was
+missing: it is unauthenticated and makes the server send mail to an
+address the caller chose. `POST /api/admin/users/{id}/verification-email`
+gives an operator a real path to unblock an account without touching the
+database; it deliberately does not mark the address verified, because
+attesting control of somebody else's mailbox is not an operator's to do.
+
+#### The link password was never an account password
+
+The password from the delegation dialog goes into
+`ShareLink.password_hash`: it unlocks the *link* and nothing else. The
+result banner showed it beside the URL as though it were a sign-in
+credential. Emailing the invitation is now the default,
+`autogen_password` defaults to false, and the banner distinguishes the
+two real outcomes — the address already has an account (the record is
+simply there when they sign in) or it does not (the link is how they
+create one).
+
+### Installable on a phone
+
+`app/manifest.ts`, maskable and apple-touch icons, a service worker and an
+offline page. A cache is a store of whatever passes through it, so the
+worker precaches only the content-hashed bundle, the icons and one static
+page; `/api/**`, `/shared/**`, `/viewer/**` and every navigation go
+straight to the network and are never stored, and signing out drops the
+lot. Verified in a browser: after exercising all four excluded shapes the
+cache still held three shell entries. There is deliberately no offline
+mode for clinical content — making a record readable without a connection
+means writing it to the device, which is a data-protection decision with
+its own retention bound, documented in `security-gdpr.md` §9.
+
+The session still lasts 12 hours with no refresh token, so the installed
+app asks for the password daily. Recorded as a known limit, not fixed.
+
+### Translation keys are gated
+
+`frontend/scripts/check-i18n.mjs` asserts that every statically written
+key resolves in every locale, that `en` and `it` carry the same key set,
+and that neither catalogue has a duplicate key (`JSON.parse` keeps the
+last one and discards the first silently). A missing key is neither a
+build error nor a type error — next-intl renders the key path, so the
+page ships and the user reads `patient.contactDelete.action` where a
+button label belongs. Its first run found **eight keys used by live
+components that resolved to nothing**, in the inline uploader and the
+record search box; those are now written in both locales.
+
+### Also in this release
+
+Work that was already in the working tree when the above was written and
+ships with it:
+
+* **`/shared/{token}/info` no longer leaks the patient's name.** The
+  endpoint is unauthenticated and runs before the password gate, so the
+  title `Fascicolo: {display_name}` handed the subject's real name to
+  anyone holding the token, including someone who never gets past
+  `/verify`. The title is withheld and the landing page renders a
+  kind-appropriate label from `resource_kind`, matching the call the
+  share-invitation email builder had already made.
+* **Terminology binding is a carve-out, not a drift.** `DESIGN.md` §2 now
+  states where standard codes may appear (the FHIR and DICOM SR exports,
+  and nowhere else), from which three systems, and under what rules —
+  never a storage or lookup key, verified-or-absent, frozen in code. New
+  `tests/test_terminology_binding_allowlist.py` pins the emitted systems
+  so widening the list is a deliberate diff.
+* **One source of truth for the Health Record tab set**
+  (`frontend/src/lib/fascicoloViews.ts`). The list was spelled out in five
+  places and had drifted: `initialView` never learned about `tasks`,
+  `calendar`, `ask` and `shares`, so a deep link to any of those rendered
+  the Drive pane on first paint and flipped once the sync effect ran.
+
+### Deployment
+
+**This release needs a two-stage migration.** `0048` goes before the pod
+rollout and `0049` after: the previous `replace_all_contacts` inserts
+before deleting, so the unique index would fail every
+`PATCH /api/patients/{id}` carrying contacts for the length of the
+rollout. See `DEPLOYMENT-GUIDE.md`, "When a migration is breaking for the
+code that precedes it". Snapshot the database first — dropping the index
+is reversible, the contact merge is not.
+
 ## 4.4.117 (2026-08-21)
 
 ### Build fix: bound the MCP SDK below 2.0

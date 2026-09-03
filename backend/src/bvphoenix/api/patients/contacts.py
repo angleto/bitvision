@@ -15,6 +15,25 @@ from bvphoenix.api.patients._shared import *  # noqa: F403
 router = APIRouter()
 
 
+# ``uq_patient_contacts_patient_email`` (alembic 0049) is what actually
+# forbids two contacts sharing a mailbox on one patient; this turns the
+# resulting IntegrityError into the stable code the UI branches on.
+# Anything else that violates integrity is re-raised untouched: guessing
+# at an unrelated constraint would report the wrong cause.
+_CONTACT_EMAIL_UNIQUE_INDEX = "uq_patient_contacts_patient_email"
+
+
+def _contact_email_conflict(exc: Exception, email: str | None) -> Exception:
+    if _CONTACT_EMAIL_UNIQUE_INDEX not in str(getattr(exc, "orig", exc)):
+        return exc
+    return problem(
+        409,
+        "contact_email_duplicate",
+        "this health record already has a contact with that email address",
+        extra={"email": email} if email else None,
+    )
+
+
 @router.get(
     "/patients/{patient_id}/contacts",
     response_model=list[PatientContact],
@@ -56,18 +75,22 @@ async def create_patient_contact(
         raise HTTPException(status_code=403, detail="cannot edit this patient")
     from bvphoenix.services import patient_contacts as svc
 
-    row = await svc.create_contact(
-        db,
-        patient_id=patient.id,
-        label=body.label,
-        relationship=body.relationship,
-        email=body.email,
-        phone=body.phone,
-        notes=body.notes,
-        is_primary=body.is_primary,
-        consent_to_contact=body.consent_to_contact,
-    )
-    await db.commit()
+    try:
+        row = await svc.create_contact(
+            db,
+            patient_id=patient.id,
+            label=body.label,
+            relationship=body.relationship,
+            email=body.email,
+            phone=body.phone,
+            notes=body.notes,
+            is_primary=body.is_primary,
+            consent_to_contact=body.consent_to_contact,
+        )
+        await db.commit()
+    except sqlalchemy_exc.IntegrityError as exc:
+        await db.rollback()
+        raise _contact_email_conflict(exc, svc.normalise_email(body.email)) from exc
     await db.refresh(row)
     await audit.log(
         action="patient_contact_create",
@@ -102,10 +125,16 @@ async def patch_patient_contact(
     from bvphoenix.services import patient_contacts as svc
 
     fields = body.model_dump(exclude_unset=True)
-    row = await svc.update_contact(db, patient_id=patient.id, contact_id=contact_id, fields=fields)
-    if row is None:
-        raise HTTPException(status_code=404, detail="contact not found")
-    await db.commit()
+    try:
+        row = await svc.update_contact(
+            db, patient_id=patient.id, contact_id=contact_id, fields=fields
+        )
+        if row is None:
+            raise HTTPException(status_code=404, detail="contact not found")
+        await db.commit()
+    except sqlalchemy_exc.IntegrityError as exc:
+        await db.rollback()
+        raise _contact_email_conflict(exc, svc.normalise_email(fields.get("email"))) from exc
     await db.refresh(row)
     await audit.log(
         action="patient_contact_update",
@@ -131,10 +160,19 @@ async def delete_patient_contact(
     db: Annotated[AsyncSession, Depends(get_db)],
     user: Annotated[User, Depends(require_user)],
     audit: AuditDep,
+    revoke_delegation: bool = False,
 ) -> Response:
-    """Remove one contact. Refuses contacts with an active delegation;
-    the operator must revoke the delegation explicitly first
-    (``DELETE /api/patients/{id}/contacts/{cid}/delegate``)."""
+    """Remove one contact.
+
+    A contact holding a live delegation is refused with the stable code
+    ``delegation_active`` unless ``revoke_delegation=true`` is passed,
+    which drops the grant and the contact together. Two calls exist
+    rather than one because removing somebody from the contact list
+    while they keep a working grant would hide their access from the
+    only screen that shows it — so the caller has to say out loud that
+    the access goes too. Revoking on its own is still
+    ``DELETE /api/patients/{id}/contacts/{cid}/delegate``.
+    """
     enforce_agent_scope(request, "patient:write")
     patient = await _get_patient_or_404(db, patient_id, user, request)
     perms = await effective_permissions_on_patient(db, user=user, patient=patient)
@@ -142,18 +180,33 @@ async def delete_patient_contact(
         raise HTTPException(status_code=403, detail="cannot edit this patient")
     from bvphoenix.services import patient_contacts as svc
 
-    deleted, reason = await svc.delete_contact(db, patient_id=patient.id, contact_id=contact_id)
-    if not deleted:
-        if reason == "not_found":
-            raise HTTPException(status_code=404, detail="contact not found")
-        raise HTTPException(status_code=409, detail=reason)
+    outcome = await svc.delete_contact(
+        db,
+        patient_id=patient.id,
+        contact_id=contact_id,
+        revoke_delegation=revoke_delegation,
+    )
+    if not outcome.deleted:
+        if outcome.code == "not_found":
+            raise problem(404, "not_found", "contact not found")
+        raise problem(
+            409,
+            "delegation_active",
+            "this contact holds an active delegation on the health record; "
+            "retry with revoke_delegation=true to remove both, or revoke it "
+            "separately first",
+            extra={"contact_id": str(contact_id)},
+        )
     await db.commit()
     await audit.log(
         action="patient_contact_delete",
         actor_subject_id=user.subject_id,
         resource_kind="patient_contact",
         resource_id=contact_id,
-        metadata={"patient_id": str(patient.id)},
+        metadata={
+            "patient_id": str(patient.id),
+            "revoked_delegation": outcome.revoked_delegation,
+        },
     )
     return Response(status_code=status.HTTP_204_NO_CONTENT)
 
@@ -229,6 +282,8 @@ async def delegate_contact(
         delegation_share_link_token=result.share_link_token,
         delegation_level=result.delegation_level,
         expires_at=result.expires_at.isoformat() if result.expires_at else None,
+        recipient_has_account=result.recipient_has_account,
+        recipient_email=result.recipient_email,
         generated_password=result.generated_password,
         share_url=share_url,
     )

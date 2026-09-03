@@ -13,10 +13,20 @@ import json
 import logging
 import secrets
 import uuid
+from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Annotated, Any, Literal
 
-from fastapi import APIRouter, Depends, Header, HTTPException, Request, Response, status
+from fastapi import (
+    APIRouter,
+    BackgroundTasks,
+    Depends,
+    Header,
+    HTTPException,
+    Request,
+    Response,
+    status,
+)
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, EmailStr, Field
 from sqlalchemy import select, text
@@ -41,6 +51,11 @@ from bvphoenix.services.access_levels import (
     level_to_permissions,
     permissions_to_level,
 )
+from bvphoenix.services.account_provisioning import (
+    PendingVerification,
+    record_required_consents,
+    start_email_verification,
+)
 from bvphoenix.services.email import (
     EmailMessage,
     build_share_invitation_email,
@@ -57,7 +72,14 @@ from bvphoenix.services.email_delivery import (
 from bvphoenix.services.email_delivery import (
     register_builder as register_delivery_builder,
 )
+from bvphoenix.services.email_delivery import (
+    run_in_background as run_email_delivery,
+)
 from bvphoenix.services.grants import resolve_deidentify_default
+from bvphoenix.services.invitations import (
+    AttachedInvitation,
+    reconcile_invitations_for_user,
+)
 from bvphoenix.services.permissions import SHARED_DOWNLOAD
 from bvphoenix.services.rate_limit import (
     SHARE_DOWNLOAD_LIMIT,
@@ -1551,6 +1573,21 @@ class ClaimShareLinkOut(BaseModel):
     expires_in: int
 
 
+@dataclass
+class ClaimOutcome:
+    """What a completed claim produced.
+
+    ``pending_verification`` is the mail the caller must dispatch on a
+    background task; ``attached`` lists any *other* invitation addressed
+    to the same mailbox that was collected in the same movement.
+    """
+
+    user: User
+    grant: Grant
+    pending_verification: PendingVerification | None
+    attached: list[AttachedInvitation]
+
+
 async def _perform_claim(
     db: AsyncSession,
     link: ShareLink,
@@ -1558,7 +1595,7 @@ async def _perform_claim(
     password: str,
     display_name: str | None,
     email_override: str | None,
-) -> tuple[User, Grant]:
+) -> ClaimOutcome:
     """Core of "turn a share link into a real account", shared by the
     token route (``/share-links/{token}/claim``) and the in-app session
     route (``/share-sessions/claim``).
@@ -1566,9 +1603,20 @@ async def _perform_claim(
     Validates the link, creates the Subject + User, repoints the grant
     (and any contact delegation) off ``PUBLIC`` onto the new account,
     marks the link claimed, materialises the wallet sponsorship
-    (best-effort), commits, and returns ``(user, grant)``. Raises
+    (best-effort), commits, and returns the outcome. Raises
     ``HTTPException`` on every precondition so the UI shows a precise
-    message. The caller owns audit logging + token/cookie minting.
+    message. The caller owns audit logging + token/cookie minting, and
+    must dispatch ``pending_verification`` if there is one.
+
+    The account created here is a full local account and has to be
+    usable as one. It was not: with ``require_email_verification`` on it
+    was born with ``email_verified_at`` NULL and no verification token
+    anywhere, so ``POST /api/auth/login`` answered 403 forever after and
+    ``/api/auth/verify-email`` had nothing to consume. The claim handed
+    back a session, so the lockout only surfaced once that session
+    expired — twelve hours later, looking like a password problem. Going
+    through ``services.account_provisioning`` is what makes this path
+    produce the same kind of account as ``POST /api/auth/register``.
     """
     if link.mode not in ("anonymous", "claim"):
         raise HTTPException(status_code=400, detail="this link cannot be converted to an account")
@@ -1658,9 +1706,21 @@ async def _perform_claim(
         except Exception as exc:
             logger.warning("share_link claim sponsorship materialisation failed: %s", exc)
 
+    # Same two steps ``POST /api/auth/register`` performs, from the same
+    # service: without them this account cannot ever log in, and its
+    # consent rows would have to be synthesised rather than read.
+    await record_required_consents(db, user=user, source="share_link_claim")
+    pending = await start_email_verification(db, user=user, settings=get_settings())
+
+    # This link is attached above; the sweep collects any *other*
+    # invitation already addressed to the same mailbox. It is a no-op
+    # until the address is verified, so on this path it normally finds
+    # nothing and starts paying off at verify-email time.
+    attached = await reconcile_invitations_for_user(db, user=user)
+
     await db.commit()
     await db.refresh(user)
-    return user, grant
+    return ClaimOutcome(user=user, grant=grant, pending_verification=pending, attached=attached)
 
 
 async def _perform_bind(db: AsyncSession, link: ShareLink, user: User) -> Grant:
@@ -1705,6 +1765,11 @@ async def _perform_bind(db: AsyncSession, link: ShareLink, user: User) -> Grant:
     if contact is not None:
         contact.delegation_subject_id = user.subject_id
 
+    # Attaching one invitation is a good moment to collect the rest:
+    # somebody who was sent two share links to the same address should
+    # not have to open both. No-op unless the address is verified.
+    await reconcile_invitations_for_user(db, user=user)
+
     await db.commit()
     return grant
 
@@ -1715,6 +1780,7 @@ async def claim_share_link(
     response: Response,
     token: str,
     body: ClaimShareLinkIn,
+    background_tasks: BackgroundTasks,
     db: Annotated[AsyncSession, Depends(get_db)],
     audit: AuditDep,
 ) -> ClaimShareLinkOut:
@@ -1752,13 +1818,20 @@ async def claim_share_link(
     if link is None:
         raise HTTPException(status_code=404, detail="share link not found")
 
-    user, grant = await _perform_claim(
+    outcome = await _perform_claim(
         db,
         link,
         password=body.password,
         display_name=body.display_name,
         email_override=body.email,
     )
+    user, grant = outcome.user, outcome.grant
+    if outcome.pending_verification is not None:
+        background_tasks.add_task(
+            run_email_delivery,
+            outcome.pending_verification.delivery_id,
+            outcome.pending_verification.message,
+        )
 
     settings = get_settings()
     access_token = issue_access_token(
@@ -1929,6 +2002,7 @@ async def claim_current_share_session(
     request: Request,
     response: Response,
     body: ClaimShareLinkIn,
+    background_tasks: BackgroundTasks,
     db: Annotated[AsyncSession, Depends(get_db)],
     user: Annotated[User, Depends(require_user)],
     audit: AuditDep,
@@ -1944,13 +2018,20 @@ async def claim_current_share_session(
     if link is None:
         raise HTTPException(status_code=404, detail="share link not found")
 
-    new_user, grant = await _perform_claim(
+    outcome = await _perform_claim(
         db,
         link,
         password=body.password,
         display_name=body.display_name,
         email_override=body.email,
     )
+    new_user, grant = outcome.user, outcome.grant
+    if outcome.pending_verification is not None:
+        background_tasks.add_task(
+            run_email_delivery,
+            outcome.pending_verification.delivery_id,
+            outcome.pending_verification.message,
+        )
     await audit.log(
         action="share_link_claimed",
         actor_subject_id=new_user.subject_id,
@@ -2156,7 +2237,17 @@ async def share_link_info(
         ).scalar_one_or_none()
         if patient is None:
             raise HTTPException(status_code=410, detail={"reason": "resource_deleted"})
-        title = f"Fascicolo: {patient.display_name}"
+        # Deliberately NOT the patient's name. ``/shared/{token}/info``
+        # is unauthenticated and runs BEFORE the password gate, so
+        # anyone holding the token — including someone who never gets
+        # past /verify — would learn who the record belongs to. That is
+        # the same third-party-PII argument that keeps recipient_name /
+        # recipient_email out of ``ShareInfoOut`` (see the note on the
+        # model), and the same call the share-invitation email builder
+        # already makes ("Patient-scoped shares: don't leak the real
+        # name"). ``resource_kind`` tells the landing page it is looking
+        # at a health record; the identity belongs after authentication.
+        title = None
         # Union of modality arrays across all studies linked to the patient.
         rows = (
             await db.execute(

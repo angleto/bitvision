@@ -15,17 +15,13 @@ import ProvenanceTimeline from "@/components/ProvenanceTimeline";
 import ShareLinksTable from "@/components/ShareLinksTable";
 import TaskTimeline from "@/components/TaskTimeline";
 import type { Patient } from "@/lib/api";
-
-type View =
-  | "drive"
-  | "events"
-  | "tasks"
-  | "calendar"
-  | "documents"
-  | "evidence"
-  | "provenance"
-  | "ask"
-  | "shares";
+import {
+  DEFAULT_VIEW,
+  FASCICOLO_VIEWS,
+  type View,
+  parseView,
+  viewKeys,
+} from "@/lib/fascicoloViews";
 
 interface Props {
   patient: Patient;
@@ -38,7 +34,7 @@ export default function FascicoloViewToggle({
   patient,
   isOwner = false,
   driveSlot,
-  initial = "drive",
+  initial = DEFAULT_VIEW,
 }: Props) {
   const [view, setView] = useState<View>(initial);
   const t = useTranslations("fascicolo.v3");
@@ -56,28 +52,14 @@ export default function FascicoloViewToggle({
   // React state still shows Documenti as the selected tab and the
   // panel below renders the wrong content.
   useEffect(() => {
-    const fromUrl = searchParams.get("view");
-    if (
-      fromUrl === "events" ||
-      fromUrl === "tasks" ||
-      fromUrl === "calendar" ||
-      fromUrl === "documents" ||
-      fromUrl === "evidence" ||
-      fromUrl === "provenance" ||
-      fromUrl === "ask" ||
-      fromUrl === "shares"
-    ) {
-      setView(fromUrl);
-    } else {
-      setView("drive");
-    }
+    setView(parseView(searchParams.get("view")));
   }, [searchParams]);
 
   const setViewPersisted = useCallback(
     (next: View) => {
       setView(next);
       const params = new URLSearchParams(searchParams);
-      if (next === "drive") params.delete("view");
+      if (next === DEFAULT_VIEW) params.delete("view");
       else params.set("view", next);
       const qs = params.toString();
       // ``router.push`` (not ``replace``) so each tab change adds an
@@ -91,27 +73,12 @@ export default function FascicoloViewToggle({
     [router, pathname, searchParams],
   );
 
-  const VIEWS: { value: View; label: string; hint: string }[] = [
-    { value: "drive", label: t("tabDrive"), hint: t("hintDrive") },
-    { value: "events", label: t("tabEvents"), hint: t("hintEvents") },
-    // Tasks tab right after events: operational checklist lives
-    // alongside the clinical timeline. The merged view (events +
-    // tasks together) is reachable from either tab via the
-    // "Vista unificata" toggle (URL key ``merge=1``).
-    { value: "tasks", label: t("tabTasks"), hint: t("hintTasks") },
-    { value: "calendar", label: t("tabCalendar"), hint: t("hintCalendar") },
-    // Chiedi moved up to 4th: it's the entry-point the user reaches
-    // for natural-language Q&A on the record; keeping it after the
-    // primary clinical surfaces (drive/events/calendar) makes it
-    // findable without buried under audit/sharing tabs.
-    { value: "ask", label: t("tabAsk"), hint: t("hintAsk") },
-    { value: "documents", label: t("tabDocuments"), hint: t("hintDocuments") },
-    { value: "evidence", label: t("tabEvidence"), hint: t("hintEvidence") },
-    { value: "shares", label: t("tabShares"), hint: t("hintShares") },
-    // Provenance last: audit trail, lookup surface, almost always
-    // accessed last.
-    { value: "provenance", label: t("tabProvenance"), hint: t("hintProvenance") },
-  ];
+  // Order and i18n keys both come from ``FASCICOLO_VIEWS``; see that
+  // module for why each tab sits where it does.
+  const VIEWS = FASCICOLO_VIEWS.map((value) => {
+    const keys = viewKeys(value);
+    return { value, label: t(keys.tab), hint: t(keys.hint) };
+  });
 
   // Merged-view toggle: when ``?merge=1`` is present alongside
   // ``?view=events`` or ``?view=tasks``, render the MergedTimelineView

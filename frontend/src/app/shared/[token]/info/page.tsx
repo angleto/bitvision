@@ -254,7 +254,12 @@ export default function SharedInfoPage() {
   const expiresAt = info.expires_at ? new Date(info.expires_at) : null;
   const isExpired = expiresAt !== null && expiresAt.getTime() < Date.now();
   const noUsesLeft = info.uses_remaining !== null && info.uses_remaining <= 0;
-  const studyTitle = info.study_title || t("fallbackTitle");
+  // Patient-scoped shares carry no title: the backend withholds the
+  // patient name from this pre-auth endpoint on purpose, so fall back
+  // to a label that says what the link is without saying whose it is.
+  const studyTitle =
+    info.study_title ||
+    t(info.resource_kind === "patient" ? "fallbackTitleRecord" : "fallbackTitle");
   const grantor = info.grantor_display?.trim() || t("fallbackGrantor");
   const sizeSuffix = info.total_bytes != null ? ` · ${formatBytes(info.total_bytes)}` : "";
 

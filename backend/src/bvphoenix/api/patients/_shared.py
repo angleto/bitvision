@@ -735,11 +735,16 @@ class ContactDelegateIn(BaseModel):
         ),
     )
     autogen_password: bool = Field(
-        default=True,
+        default=False,
         description=(
-            "When true the server mints a high-entropy one-time password "
-            "and returns it on the response. The plaintext is never "
-            "stored — capture it once and deliver it OOB to the contact."
+            "Mint a high-entropy password for the LINK and return it once. "
+            "This is not an account password: it gates "
+            "``POST /api/shared/{token}/verify`` and nothing else, and it "
+            "must be delivered out of band because the invitation email "
+            "deliberately never carries it. Default false — a link "
+            "emailed to its addressee is already addressed, and adding a "
+            "second secret to hand over is what made operators believe "
+            "they had given the recipient a way to sign in."
         ),
     )
     password: str | None = Field(
@@ -747,16 +752,24 @@ class ContactDelegateIn(BaseModel):
         min_length=8,
         max_length=256,
         description=(
-            "Optional explicit password. Mutually exclusive with "
-            "``autogen_password``. Use only when the operator wants to "
-            "deliver a memorable phrase to a low-tech recipient."
+            "Explicit password for the LINK, same semantics and same "
+            "caveat as ``autogen_password``, with which it is mutually "
+            "exclusive. Use when a memorable phrase suits the recipient "
+            "better than a generated one."
         ),
     )
 
 
 class ContactDelegateOut(BaseModel):
-    """Response body — surfaces everything the operator needs to deliver
-    the magic link to the recipient out of band (email, SMS, in person).
+    """Response body — what the operator needs to get the recipient in.
+
+    The two ways in are genuinely different, and the response says which
+    one applies rather than leaving the UI to guess. When the contact's
+    address already belongs to an account
+    (``recipient_has_account=True``) the grant is attached to it and the
+    recipient simply logs in as they always have — the link is a
+    shortcut, not the way in. When it does not, the link is how they
+    create the account, and it is the only way in until they do.
     """
 
     contact_id: str
@@ -765,9 +778,18 @@ class ContactDelegateOut(BaseModel):
     delegation_share_link_token: str
     delegation_level: str
     expires_at: str | None
-    # Plaintext password — returned ONCE (autogen path) and never
-    # again. The frontend must surface it with a "copy" affordance and
-    # a clear "this won't be shown again" warning.
+    # True when an account already existed for the contact's address, so
+    # the grant went straight to it. The recipient logs in normally; the
+    # UI must not tell them to keep using the link.
+    recipient_has_account: bool = False
+    # The address the invitation is bound to, when the contact has one.
+    # ``None`` means the link is the only credential and cannot be
+    # emailed by ``POST /api/share-links/{id}/notify``.
+    recipient_email: str | None = None
+    # Plaintext password for the LINK — not an account password. It
+    # unlocks ``POST /api/shared/{token}/verify`` and nothing else;
+    # setting one does not give the recipient a way to sign in. Returned
+    # once, only when the caller asked for one, and never again.
     generated_password: str | None
     # Convenience for the operator: the URL to send the recipient.
     # Built off the same origin as the request so it works in both

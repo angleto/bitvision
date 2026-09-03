@@ -1251,7 +1251,8 @@
       "moveDialogSubmit": "Move here",
       "moveDialogSubmitInside": "Move here (inside this folder)",
       "moveDialogSubmitRoot": "Move to the record root"
-    }
+    },
+    "searchPlaceholder": "Search this health record"
   },
   "studyTags": {
     "sectionTitle": "Tags",
@@ -1402,6 +1403,7 @@
   "sharedLanding": {
     "brandTag": "bitvision phoenix · clinical share",
     "fallbackTitle": "Shared study",
+    "fallbackTitleRecord": "Patient health record",
     "loading": "Loading…",
     "linkInvalid": "This link may be expired, revoked or invalid. Reach out to whoever sent it to you.",
     "linkNoLongerValid": "This link is no longer valid.",
@@ -1889,7 +1891,14 @@
     "documentsAdded": "{n, plural, one {# document added} other {# documents added}}",
     "instancesNew": "{n, plural, one {# new DICOM instance} other {# new DICOM instances}}",
     "instancesExisting": " · {n} already present",
-    "studiesCreated": "{n, plural, one {# study created} other {# studies created}}"
+    "studiesCreated": "{n, plural, one {# study created} other {# studies created}}",
+    "destFolder": "Uploading into this folder",
+    "destRoot": "Uploading into the health record",
+    "summaryFiles": "{n, plural, one {# file} other {# files}} · {mib} MiB",
+    "noFilesQueued": "No files selected yet.",
+    "removeAria": "Remove {name} from the upload",
+    "andMore": "and {n, plural, one {# more file} other {# more files}}",
+    "interrupt": "Stop the upload"
   },
   "fascicoloSearch": {
     "kindStudies": "Studies",
@@ -2367,14 +2376,23 @@
       "submitting": "Creating…",
       "cancel": "Cancel",
       "successTitle": "Delegation created",
-      "successIntro": "Send these two pieces of information to the recipient via a secure channel (in person, encrypted email, signed messaging). The password is shown only once.",
       "shareUrlLabel": "Magic link",
-      "passwordLabel": "One-time password",
-      "passwordOnceWarning": "This password will not be shown again. Capture it now.",
       "copy": "Copy",
       "copied": "Copied",
       "successClose": "Done",
-      "errorGeneric": "Operation failed. Please retry."
+      "errorGeneric": "Operation failed. Please retry.",
+      "sendEmailLabel": "Send the invitation to {email}",
+      "sendEmailHint": "They receive a link to open the health record. Leave this on unless you plan to hand the link over yourself.",
+      "linkPasswordLabel": "Also protect the link with a password",
+      "linkPasswordHint": "This password unlocks the link, not an account: it does not give this person a way to sign in. It is never included in the email, so you have to pass it on by other means. Only useful when the link may end up somewhere you did not intend.",
+      "noEmailHint": "This contact has no email address, so the invitation cannot be sent for you. The link below is protected with a password: pass both on in person or over a channel you trust.",
+      "successExistingAccount": "Done. {email} already has an account on this platform, so the health record is now simply there when they sign in as usual. They do not need the link.",
+      "successNewAccount": "Done. {email} does not have an account yet. The link below is how they create one; until they do, it is the only way in. Once they have registered and confirmed that address, the health record appears in their account on its own.",
+      "emailSent": "Invitation sent to {email}.",
+      "emailQueued": "The invitation to {email} has not gone out yet and will be retried automatically. Send them the link below if it is urgent.",
+      "emailFailed": "The invitation to {email} could not be sent. Pass on the link below yourself.",
+      "linkPasswordResultLabel": "Link password",
+      "linkPasswordResultWarning": "Shown once, and never again. This unlocks the link only: it is not a password for signing in."
     },
     "btnSharingMenu": "Sharing",
     "btnSharingMenuTitle": "Create, manage and configure record sharing",
@@ -2383,7 +2401,20 @@
     "btnSharingManage": "Manage active shares",
     "btnSharingManageHint": "Inspect, revoke, extend, or resend the links emitted on this record",
     "btnSharingAi": "Personal AI assistants",
-    "btnSharingAiHint": "Decide which of your AI assistants can read this record via MCP"
+    "btnSharingAiHint": "Decide which of your AI assistants can read this record via MCP",
+    "contactDuplicateEmail": "Two contacts share the address {email}. One address belongs to one person: the platform uses it to identify who a delegation gives access to, where reminders are sent, and who an unsubscribe link belongs to. Remove one of the two, or leave one with a phone number only.",
+    "contactDelete": {
+      "action": "Remove",
+      "title": "Remove {name} from the contacts",
+      "dialogTitle": "Remove {name}?",
+      "plainIntro": "The contact is removed from this health record. Nothing else changes, and you can add them again later.",
+      "delegatedWarning": "{name} currently has access to this health record. Removing the contact also revokes that access: they will no longer be able to open the record, and any link sent to them stops working. Their account, if they have one, is untouched.",
+      "cancel": "Cancel",
+      "confirm": "Remove",
+      "confirmWithRevoke": "Remove and revoke access",
+      "submitting": "Removing…",
+      "errorGeneric": "The contact could not be removed. Try again."
+    }
   },
   "upload": {
     "pageTitle": "Upload",
@@ -2507,7 +2538,13 @@
     "mfaVerify": "Verify",
     "mfaUseDifferentAccount": "Use different account",
     "errorInvalidTotp": "invalid TOTP code",
-    "errorGeneric": "login failed"
+    "errorGeneric": "login failed",
+    "verifyRequiredTitle": "Confirm your email address to continue",
+    "verifyRequiredBody": "The password is correct. The account for {email} still needs its address confirmed before you can sign in. Look for the confirmation email, including in spam.",
+    "verifyResendAction": "Send the confirmation email again",
+    "verifyResendSending": "Sending…",
+    "verifyResendDone": "If an account exists for {email}, the confirmation email is on its way. The link is valid for 24 hours.",
+    "verifyBack": "Back to sign in"
   },
   "aiShare": {
     "pageTitle": "My AI assistants",
@@ -3668,5 +3705,11 @@
     "copyVersion": "Copy the version number",
     "copySha": "Copy the commit SHA",
     "loadError": "Could not load build info: {detail}"
+  },
+  "offline": {
+    "title": "No connection",
+    "body": "The health record could not be loaded because the device is offline. Everything is still there; it just needs a connection to reach it.",
+    "why": "Nothing clinical is kept on the device on purpose: a phone that is lost or shared should not carry a copy of anyone’s record.",
+    "retry": "Try again"
   }
 }
