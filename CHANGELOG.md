@@ -153,6 +153,24 @@ ships with it:
   `calendar`, `ask` and `shares`, so a deep link to any of those rendered
   the Drive pane on first paint and flipped once the sync effect ran.
 
+### A 2.3% flake on the release gate, removed
+
+The search relevance gate went red once on the v4.4.118 tag and passed
+on re-run. Not a regression: `test_search.py` drew its marker as
+`uuid4().hex[:8]`, which is all digits 2.3% of the time — exactly
+`(10/16)**8`, and measured at 2.32% over 200k draws. When it is,
+`to_tsvector` reads `embedded-12345678` as the negative integer
+`-12345678` instead of `embedded` plus `12345678`, so a query for the
+marker matches neither study, both drop out of the result, and the
+assertion fails on a `KeyError` that reads like a visibility or indexing
+bug. Verified against the exact generated-column expression
+(`to_tsvector('italian', …) || to_tsvector('simple', …)`).
+
+Markers now come from one helper that guarantees a leading letter, so
+the case is unrepresentable rather than unlikely. One test already
+carried a `zz` prefix — the same fix, applied once and never
+generalised. Test-only: the tagged images are unaffected.
+
 ### Deployment
 
 **This release needs a two-stage migration.** `0048` goes before the pod

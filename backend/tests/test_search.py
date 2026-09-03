@@ -59,6 +59,24 @@ async def _client_for(session, user=None) -> AsyncClient:
     return AsyncClient(transport=transport, base_url="http://test")
 
 
+def _marker(n: int = 8) -> str:
+    """A random token Postgres is guaranteed to tokenise as a word.
+
+    ``uuid4().hex[:8]`` comes out all digits 2.3% of the time — measured,
+    and exactly ``(10/16)**8``. When it does, ``to_tsvector`` reads
+    ``embedded-12345678`` as the negative integer ``-12345678`` rather
+    than as ``embedded`` plus ``12345678``, so ``plainto_tsquery`` on the
+    marker matches nothing, BOTH studies drop out of the result, and the
+    assertion fails on a KeyError that reads like a visibility or
+    indexing bug. It cost a release gate one red run.
+
+    A leading letter removes the case for good. The ``zz`` prefix one of
+    the tests below already carried was this same fix, applied once and
+    never generalised.
+    """
+    return f"zz{uuid.uuid4().hex[:n]}"
+
+
 # ---- Full-text search ------------------------------------------------------
 
 
@@ -377,7 +395,7 @@ async def test_similar_to_scope_narrows_mine_vs_shared(
         v = rng.standard_normal(512).astype(np.float32)
         return (v / np.linalg.norm(v)).tolist()
 
-    tag = uuid.uuid4().hex[:8]
+    tag = _marker()
     _, source = await make_study(user_a, description=f"src-{tag}", is_public=False)
     await make_embedding(source, vector=_vec())
     _, own = await make_study(user_a, description=f"A-own-{tag}", is_public=False)
@@ -429,7 +447,7 @@ async def test_search_include_index_status_flags_embedded(
     True iff the study has an embedded image series. Without the opt-in
     param the flag stays None (the general search path computes nothing)."""
     user = await make_user()
-    marker = uuid.uuid4().hex[:8]
+    marker = _marker()
     study_yes, series_yes = await make_study(user, description=f"embedded-{marker}")
     study_no, _series_no = await make_study(user, description=f"bare-{marker}")
     await make_embedding(series_yes)
@@ -582,7 +600,7 @@ async def test_patient_search_maps_authority_to_section(db_session, make_user, m
     """``original`` / ``derived`` -> reports section; ``canonical_synthesis``
     -> consultations section; ``stale`` rows are excluded from both."""
     user = await make_user()
-    token = f"zz{uuid.uuid4().hex[:8]}"
+    token = _marker()
     study, _ = await make_study(user, description="rmn encefalo")
     report_id = await _add_report_content(
         db_session,
@@ -638,7 +656,7 @@ async def test_search_italian_stemming(db_session, make_user, make_study) -> Non
     singular description ("polmoni" -> "polmone", both stem "polmon").
     The old ``simple``-only index could not do this."""
     user = await make_user()
-    marker = uuid.uuid4().hex[:6]
+    marker = _marker(6)
     await make_study(user, description=f"Nodulo al polmone destro {marker}")
     client = await _client_for(db_session, user)
     try:
@@ -656,7 +674,7 @@ async def test_search_acronym_exact_token(db_session, make_user, make_study) -> 
     """The ``simple`` half of the dual config preserves exact radiology
     acronyms that an Italian stemmer would otherwise mangle."""
     user = await make_user()
-    marker = uuid.uuid4().hex[:6]
+    marker = _marker(6)
     await make_study(user, description=f"Sequenza T2 FLAIR encefalo {marker}")
     client = await _client_for(db_session, user)
     try:
