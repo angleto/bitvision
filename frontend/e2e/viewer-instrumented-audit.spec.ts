@@ -14,6 +14,8 @@
 //   BVP_AUDIT_TOKEN=<JWT for an account that can read the study>
 //   BVP_AUDIT_STUDY_ID=<uuid tagged audit:viewer>
 //   BVP_AUDIT_SERIES_ID=<uuid>            (optional — force a series)
+//   BVP_AUDIT_LIVER_STUDY_ID=<uuid>       (optional — the 4-phase liver study
+//                                          the radiological gate tests need)
 //
 // Run:
 //   E2E_USE_REAL_BACKEND=1 E2E_BASE_URL=https://bitvision.xeno.garden \
@@ -34,12 +36,13 @@ const STUDY_ID = process.env.BVP_AUDIT_STUDY_ID;
 const BASE_URL = process.env.E2E_BASE_URL;
 const FORCE_SERIES = process.env.BVP_AUDIT_SERIES_ID;
 
-// Radiological-test fixtures for the 4-phase liver study 4f1a9b27. World LPS
+// Radiological-test fixtures for the 4-phase liver study in
+// BVP_AUDIT_LIVER_STUDY_ID (its id is not committed). World LPS
 // points VERIFIED via MCP compute_phase_washout: the lesion point samples
 // classic liver parenchyma (unenhanced ≈54 → arterial ≈73 → portal ≈107 →
 // delayed ≈82 HU) and is covered by all 4 phases; the out-of-overlap point sits
 // above the shorter phases' (arterial/delayed) z-extent.
-const LIVER_STUDY = "4f1a9b27-0000-4000-8000-0000000000b2";
+const LIVER_STUDY = process.env.BVP_AUDIT_LIVER_STUDY_ID;
 const LIVER_LESION: [number, number, number] = [-55, -45, -280];
 const LIVER_PARENCHYMA: [number, number, number] = [-72, -48, -282];
 const OUT_OF_OVERLAP: [number, number, number] = [-55, -45, -150];
@@ -391,13 +394,13 @@ test.describe("Viewer instrumented audit", () => {
     }
   });
 
-  // ─── Radiological gate tests (study 4f1a9b27) ──────────────────────────────
+  // ─── Radiological gate tests (BVP_AUDIT_LIVER_STUDY_ID) ──────────────────────────────
   // These exercise the REAL workflow a radiologist needs: get the same liver
   // slice on all 4 phases (no black panes), then measure wash-out on a liver
   // ROI. They must PASS before the contrast viewer is considered working.
 
   test("radiological — 4-phase liver sync (no black panes)", async ({ page }) => {
-    test.skip(STUDY_ID !== LIVER_STUDY, "Liver world points are specific to study 4f1a9b27.");
+    test.skip(STUDY_ID !== LIVER_STUDY, "Set BVP_AUDIT_LIVER_STUDY_ID to the 4-phase liver study these world points belong to.");
     emit("\n## Radiological — 4-phase liver sync\n");
     await page.setViewportSize({ width: 1600, height: 1000 });
     await page.goto(`${BASE_URL}/viewer/contrast?study=${STUDY_ID}`, {
@@ -567,7 +570,7 @@ test.describe("Viewer instrumented audit", () => {
   });
 
   test("radiological — liver wash-out measurement", async ({ request }) => {
-    test.skip(STUDY_ID !== LIVER_STUDY, "Liver world points are specific to study 4f1a9b27.");
+    test.skip(STUDY_ID !== LIVER_STUDY, "Set BVP_AUDIT_LIVER_STUDY_ID to the 4-phase liver study these world points belong to.");
     emit("\n## Radiological — liver wash-out\n");
 
     // The wash-out is a BACKEND radiological computation. The viewer's
@@ -640,7 +643,7 @@ test.describe("Viewer instrumented audit", () => {
   });
 
   test("usability — viewer chrome is legible in light mode", async ({ page }) => {
-    test.skip(STUDY_ID !== LIVER_STUDY, "Uses the contrast viewer of study 4f1a9b27.");
+    test.skip(STUDY_ID !== LIVER_STUDY, "Set BVP_AUDIT_LIVER_STUDY_ID to the 4-phase liver study.");
     emit("\n## Usability — light-mode chrome contrast\n");
 
     // The default app theme is light (bv-theme). The viewer chrome is

@@ -282,7 +282,7 @@ File: `frontend/app/patients/[id]/care-phases/[slug]/page.tsx` — header (name,
 - `backend/tests/test_care_phases_model.py` — model + composite FK rejection (insert event with phase of other patient → IntegrityError).
 - `backend/tests/test_api_care_phases.py` — CRUD, ETag conflict 412, propose+apply flow, reorder, restore.
 - `backend/tests/security/test_no_cross_patient.py` — every endpoint, every MCP tool: cross-patient combinations return 404.
-- `backend/tests/integration/test_classifier_canary.py` — golden test 7/7 against `backend/tests/fixtures/care_phases/canary_patient_expected.json`.
+- `backend/tests/integration/test_classifier_canary.py` — golden test 7/7 against the real-patient expected timeline, read from `CANARY_EXPECTED_PATH` (kept outside the repository: it is health data).
 
 ### 9.2 MCP tests
 
@@ -333,7 +333,7 @@ Each item is checked off as it lands. No item is dropped or deferred.
 - [x] `backend/src/bvphoenix/services/care_phase_classifier_schema.py` JSON schema (Pydantic + JSON_SCHEMA_FOR_PROMPT injected verbatim into the prompt)
 - [x] `backend/src/bvphoenix/services/care_phase_classifier.py` with single-stage prompt + draft+verifier escalation (`use_verifier=True` default)
 - [x] Cache via `input_hash` and `care_phase_proposal` lookup (TTL 7 days)
-- [x] Golden fixture `backend/tests/fixtures/care_phases/canary_patient_expected.json` (7 phases, 18 events)
+- [x] Synthetic fixture `backend/tests/fixtures/care_phases/synthetic_timeline_expected.json` (7 phases, 18 events) for the FakeLLM E2E; the real-patient golden lives outside the repository (`CANARY_EXPECTED_PATH`)
 - [x] Test scaffolding `backend/tests/integration/test_classifier_canary.py` enforces 7/7 acceptance bar; auto-skipped when `BVP_LLM_PROVIDER=stub`
 - [x] **FakeLLM-driven 7/7 E2E** (`backend/tests/integration/test_care_phase_e2e_no_anthropic.py`) — runs the full pipeline (propose → apply → 7 phases persisted with correct event-to-phase assignment) against the live FastAPI app via `httpx.ASGITransport`, no Anthropic key required; canary for the real-API run when the key is available
 - [x] Worker integration: arq task `propose_care_phases` registered in `workers/src/bvworkers/tasks/registry.py`; backend endpoint accepts `?async=true` to enqueue and return a `status="queued"` envelope with `job_id` for `/api/jobs/{id}` polling

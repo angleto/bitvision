@@ -9,6 +9,7 @@ The test is automatically skipped when the configured LLM provider is
 not produce structured output. To run the real evaluation:
 
     BVP_LLM_PROVIDER=anthropic ANTHROPIC_API_KEY=... \\
+    CANARY_PATIENT_ID=<uuid> CANARY_EXPECTED_PATH=<path outside the repo> \\
       uv run pytest tests/integration/test_classifier_canary.py -q
 
 If the test fails:
@@ -42,16 +43,22 @@ from bvphoenix.config import get_settings
 from bvphoenix.db.models import ClinicalEvent, Patient
 from bvphoenix.services.care_phase_classifier import propose_for_patient
 
-_FIXTURE = (
-    Path(__file__).resolve().parents[1]
-    / "fixtures"
-    / "care_phases"
-    / "canary_patient_expected.json"
-)
-
 
 def _load_expected() -> dict[str, Any]:
-    return json.loads(_FIXTURE.read_text())
+    """Read the real-patient golden from outside the repository.
+
+    The expected timeline of a real patient is health data, so it never
+    lives in the (public) repository: ``CANARY_EXPECTED_PATH`` points at it
+    on the machine that holds the matching database. Same schema as
+    ``tests/fixtures/care_phases/synthetic_timeline_expected.json``.
+    """
+    raw = os.environ.get("CANARY_EXPECTED_PATH")
+    if not raw:
+        pytest.skip("set CANARY_EXPECTED_PATH to the real-patient golden JSON")
+    path = Path(raw).expanduser()
+    if not path.is_file():
+        pytest.skip(f"CANARY_EXPECTED_PATH does not point at a file: {path}")
+    return json.loads(path.read_text())
 
 
 pytestmark = pytest.mark.skipif(

@@ -3,7 +3,7 @@
 Exercises every endpoint that the MCP tools in
 ``mcp/src/bvmcp/tools/care_phases.py`` wrap, against the live FastAPI
 app via ``httpx.ASGITransport`` (no socket). The classifier is
-swapped for a ``FakeLLM`` that returns the Patient X golden JSON
+swapped for a ``FakeLLM`` that returns the synthetic timeline JSON
 deterministically, so we get the 7/7-equivalent acceptance bar
 without leaving the dev box.
 
@@ -63,7 +63,7 @@ _FIXTURE = (
     Path(__file__).resolve().parents[1]
     / "fixtures"
     / "care_phases"
-    / "canary_patient_expected.json"
+    / "synthetic_timeline_expected.json"
 )
 
 

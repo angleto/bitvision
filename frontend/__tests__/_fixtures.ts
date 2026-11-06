@@ -1,8 +1,6 @@
-// Shared test fixtures. The Patient X-timeline structure is
-// the canonical golden case used by both backend (classifier 7/7
-// golden test) and frontend tests; the slugs and ordering MUST stay
-// in sync with ``backend/tests/fixtures/care_phases/canary_patient_expected.json``
-// when the backend fixture lands.
+// Shared test fixtures. The synthetic 7-phase timeline is shared with the
+// backend FakeLLM end-to-end test; the slugs and ordering MUST stay in sync
+// with ``backend/tests/fixtures/care_phases/synthetic_timeline_expected.json``.
 
 import type { CarePhaseDetail, CareTimeline, TimelineEvent } from "@/lib/api_records";
 

@@ -1,13 +1,10 @@
 {
   "_comment": [
-    "Hand-curated ground truth for the care-phase classifier on patient",
-    "Patient X (canary). Mirrors the manually-drawn timeline in",
-    "local reference SVG (not committed). The classifier output is",
-    "compared against this fixture verbatim: the test fails on any",
-    "divergence in slug or in event-to-phase assignment. Acceptance bar",
-    "is 100% (7/7 phases, every event in the right phase). See",
-    "docs/care-timeline-phases.md section 5.2 for the escalation strategy",
-    "if a single LLM stage cannot reach 100%."
+    "SYNTHETIC care timeline: 7 phases, 18 events, no real patient.",
+    "It drives the FakeLLM end-to-end test and mirrors the frontend",
+    "fixtures (frontend/__tests__/_fixtures.ts). The real-patient golden",
+    "for the classifier is NOT in this repository: test_classifier_canary.py",
+    "reads it from the path in CANARY_EXPECTED_PATH, same schema as this file."
   ],
   "phases": [
     {
